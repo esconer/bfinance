@@ -28,7 +28,7 @@ from .utils.exceptions import (
 
 ratios = ScreenerRatioSearch()
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "bfinance contributors"
 
 __all__ = [

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bfinance"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-performance Python SDK for Indian equities (NSE & BSE) — a 1:1 drop-in replacement for yfinance supercharged with 10-year financials, concalls, and live market microstructure."
 readme = "README.md"
 license = { text = "MIT" }
