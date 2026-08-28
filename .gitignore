@@ -57,5 +57,3 @@ exports/
 *.xlsx
 *.mp3
 *.pdf
-compare_tools.py
-generate_exports.py
