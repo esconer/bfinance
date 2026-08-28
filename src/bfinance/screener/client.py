@@ -181,7 +181,9 @@ class ScreenerClient:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 try:
-                    return CompanyProfile.model_validate(cached)
+                    p = CompanyProfile.model_validate(cached)
+                    if p.ratios.current_price is not None or p.ratios.market_cap is not None:
+                        return p
                 except Exception:
                     pass
 
@@ -225,6 +227,25 @@ class ScreenerClient:
             is_consolidated=is_consolidated,
             page_url=final_url,
         )
+
+        # 4b. Standalone fallback if consolidated page lacks ratios (e.g. IRFC, BSE, standalone entities)
+        if is_consolidated and (profile.ratios.current_price is None or profile.ratios.market_cap is None):
+            try:
+                st_url = f"{self.BASE_URL}/company/{symbol}/"
+                st_resp = await self._send_with_retry(st_url)
+                if st_resp.status_code == 200:
+                    st_profile = self.parser.parse_full_profile(
+                        symbol=symbol,
+                        company_id=comp_id or 0,
+                        main_html=st_resp.text,
+                        peers_html=peers_html,
+                        is_consolidated=False,
+                        page_url=str(st_resp.url),
+                    )
+                    if st_profile.ratios.current_price is not None or st_profile.ratios.market_cap is not None:
+                        profile = st_profile
+            except Exception as e:
+                logger.debug("Failed standalone fallback for %s: %s", symbol, e)
 
         # Cache profile
         if self.cache:
