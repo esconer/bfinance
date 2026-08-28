@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bfinance"
+version = "0.1.0"
+description = "High-performance Python SDK for Indian equities (NSE & BSE) — a 1:1 drop-in replacement for yfinance supercharged with 10-year financials, concalls, and live market microstructure."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "bfinance contributors", email = "community@bfinance.org" }
+]
+requires-python = ">=3.10"
+keywords = [
+    "finance", "stock-market", "nse", "bse", "indian-stocks", "screener",
+    "yfinance", "options", "derivatives", "quantitative-finance", "investing"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = [
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.7.0",
+    "lxml>=5.2.0",
+    "openpyxl>=3.1.0",
+    "tabulate>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
+    "yfinance>=1.7.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bfinance"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --asyncio-mode=auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
