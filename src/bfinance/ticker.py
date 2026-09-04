@@ -37,6 +37,8 @@ class Ticker:
         session: Optional[Any] = None,
         raise_errors: bool = False,
     ):
+        if not isinstance(ticker, str) or not ticker.strip():
+            raise ValueError("ticker must be a non-empty string")
         self.ticker = ticker.strip()
         self.exchange, self.symbol = resolve_exchange_and_symbol(self.ticker)
         self.raise_errors = raise_errors
@@ -112,14 +114,15 @@ class Ticker:
         if self._fast_info is None:
             profile = self._ensure_profile()
             latest_p = profile.ratios.current_price
-            if not latest_p or latest_p <= 0:
-                try:
-                    hist = self.history(period="5d")
-                    if not hist.empty and "Close" in hist.columns:
-                        latest_p = float(hist["Close"].iloc[-1])
-                except Exception:
-                    pass
-            self._fast_info = FastInfo(profile, latest_price=latest_p)
+            hist = None
+            try:
+                # One cached 1y frame feeds prev-close + 50/200d averages; no extra fan-out.
+                hist = self.history(period="1y")
+                if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
+                    latest_p = float(hist["Close"].iloc[-1])
+            except Exception:
+                hist = None
+            self._fast_info = FastInfo(profile, latest_price=latest_p, history=hist)
         return self._fast_info
 
     @property
@@ -130,14 +133,14 @@ class Ticker:
         if self._info is None:
             profile = self._ensure_profile()
             latest_p = profile.ratios.current_price
-            if not latest_p or latest_p <= 0:
-                try:
-                    hist = self.history(period="5d")
-                    if not hist.empty and "Close" in hist.columns:
-                        latest_p = float(hist["Close"].iloc[-1])
-                except Exception:
-                    pass
-            self._info = QuoteEngine.build_info_dict(profile, latest_price=latest_p)
+            hist = None
+            try:
+                hist = self.history(period="1y")
+                if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
+                    latest_p = float(hist["Close"].iloc[-1])
+            except Exception:
+                hist = None
+            self._info = QuoteEngine.build_info_dict(profile, latest_price=latest_p, history=hist)
         return self._info
 
     def history(
@@ -221,6 +224,8 @@ class Ticker:
         """Fetch income statement matching yfinance `get_income_stmt()`."""
         profile = self._ensure_profile()
         table = profile.quarters if freq.lower() == "quarterly" else profile.profit_loss
+        if freq.lower() == "quarterly" and table.empty:
+            raise NotImplementedError("quarterly statements not supported")
         df = table.to_dataframe(orient="columns")
         if as_dict:
             return df.to_dict()
@@ -230,6 +235,8 @@ class Ticker:
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
         """Fetch balance sheet matching yfinance `get_balance_sheet()`."""
+        if (freq or "yearly").lower() != "yearly":
+            raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
         df = profile.balance_sheet.to_dataframe(orient="columns")
         if as_dict:
@@ -240,6 +247,8 @@ class Ticker:
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
         """Fetch cash flow statement matching yfinance `get_cash_flow()`."""
+        if (freq or "yearly").lower() != "yearly":
+            raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
         df = profile.cash_flow.to_dataframe(orient="columns")
         if as_dict:
@@ -273,7 +282,7 @@ class Ticker:
     @property
     def ttm_income_stmt(self) -> pd.DataFrame:
         """TTM Income Statement."""
-        return self.get_income_stmt(freq="yearly")
+        raise NotImplementedError("quarterly statements not supported")
 
     @property
     def balance_sheet(self) -> pd.DataFrame:
@@ -308,7 +317,7 @@ class Ticker:
     @property
     def ttm_cash_flow(self) -> pd.DataFrame:
         """TTM Cash Flow Statement."""
-        return self.get_cash_flow(freq="yearly")
+        raise NotImplementedError("quarterly statements not supported")
 
     # --------------------------------------------------- Corporate Actions & Calendar
     @property
@@ -324,64 +333,70 @@ class Ticker:
         return CorporateActionsEngine.extract_splits(profile)
 
     @property
+    def actions(self) -> pd.DataFrame:
+        """Combined dividends/splits DataFrame matching yfinance `ticker.actions`."""
+        return CorporateActionsEngine.build_actions(self.dividends, self.splits)
+
+    @property
+    def capital_gains(self) -> pd.Series:
+        """Capital gains series matching yfinance (empty for Indian equities)."""
+        return CorporateActionsEngine.build_capital_gains()
+
+    @property
     def calendar(self) -> Dict[str, Any]:
         """Upcoming earnings and corporate events calendar matching yfinance `ticker.calendar`."""
         profile = self._ensure_profile()
-        return {
-            "Earnings Date": ["N/A"],
-            "Earnings High": None,
-            "Earnings Low": None,
-            "Revenue High": None,
-            "Revenue Low": None,
-            "Dividend Date": None,
-            "Ex-Dividend Date": None,
-        }
+        return CorporateActionsEngine.build_calendar(profile, self.dividends)
 
     @property
-    def analyst_price_targets(self) -> Dict[str, Optional[float]]:
-        """Analyst price targets summary matching yfinance."""
-        cmp = self.info.get("currentPrice") or 100.0
-        return {
-            "current": cmp,
-            "low": round(cmp * 0.85, 2),
-            "high": round(cmp * 1.35, 2),
-            "mean": round(cmp * 1.15, 2),
-            "median": round(cmp * 1.12, 2),
-        }
+    def analyst_price_targets(self) -> Optional[Dict[str, Optional[float]]]:
+        """Analyst price targets summary matching yfinance.
+
+        Upstream provides no analyst-estimates feed, so there is no honest
+        value to return. Previously this synthesized low/high/mean/median
+        from fixed multipliers off the current price — removed in 0.1.3.
+        Returns None until a real estimates source is integrated.
+        """
+        return None
 
     @property
     def options(self) -> Tuple[str, ...]:
-        """Upcoming NSE F&O monthly & weekly option expiry dates."""
-        return DerivativesEngine.get_upcoming_expiries()
+        """F&O expiry dates gated on real membership; () for non-F&O (yfinance 1.7.0)."""
+        return DerivativesEngine.resolve_options(self.ticker)
 
     def option_chain(self, date: Optional[str] = None) -> OptionChain:
         """
         Calls & Puts OptionChain container with Strikes, IV, OI, Volume.
+        Empty chain when underlying not F&O-gated (deterministic, no random data).
         """
+        if not self.options:
+            return DerivativesEngine.empty_option_chain()
         profile = self._ensure_profile()
-        cmp = profile.ratios.current_price or 100.0
+        cmp = profile.ratios.current_price
+        if not cmp or cmp <= 0:
+            raise UpstreamServiceError("current price unavailable for option chain")
         return DerivativesEngine.generate_option_chain(self.symbol, cmp=cmp, expiry_date=date)
 
     @property
     def major_holders(self) -> pd.DataFrame:
-        """Promoter, FII, DII, Public holding percentages."""
-        profile = self._ensure_profile()
-        sh = profile.shareholding
-        if not sh.headers:
-            return pd.DataFrame()
-        latest_period = sh.headers[-1]
-        data = []
-        for metric in ["Promoters", "FIIs", "DIIs", "Government", "Public"]:
-            val = sh.get_metric(metric).get(latest_period)
-            if val is not None:
-                data.append({"Category": metric, "HoldingPercent": f"{val}%"})
-        return pd.DataFrame(data)
+        """Major holders with float Value column matching yfinance (no percent-strings)."""
+        return CorporateActionsEngine.build_major_holders(self._ensure_profile())
 
     @property
-    def news(self) -> List[Dict[str, str]]:
-        """Latest corporate announcements and exchange filings."""
+    def institutional_holders(self) -> pd.DataFrame:
+        """Institutional holders (empty (0,0) for Indian equities, yfinance parity)."""
+        return CorporateActionsEngine.build_institutional_holders()
+
+    @property
+    def mutualfund_holders(self) -> pd.DataFrame:
+        """Mutual fund holders (empty (0,0) for Indian equities, yfinance parity)."""
+        return CorporateActionsEngine.build_mutualfund_holders()
+
+    @property
+    def news(self) -> List[Dict[str, Any]]:
+        """Latest announcements adapted to yfinance {id, content} news shape."""
         profile = self._ensure_profile()
-        return profile.announcements
+        return CorporateActionsEngine.build_news(profile.announcements)
 
     # ----------------------------------------------- Indian Superpower Properties
     @property
@@ -569,16 +584,46 @@ class Ticker:
         Key valuation metrics history table matching yfinance 1.3.0+ `ticker.valuation_measures`.
         """
         r = self.info
+        profile = self._ensure_profile()
+        mcap = r.get("marketCap") or 0.0
+        try:
+            bs = profile.balance_sheet.to_dataframe(orient="columns")
+        except Exception:
+            bs = pd.DataFrame()
+        try:
+            pnl = profile.profit_loss.to_dataframe(orient="columns")
+        except Exception:
+            pnl = pd.DataFrame()
+
+        def _latest(df: pd.DataFrame, row: str) -> Optional[float]:
+            try:
+                if df.empty or row not in df.index:
+                    return None
+                v = df.loc[row].iloc[-1]
+                if v is None or pd.isna(v):
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        borrow_cr = _latest(bs, "Borrowings") or 0.0
+        # No cash row in balance-sheet model; use 0.
+        cash_cr = 0.0
+        ev = mcap + borrow_cr * 1e7 - cash_cr * 1e7
+        rev_cr = _latest(pnl, "Sales")
+        op_cr = _latest(pnl, "Operating Profit")
+        ev_to_rev = ev / (rev_cr * 1e7) if rev_cr and rev_cr > 0 else None
+        ev_to_ebitda = ev / (op_cr * 1e7) if op_cr and op_cr > 0 else None
         metrics = {
             "MarketCap": r.get("marketCap"),
-            "EnterpriseValue": (r.get("marketCap") or 0.0) + 0.0,
+            "EnterpriseValue": ev,
             "TrailingPE": r.get("trailingPE"),
             "ForwardPE": r.get("forwardPE"),
             "PEG_Ratio": r.get("pegRatio"),
             "PriceToSales": r.get("priceToSales"),
             "PriceToBook": r.get("priceToBook"),
-            "EVToRevenue": None,
-            "EVToEBITDA": None,
+            "EVToRevenue": ev_to_rev,
+            "EVToEBITDA": ev_to_ebitda,
         }
         df = pd.DataFrame(list(metrics.items()), columns=["Metric", "Value"])
         return df

@@ -10,6 +10,18 @@ import pandas as pd
 from bfinance.models.company import CompanyProfile
 
 
+def _safe_markdown(df: Any, **kwargs: Any) -> str:
+    """Render DataFrame as markdown, falling back to plain text if tabulate is missing."""
+    try:
+        return df.to_markdown(**kwargs)
+    except ImportError:
+        try:
+            text = df.to_string(index=kwargs.get("index", True))
+        except Exception:
+            text = str(df)
+        return f"```\n{text}\n```"
+
+
 class AIContextBuilder:
     """
     Constructs comprehensive AI-ready context dossiers from CompanyProfile.
@@ -33,6 +45,10 @@ class AIContextBuilder:
             "balance_sheet", "cash_flow", "shareholding", "ratios",
             "cagrs", "analysis", "concalls", "peers", "documents"
         }
+        if include_sections is not None:
+            unknown = set(include_sections) - all_sections
+            if unknown:
+                raise ValueError(f"Unknown sections {sorted(unknown)}; valid: {sorted(all_sections)}")
         active = include_sections or all_sections
 
         lines: List[str] = []
@@ -55,7 +71,8 @@ class AIContextBuilder:
             lines.append(f"- **52-Week Range**: ₹{r.low_52w:,.2f} - ₹{r.high_52w:,.2f}" if r.low_52w and r.high_52w else "")
             lines.append(f"- **Stock P/E**: {r.stock_pe:.2f}x | **Book Value**: ₹{r.book_value:,.2f}" if r.stock_pe and r.book_value else "")
             lines.append(f"- **ROCE**: {r.roce:.2f}% | **ROE**: {r.roe:.2f}%" if r.roce and r.roe else "")
-            lines.append(f"- **Dividend Yield**: {r.dividend_yield:.2f}% | **Face Value**: ₹{r.face_value}" if r.dividend_yield is not None else "")
+            face_str = f"₹{r.face_value}" if r.face_value is not None else "N/A"
+            lines.append(f"- **Dividend Yield**: {r.dividend_yield:.2f}% | **Face Value**: {face_str}" if r.dividend_yield is not None else "")
             if r.debt_to_equity is not None:
                 lines.append(f"- **Debt to Equity**: {r.debt_to_equity:.2f}")
 
@@ -65,7 +82,7 @@ class AIContextBuilder:
             df_pnl = profile.profit_loss.to_dataframe(orient="columns")
             if not df_pnl.empty:
                 cols = list(df_pnl.columns)[-max_years:]
-                lines.append(df_pnl[cols].to_markdown())
+                lines.append(_safe_markdown(df_pnl[cols]))
 
         # 4. Quarterly Results
         if "quarters" in active and not profile.quarters.empty:
@@ -73,7 +90,7 @@ class AIContextBuilder:
             df_q = profile.quarters.to_dataframe(orient="columns")
             if not df_q.empty:
                 cols = list(df_q.columns)[-max_quarters:]
-                lines.append(df_q[cols].to_markdown())
+                lines.append(_safe_markdown(df_q[cols]))
 
         # 5. Balance Sheet
         if "balance_sheet" in active and not profile.balance_sheet.empty:
@@ -81,7 +98,7 @@ class AIContextBuilder:
             df_bs = profile.balance_sheet.to_dataframe(orient="columns")
             if not df_bs.empty:
                 cols = list(df_bs.columns)[-max_years:]
-                lines.append(df_bs[cols].to_markdown())
+                lines.append(_safe_markdown(df_bs[cols]))
 
         # 6. Cash Flow Statement
         if "cash_flow" in active and not profile.cash_flow.empty:
@@ -89,7 +106,7 @@ class AIContextBuilder:
             df_cf = profile.cash_flow.to_dataframe(orient="columns")
             if not df_cf.empty:
                 cols = list(df_cf.columns)[-max_years:]
-                lines.append(df_cf[cols].to_markdown())
+                lines.append(_safe_markdown(df_cf[cols]))
 
         # 7. Shareholding Pattern Trends
         if "shareholding" in active:
@@ -97,19 +114,19 @@ class AIContextBuilder:
             df_sh = profile.shareholding.to_dataframe(orient="columns")
             if not df_sh.empty:
                 lines.append("### Quarterly Trend (Recent Quarters)")
-                lines.append(df_sh.iloc[:, -6:].to_markdown())
+                lines.append(_safe_markdown(df_sh.iloc[:, -6:]))
 
             df_shy = profile.shareholding_yearly.to_dataframe(orient="columns")
             if not df_shy.empty:
                 lines.append("\n### 10-Year Annual Trend")
-                lines.append(df_shy.iloc[:, -6:].to_markdown())
+                lines.append(_safe_markdown(df_shy.iloc[:, -6:]))
 
         # 8. Operating Ratios History
         if "ratios" in active and not profile.ratios_history.empty:
             lines.append("\n## Historical Operating Ratios & Efficiency Metrics")
             df_rh = profile.ratios_history.to_dataframe(orient="columns")
             if not df_rh.empty:
-                lines.append(df_rh.iloc[:, -max_years:].to_markdown())
+                lines.append(_safe_markdown(df_rh.iloc[:, -max_years:]))
 
         # 9. Compounded CAGRs
         if "cagrs" in active and profile.cagrs:
@@ -144,7 +161,7 @@ class AIContextBuilder:
             df_peers = profile.peers_dataframe()
             if not df_peers.empty:
                 peer_cols = [c for c in ["rank", "name", "cmp", "pe", "market_cap_cr", "roce", "dividend_yield"] if c in df_peers.columns]
-                lines.append(df_peers[peer_cols].head(8).to_markdown(index=False))
+                lines.append(_safe_markdown(df_peers[peer_cols].head(8), index=False))
 
         return "\n".join([line for line in lines if line.strip() != ""])
 

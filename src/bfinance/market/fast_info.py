@@ -3,9 +3,9 @@ FastInfo container matching yfinance 0.2+ FastInfo interface.
 Provides fast, lightweight scalar properties without heavy scraping.
 """
 
-from typing import Optional
+from typing import Any, Optional
 from bfinance.models.company import CompanyProfile
-from bfinance.utils.symbols import format_yf_ticker
+from bfinance.market.quotes import moving_average, previous_close_from_history, resolve_exchange
 
 
 class FastInfo:
@@ -14,10 +14,13 @@ class FastInfo:
     Matches yfinance `ticker.fast_info` attributes.
     """
 
-    def __init__(self, profile: CompanyProfile, latest_price: Optional[float] = None):
+    def __init__(self, profile: CompanyProfile, latest_price: Optional[float] = None,
+                 history: Any = None):
         self._profile = profile
         self._r = profile.ratios
         self._cmp = self._r.current_price or latest_price or 0.0
+        # Already-fetched chart/history series; no extra network fan-out.
+        self._history = history
 
     @property
     def currency(self) -> str:
@@ -25,7 +28,7 @@ class FastInfo:
 
     @property
     def exchange(self) -> str:
-        return "NSE"
+        return resolve_exchange(self._profile.symbol or "")
 
     @property
     def timezone(self) -> str:
@@ -51,20 +54,41 @@ class FastInfo:
         return self._cmp
 
     @property
-    def previous_close(self) -> float:
-        return round(self._cmp * 0.995, 2)
+    def regular_market_price(self) -> float:
+        """yfinance alias for last_price (finengine reads this as fallback)."""
+        return self._cmp
 
     @property
-    def open(self) -> float:
-        return round(self._cmp * 0.998, 2)
+    def last_volume(self) -> Optional[int]:
+        # Volume only from DataFrame history; None otherwise (honestly unavailable).
+        try:
+            import pandas as pd
+
+            if self._history is None or not isinstance(self._history, pd.DataFrame):
+                return None
+            if "Volume" not in self._history.columns or len(self._history) == 0:
+                return None
+            return int(self._history["Volume"].iloc[-1])
+        except Exception:
+            return None
 
     @property
-    def day_high(self) -> float:
-        return round(self._cmp * 1.008, 2)
+    def previous_close(self) -> Optional[float]:
+        if self._history is None:
+            return None
+        return previous_close_from_history(self._history)
 
     @property
-    def day_low(self) -> float:
-        return round(self._cmp * 0.992, 2)
+    def open(self) -> Optional[float]:
+        return None  # intraday unavailable from EOD history
+
+    @property
+    def day_high(self) -> Optional[float]:
+        return None  # intraday unavailable from EOD history
+
+    @property
+    def day_low(self) -> Optional[float]:
+        return None  # intraday unavailable from EOD history
 
     @property
     def year_high(self) -> Optional[float]:
@@ -85,11 +109,15 @@ class FastInfo:
 
     @property
     def fifty_day_average(self) -> Optional[float]:
-        return round(self._cmp * 0.98, 2)
+        if self._history is None:
+            return None
+        return moving_average(self._history, 50)
 
     @property
     def two_hundred_day_average(self) -> Optional[float]:
-        return round(self._cmp * 0.94, 2)
+        if self._history is None:
+            return None
+        return moving_average(self._history, 200)
 
     def to_dict(self) -> dict:
         return {
@@ -98,6 +126,8 @@ class FastInfo:
             "timezone": self.timezone,
             "quote_type": self.quote_type,
             "last_price": self.last_price,
+            "regular_market_price": self.regular_market_price,
+            "last_volume": self.last_volume,
             "previous_close": self.previous_close,
             "open": self.open,
             "day_high": self.day_high,

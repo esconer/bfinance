@@ -19,8 +19,9 @@ def test_yfinance_fast_info():
     assert fi.quote_type == "EQUITY"
     assert fi.last_price > 0
     assert fi.previous_close > 0
-    assert fi.open > 0
-    assert fi.day_high >= fi.day_low
+    # Intraday open/high/low: honestly None from an EOD-only feed (never fabricated).
+    assert fi.open is None or fi.open > 0
+    assert fi.day_high is None or fi.day_low is None or fi.day_high >= fi.day_low
     assert fi.market_cap is not None and fi.market_cap > 1e11
     assert fi.year_high is not None
     assert fi.year_low is not None
@@ -54,7 +55,7 @@ def test_yfinance_info_schema():
 def test_yfinance_history_actions():
     """Verify ticker.history() with actions=True includes Dividends & Stock Splits."""
     t = Ticker("TCS")
-    df = t.history(period="6mo", actions=True)
+    df = t.history(period="6mo", actions=True, auto_adjust=False)
 
     assert isinstance(df, pd.DataFrame)
     assert not df.empty
@@ -105,9 +106,8 @@ def test_yfinance_calendar_and_targets():
     assert "Earnings Date" in cal
 
     targets = t.analyst_price_targets
-    assert isinstance(targets, dict)
-    assert "current" in targets
-    assert "mean" in targets
+    # No analyst feed upstream: honestly None (was fabricated from cmp x factors).
+    assert targets is None
 
 
 def test_yfinance_history_metadata_and_valuation():
@@ -163,22 +163,24 @@ def test_yfinance_corporate_actions():
 
 
 def test_yfinance_options_chain():
-    """Verify options chain expiries and calls/puts structure."""
+    """NSE parity: live yfinance 1.7.0 returns () for RELIANCE.NS — match it exactly."""
     t = Ticker("RELIANCE")
 
     expiries = t.options
     assert isinstance(expiries, tuple)
-    assert len(expiries) > 0
+    assert expiries == ()
 
-    chain = t.option_chain(expiries[0])
+    chain = t.option_chain()
     assert hasattr(chain, "calls")
     assert hasattr(chain, "puts")
-    assert isinstance(chain.calls, pd.DataFrame)
-    assert isinstance(chain.puts, pd.DataFrame)
-    assert "strike" in chain.calls.columns
-    assert "lastPrice" in chain.calls.columns
-    assert "impliedVolatility" in chain.calls.columns
-    assert "openInterest" in chain.calls.columns
+    assert chain.calls.empty and chain.puts.empty
+    expected_cols = [
+        "contractSymbol", "strike", "lastPrice", "bid", "ask", "change",
+        "percentChange", "volume", "openInterest", "impliedVolatility",
+        "inTheMoney", "contractSize", "currency",
+    ]
+    assert list(chain.calls.columns) == expected_cols
+    assert list(chain.puts.columns) == expected_cols
 
 
 def test_invalid_ticker_graceful_handling():

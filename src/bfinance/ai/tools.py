@@ -4,9 +4,21 @@ Agent Function Calling & Tool Specifications for OpenAI, Gemini, Anthropic, Lang
 
 from typing import Any, Callable, Dict, List, Optional
 import json
+import math
 from bfinance.ticker import Ticker
 from bfinance.screens import screens
 from bfinance.ai.context import AIContextBuilder
+
+
+def _sanitize_non_finite(obj: Any) -> Any:
+    """Replace NaN/Inf floats with None for valid JSON."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_non_finite(v) for v in obj]
+    return obj
 
 
 class BFinanceAITools:
@@ -69,25 +81,52 @@ class BFinanceAITools:
         ]
 
     @classmethod
-    def execute_tool(cls, name: str, arguments: Dict[str, Any]) -> str:
+    def execute_tool(cls, name: str, arguments: Dict[str, Any]) -> Any:
         """
         Execute an AI tool call and return serialized string output.
         """
-        if name == "get_stock_dossier":
-            symbol = arguments.get("symbol", "")
-            out_fmt = arguments.get("format", "markdown")
-            t = Ticker(symbol)
-            if out_fmt == "json":
-                return json.dumps(t.to_ai_context(format="json"), indent=2)
-            return t.to_ai_context(format="markdown")
+        try:
+            if name == "get_stock_dossier":
+                symbol = arguments.get("symbol", "")
+                if not isinstance(symbol, str) or not symbol.strip():
+                    raise ValueError("symbol must be a non-empty string")
+                out_fmt = arguments.get("format", "markdown")
+                if out_fmt not in ("json", "markdown"):
+                    raise ValueError("format must be 'json' or 'markdown'")
+                try:
+                    t = Ticker(symbol.strip())
+                    if out_fmt == "json":
+                        data = _sanitize_non_finite(t.to_ai_context(format="json"))
+                        return json.dumps(data, indent=2, allow_nan=False)
+                    return t.to_ai_context(format="markdown")
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    return {"error": str(exc)}
 
-        elif name == "run_institutional_screen":
-            screen_name = arguments.get("screen_name", "coffee_can")
-            max_stocks = arguments.get("max_stocks", 10)
-            screen_obj = getattr(screens, screen_name, None)
-            if not screen_obj:
-                return f"Error: Screen '{screen_name}' not found."
-            df = screen_obj.run(max_stocks=max_stocks)
-            return df.to_markdown(index=False)
+            elif name == "run_institutional_screen":
+                screen_name = arguments.get("screen_name", "coffee_can")
+                max_stocks = arguments.get("max_stocks", 10)
+                if isinstance(max_stocks, bool) or not isinstance(max_stocks, int):
+                    raise ValueError("max_stocks must be a positive int")
+                if max_stocks <= 0 or max_stocks > 500:
+                    raise ValueError("max_stocks must be between 1 and 500")
+                screen_obj = getattr(screens, screen_name, None)
+                if not screen_obj:
+                    return {"error": f"Screen '{screen_name}' not found."}
+                try:
+                    df = screen_obj.run(max_stocks=max_stocks)
+                except Exception as exc:
+                    return {"error": str(exc)}
+                try:
+                    return df.to_markdown(index=False)
+                except ImportError:
+                    return f"```\n{df.to_string(index=False)}\n```"
+                except Exception as exc:
+                    return {"error": str(exc)}
 
-        return f"Error: Unknown tool function '{name}'."
+            return {"error": f"Unknown tool function '{name}'."}
+        except ValueError:
+            raise
+        except Exception as exc:
+            return {"error": str(exc)}

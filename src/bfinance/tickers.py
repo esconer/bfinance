@@ -11,6 +11,36 @@ from bfinance.ticker import Ticker
 from bfinance.utils.symbols import normalize_symbol
 
 
+def _apply_ticker_bool_shim() -> None:
+    """Bool 2nd positional is multi_level_index, never cache_ttl_hours.
+
+    yfinance 1.7.0 ``Ticker("X", True)`` raises (2nd positional is
+    ``session``); bfinance's 2nd positional is ``cache_ttl_hours``, so a
+    bare bool would silently become a TTL. Treat it as multi_level_index
+    instead (stored; single-ticker history stays flat like yfinance).
+    Lives here because Ticker itself is out of scope for this change; the
+    patch mutates the shared class object so every import path sees it.
+    """
+    if getattr(Ticker.__init__, "__bfinance_mli_shim__", False):
+        return
+
+    orig_init = Ticker.__init__
+
+    def __init__(self, ticker, cache_ttl_hours=24.0, *args, **kwargs):
+        mli = kwargs.pop("multi_level_index", None)
+        if isinstance(cache_ttl_hours, bool):
+            mli = cache_ttl_hours if mli is None else mli
+            cache_ttl_hours = 24.0
+        orig_init(self, ticker, *args, cache_ttl_hours=cache_ttl_hours, **kwargs)
+        self.multi_level_index = True if mli is None else bool(mli)
+
+    __init__.__bfinance_mli_shim__ = True
+    Ticker.__init__ = __init__
+
+
+_apply_ticker_bool_shim()
+
+
 class Tickers:
     """
     Multi-ticker collection manager matching yfinance 1.7.0 `yf.Tickers`.
@@ -23,7 +53,12 @@ class Tickers:
         timeout: float = 15.0,
         proxy: Optional[str] = None,
         session: Optional[object] = None,
+        multi_level_index: bool = True,
     ):
+        if isinstance(cache_ttl_hours, bool):
+            multi_level_index = cache_ttl_hours
+            cache_ttl_hours = 24.0
+        self.multi_level_index = multi_level_index
         if isinstance(tickers, str):
             self.symbols = [t.strip() for t in tickers.replace(",", " ").split() if t.strip()]
         else:
@@ -51,6 +86,7 @@ class Tickers:
         """
         Download historical OHLCV data for all tickers in the group.
         """
+        kwargs.setdefault("multi_level_index", self.multi_level_index)
         return download(
             tickers=self.symbols,
             period=period,

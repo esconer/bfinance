@@ -6,12 +6,34 @@ import asyncio
 import logging
 import os
 import random
-import re
+import threading
 import time
 from typing import Any, Dict, List, Optional
 import httpx
 
 logger = logging.getLogger("bfinance")
+
+# Global pacing state shared across all client instances so concurrent
+# Ticker clients respect one rate limit instead of bursting N×.
+_GLOBAL_PACING_LOCK = threading.Lock()
+_GLOBAL_LAST_REQUEST_TIME = 0.0
+
+# Retry-After cap (seconds) so a malicious/huge header can't stall us.
+_MAX_RETRY_AFTER_SEC = 30.0
+
+
+def _parse_retry_after(resp: httpx.Response) -> Optional[float]:
+    """Parse Retry-After header (delta-seconds), capped; None if absent/invalid."""
+    raw = resp.headers.get("Retry-After") if resp is not None else None
+    if raw is None:
+        return None
+    try:
+        delay = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if delay < 0:
+        return None
+    return min(delay, _MAX_RETRY_AFTER_SEC)
 
 from bfinance.cache.sqlite_cache import SQLiteCache
 from bfinance.models.company import CompanyProfile
@@ -77,14 +99,26 @@ class ScreenerClient:
 
     async def _throttle_pacing(self):
         """Enforce request pacing with randomized jitter to prevent burst detection."""
-        now = time.monotonic()
-        elapsed_ms = (now - self._last_request_time) * 1000.0
-        if elapsed_ms < self.min_request_interval_ms:
-            # Sleep remainder + 10-50ms random jitter
-            jitter = random.uniform(0.01, 0.05)
-            wait_sec = ((self.min_request_interval_ms - elapsed_ms) / 1000.0) + jitter
+        global _GLOBAL_LAST_REQUEST_TIME
+        # Reserve a global slot under lock so concurrent clients don't burst;
+        # single-client timing behavior is unchanged.
+        with _GLOBAL_PACING_LOCK:
+            now = time.monotonic()
+            last = max(self._last_request_time, _GLOBAL_LAST_REQUEST_TIME)
+            elapsed_ms = (now - last) * 1000.0
+            if elapsed_ms < self.min_request_interval_ms:
+                # Sleep remainder + 10-50ms random jitter
+                jitter = random.uniform(0.01, 0.05)
+                wait_sec = ((self.min_request_interval_ms - elapsed_ms) / 1000.0) + jitter
+                _GLOBAL_LAST_REQUEST_TIME = now + wait_sec
+            else:
+                wait_sec = 0.0
+                _GLOBAL_LAST_REQUEST_TIME = now
+        if wait_sec > 0.0:
             await asyncio.sleep(wait_sec)
         self._last_request_time = time.monotonic()
+        with _GLOBAL_PACING_LOCK:
+            _GLOBAL_LAST_REQUEST_TIME = max(_GLOBAL_LAST_REQUEST_TIME, self._last_request_time)
 
     async def _send_with_retry(
         self,
@@ -97,6 +131,7 @@ class ScreenerClient:
         if headers:
             req_headers.update(headers)
 
+        saw_429 = False
         for attempt in range(self.max_retries):
             await self._throttle_pacing()
             try:
@@ -111,15 +146,30 @@ class ScreenerClient:
                 async with httpx.AsyncClient(**client_kwargs) as client:
                     resp = await client.get(url, params=params)
                     if resp.status_code == 429:
+                        saw_429 = True
+                        retry_after = _parse_retry_after(resp)
                         backoff = (2 ** attempt) * 2.0 + random.uniform(0.5, 1.5)
+                        if retry_after is not None:
+                            backoff = max(backoff, retry_after)
                         logger.warning(
                             "HTTP 429 Rate Limit from Screener.in on %s. Backing off for %.2fs (attempt %d/%d)...",
                             url, backoff, attempt + 1, self.max_retries
                         )
                         await asyncio.sleep(backoff)
                         continue
+                    if 500 <= resp.status_code <= 599:
+                        retry_after = _parse_retry_after(resp)
+                        backoff = 1.0 * (attempt + 1) + random.uniform(0.2, 0.8)
+                        if retry_after is not None:
+                            backoff = max(backoff, retry_after)
+                        logger.warning(
+                            "HTTP %d from Screener.in on %s. Retrying in %.2fs (attempt %d/%d)...",
+                            resp.status_code, url, backoff, attempt + 1, self.max_retries
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
                     return resp
-            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as e:
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
                 if attempt == self.max_retries - 1:
                     logger.error("Failed to connect to Screener.in after %d attempts: %s", self.max_retries, e)
                     raise UpstreamServiceError(f"Network error communicating with Screener.in: {e}") from e
@@ -130,7 +180,9 @@ class ScreenerClient:
                 )
                 await asyncio.sleep(backoff)
 
-        raise RateLimitExceededError("Screener.in rate limit exceeded after maximum retries.")
+        if saw_429:
+            raise RateLimitExceededError("Screener.in rate limit exceeded after maximum retries.")
+        raise UpstreamServiceError("Screener.in request failed after maximum retries.")
 
     async def search(self, query: str) -> List[Dict[str, Any]]:
         """

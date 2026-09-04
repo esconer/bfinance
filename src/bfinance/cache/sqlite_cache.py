@@ -3,11 +3,30 @@ Persistent SQLite caching layer with TTL support for bfinance.
 """
 
 import json
-import os
+import logging
 import sqlite3
+import threading
 import time
 from typing import Any, Optional
 from pathlib import Path
+
+logger = logging.getLogger("bfinance")
+
+_CACHE_LOCK = threading.Lock()
+
+
+def _connect(db_path: str) -> sqlite3.Connection:
+    """Open a connection with WAL mode + busy_timeout for lock resilience."""
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        logger.warning("Failed to enable WAL mode for cache db", exc_info=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000;")
+    except Exception:
+        logger.warning("Failed to set busy_timeout for cache db", exc_info=True)
+    return conn
 
 
 class SQLiteCache:
@@ -30,7 +49,7 @@ class SQLiteCache:
 
     def _init_db(self):
         """Create cache table and indexes if not exists."""
-        with sqlite3.connect(self.db_path) as conn:
+        with _CACHE_LOCK, _connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -55,7 +74,7 @@ class SQLiteCache:
         """Retrieve unexpired cached payload."""
         now = time.time()
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _CACHE_LOCK, _connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT payload, expires_at FROM bfinance_cache WHERE cache_key = ?",
@@ -71,6 +90,7 @@ class SQLiteCache:
                         cursor.execute("DELETE FROM bfinance_cache WHERE cache_key = ?", (cache_key,))
                         conn.commit()
         except Exception:
+            logger.exception("Cache get failed for key %s", cache_key)
             return None
         return None
 
@@ -87,16 +107,21 @@ class SQLiteCache:
 
         now = time.time()
         expires_at = now + (ttl_hours * 3600.0)
-        payload_str = json.dumps(payload)
+        try:
+            payload_str = json.dumps(payload)
+        except (TypeError, ValueError):
+            logger.warning("Skipping cache set: unserializable payload for key %s", cache_key)
+            return
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _CACHE_LOCK, _connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
                     INSERT INTO bfinance_cache (cache_key, category, payload, created_at, expires_at)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(cache_key) DO UPDATE SET
+                        category = excluded.category,
                         payload = excluded.payload,
                         created_at = excluded.created_at,
                         expires_at = excluded.expires_at
@@ -105,12 +130,12 @@ class SQLiteCache:
                 )
                 conn.commit()
         except Exception:
-            pass
+            logger.exception("Cache set failed for key %s", cache_key)
 
     def clear(self, category: Optional[str] = None):
         """Clear all or category-specific cache entries."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with _CACHE_LOCK, _connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 if category:
                     cursor.execute("DELETE FROM bfinance_cache WHERE category = ?", (category,))
@@ -118,4 +143,4 @@ class SQLiteCache:
                     cursor.execute("DELETE FROM bfinance_cache")
                 conn.commit()
         except Exception:
-            pass
+            logger.exception("Cache clear failed (category=%s)", category)

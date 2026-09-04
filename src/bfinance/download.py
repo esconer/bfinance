@@ -19,6 +19,10 @@ async def _download_single(
     end: Optional[Union[str, datetime]],
     actions: bool,
     auto_adjust: bool,
+    back_adjust: bool,
+    keepna: bool,
+    prepost: bool,
+    repair: bool,
     rounding: bool,
     proxy: Optional[str] = None,
 ) -> pd.DataFrame:
@@ -31,8 +35,14 @@ async def _download_single(
             end=end,
             actions=actions,
             auto_adjust=auto_adjust,
+            back_adjust=back_adjust,
+            keepna=keepna,
+            prepost=prepost,
+            repair=repair,
             rounding=rounding,
         )
+    except (NotImplementedError, ValueError):
+        raise
     except Exception:
         return pd.DataFrame()
 
@@ -45,6 +55,10 @@ async def _download_batch_async(
     end: Optional[Union[str, datetime]],
     actions: bool = False,
     auto_adjust: bool = True,
+    back_adjust: bool = False,
+    keepna: bool = False,
+    prepost: bool = False,
+    repair: bool = False,
     rounding: bool = False,
     group_by: str = "column",
     multi_level_index: bool = True,
@@ -63,6 +77,10 @@ async def _download_batch_async(
                 end=end,
                 actions=actions,
                 auto_adjust=auto_adjust,
+                back_adjust=back_adjust,
+                keepna=keepna,
+                prepost=prepost,
+                repair=repair,
                 rounding=rounding,
                 proxy=proxy,
             )
@@ -73,6 +91,10 @@ async def _download_batch_async(
 
     data_frames = {}
     for res in results:
+        if isinstance(res, (NotImplementedError, ValueError)):
+            raise res
+        if isinstance(res, BaseException):
+            continue
         if isinstance(res, tuple):
             sym, df = res
             if not df.empty:
@@ -81,20 +103,32 @@ async def _download_batch_async(
     if not data_frames:
         return pd.DataFrame()
 
+    def _yf_naive(frame: pd.DataFrame) -> pd.DataFrame:
+        # yfinance download()/Tickers.history return tz-naive indexes in this
+        # env even though Ticker.history is tz-aware; match yfinance exactly.
+        if isinstance(frame.index, pd.DatetimeIndex) and frame.index.tz is not None:
+            frame = frame.copy()
+            frame.index = frame.index.tz_localize(None)
+        return frame
+
     if len(tickers) == 1 and not multi_level_index and tickers[0].upper() in data_frames:
-        return data_frames[tickers[0].upper()]
+        flat = data_frames[tickers[0].upper()].copy()
+        flat = flat.reindex(sorted(flat.columns), axis=1)
+        return _yf_naive(flat)
 
     if group_by.lower() == "ticker":
-        # MultiIndex DataFrame with (Ticker, Metric)
+        # MultiIndex DataFrame with (Ticker, Price)
         combined = pd.concat(data_frames, axis=1)
         combined.sort_index(axis=1, inplace=True)
-        return combined
+        combined.columns.names = ["Ticker", "Price"]
+        return _yf_naive(combined)
 
-    # Default group_by='column': MultiIndex DataFrame with (Metric, Ticker) e.g. ('Close', 'RELIANCE')
+    # Default group_by='column': MultiIndex DataFrame with (Price, Ticker) e.g. ('Close', 'RELIANCE')
     combined = pd.concat(data_frames, axis=1)
     combined.columns = combined.columns.swaplevel(0, 1)
     combined.sort_index(axis=1, inplace=True)
-    return combined
+    combined.columns.names = ["Price", "Ticker"]
+    return _yf_naive(combined)
 
 
 def download(
@@ -156,6 +190,10 @@ def download(
         end=end,
         actions=actions,
         auto_adjust=auto_adjust,
+        back_adjust=back_adjust,
+        keepna=keepna,
+        prepost=prepost,
+        repair=repair,
         rounding=rounding,
         group_by=group_by,
         multi_level_index=multi_level_index,

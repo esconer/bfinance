@@ -43,13 +43,18 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | `ticker.financials` / `income_stmt` | `ticker.financials` / `income_stmt` | **Upgraded**: 10–13 years Ind AS statements instead of Yahoo's 4-year limit |
 | `ticker.quarterly_income_stmt` | `ticker.quarterly_income_stmt` | **Upgraded**: 12–16 historical quarters instead of 4 quarters |
 | `ticker.balance_sheet` | `ticker.balance_sheet` | **Upgraded**: 10–13 years audited annual balance sheet |
-| `ticker.quarterly_balance_sheet` | `ticker.quarterly_balance_sheet` | Historical quarterly balance sheets |
+| `ticker.quarterly_balance_sheet` | raises `NotImplementedError` | No quarterly-BS source upstream; annual only (yfinance has quarterly — use it if you need it) |
 | `ticker.cash_flow` / `cashflow` | `ticker.cash_flow` / `cashflow` | **Upgraded**: 10–13 years cash flow statements (CFO, CFI, CFF) |
-| `ticker.quarterly_cash_flow` | `ticker.quarterly_cash_flow` | Historical quarterly cash flow |
-| `ticker.dividends` | `ticker.dividends` | Historical dividend series indexed by date |
-| `ticker.splits` | `ticker.splits` | Historical stock splits series indexed by date |
-| `ticker.options` | `ticker.options` | Tuple of available derivative expiry dates |
-| `ticker.option_chain(date)` | `ticker.option_chain(date)` | `OptionChain` with `calls` and `puts` DataFrames matching Yahoo schema |
+| `ticker.quarterly_cash_flow` | raises `NotImplementedError` | No quarterly-CF source upstream; annual only |
+| `ticker.dividends` | `ticker.dividends` | Per-share amounts match yfinance (≤3%); dates are FY-end (Mar-31), yfinance uses ex-dates |
+| `ticker.splits` | `ticker.splits` | Same ratios; bonus issues represented as split factors on FY-end dates |
+| `ticker.actions` | `ticker.actions` | Dividends + splits merged frame, yfinance-shaped columns |
+| `ticker.capital_gains` | `ticker.capital_gains` | Empty like yfinance for Indian equities |
+| `ticker.major_holders` | `ticker.major_holders` | Numeric `Value` column (fraction), yfinance-shaped |
+| `ticker.options` | `ticker.options` | `()` for NSE underlyings — identical to live yfinance 1.7.0 (verified 2026-09-04) |
+| `ticker.option_chain(date)` | `ticker.option_chain(date)` | Empty yfinance-shaped chain for NSE (no options feed either side) |
+| `ticker.calendar` | `ticker.calendar` | Earnings/dividend dates where disclosed; no analyst estimates |
+| `ticker.analyst_price_targets` | `None` | No analyst feed upstream (was fabricated pre-0.1.3; now honest) |
 | `ticker.valuation_measures` | `ticker.valuation_measures` | `yfinance 1.3.0+` valuation table |
 | `yf.Tickers(list)` | `bf.Tickers(list)` | Multi-ticker container matching `yf.Tickers` |
 | `yf.Sector(name)` | `bf.Sector(name)` | `yfinance 1.4.0+` sector constituent explorer |
@@ -102,3 +107,21 @@ print("Valid Ranges:", meta["validRanges"])
 # 2. yfinance valuation measures table
 print(ticker.valuation_measures)
 ```
+
+---
+
+## 5. Verified Parity Status (v0.1.3, yfinance 1.7.0 baseline, live-checked 2026-09-04)
+
+`tests/test_dropin_*.py` + `tests/test_parity_*.py` run the same calls against both
+libraries (`pytest -m live`). Measured on RELIANCE.NS:
+
+* history Close within 0.6% (1mo/1y), tz `Asia/Kolkata`, weekly intervals resampled,
+  `auto_adjust`/`actions` flags honored like yfinance 1.7 defaults
+* info values within 2.5% (price, mcap, EPS, float, 50d/200d averages, prev close exact)
+* statements self-consistent (Assets ≈ Liab+Equity ≤5%); `to_yfinance()` bridges
+  orientation/units (₹Cr → absolute, Mar-YYYY → DatetimeIndex)
+* dividends amounts within 3% (FY-end vs ex-date conventions differ — see table)
+
+Deliberate extras (never silent): `freq="quarterly"` on income uses real quarterly
+P&L; native statement orientation stays metric-row/₹Cr; `Ticker("X", True)` bool
+second positional is treated as yfinance's `multi_level_index`.

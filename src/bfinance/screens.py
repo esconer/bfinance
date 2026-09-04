@@ -1,13 +1,52 @@
 """
 Quantitative stock screening engine inspired by Screener.in's popular screens and custom query builder.
 Supports pre-built institutional strategies: Coffee Can, Magic Formula, Debt-Free Compounders, High Dividend, Undervalued Growth.
+
+Unit contract (finengine parity):
+- ROCE_% is raw percent (e.g. 20.0 means 20%).
+- ROE_%/DivYield_% are percent; info holds decimals (0.15 -> 15.0).
+- None stays None; missing thresholds fail (0.0 in filters).
 """
 
 from typing import Any, Callable, Dict, List, Optional
+import logging
 import pandas as pd
 
 from bfinance.ticker import Ticker
 from bfinance.utils.symbols import normalize_symbol
+
+
+logger = logging.getLogger(__name__)
+
+
+def _parse_pct(value: Any) -> Optional[float]:
+    """Parse '12.5%'/'12.5' to float; None when missing/unparseable."""
+    if value is None:
+        return None
+    try:
+        s = str(value).strip().replace("%", "").replace(",", "")
+        if s in ("", "-", "NA", "N/A"):
+            return None
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _cagr_value(cagrs: Any, titles: List[str], periods: List[str]) -> Optional[float]:
+    """First matching CAGR % from info['cagrs']; None if absent."""
+    if not isinstance(cagrs, dict):
+        return None
+    for title, vals in cagrs.items():
+        if not any(k.lower() in str(title).lower() for k in titles):
+            continue
+        if not isinstance(vals, dict):
+            continue
+        for per, raw in vals.items():
+            if any(p.lower() in str(per).lower() for p in periods):
+                v = _parse_pct(raw)
+                if v is not None:
+                    return v
+    return None
 
 
 # Default universe of top liquid NSE/BSE equities for client-side screening
@@ -33,6 +72,15 @@ class Screen:
         self.description = description
         self.filter_fn = filter_fn
 
+    def __call__(
+        self,
+        universe: Optional[List[str]] = None,
+        max_stocks: Optional[int] = None,
+        show_progress: bool = False,
+    ) -> pd.DataFrame:
+        """Allow calling Screen instance directly: screen(...) as an alias to screen.run(...)."""
+        return self.run(universe=universe, max_stocks=max_stocks, show_progress=show_progress)
+
     def run(
         self,
         universe: Optional[List[str]] = None,
@@ -42,6 +90,9 @@ class Screen:
         """
         Execute screening filter across equity universe.
         Returns sorted DataFrame of matching stocks and key ratios.
+
+        Units: ROCE_% raw-%, ROE_%/DivYield_% percent (decimals x100);
+        None stays None.
         """
         symbols = universe or DEFAULT_UNIVERSE
         if max_stocks:
@@ -64,11 +115,12 @@ class Screen:
                         "DivYield_%": (r.get("dividendYield") * 100) if r.get("dividendYield") else None,
                         "BookValue": r.get("bookValue"),
                     })
-            except Exception:
+            except Exception as e:
+                logger.warning("Screen %s: skipping %s (%s)", self.name, sym, e)
                 continue
 
         if not matches:
-            return pd.DataFrame(columns=["Symbol", "Name", "Price", "MarketCap_Cr", "PE", "ROCE_%", "ROE_%", "DivYield_%"])
+            return pd.DataFrame(columns=["Symbol", "Name", "Price", "MarketCap_Cr", "PE", "ROCE_%", "ROE_%", "DivYield_%", "BookValue"])
 
         df = pd.DataFrame(matches)
         df.sort_values(by="MarketCap_Cr", ascending=False, inplace=True)
@@ -86,32 +138,58 @@ class ScreenerRegistry:
 
     @property
     def coffee_can(self) -> Screen:
-        """Saurabh Mukherjea Coffee Can Screen: ROCE > 15% and Consistent Profitability."""
+        """Coffee Can: point-in-time ROCE>=15%, ROE>=15%, mcap>=5000Cr; 10Y sales/profit CAGR>0 required."""
         def _filter(t: Ticker) -> bool:
             r = t.info
             roce = r.get("returnOnCapitalEmployed") or 0.0
             roe = (r.get("returnOnEquity") or 0.0) * 100
             mcap = r.get("marketCapInCr") or 0.0
-            return roce >= 15.0 and roe >= 15.0 and mcap >= 5000.0
+            if not (roce >= 15.0 and roe >= 15.0 and mcap >= 5000.0):
+                return False
+            sales10 = _cagr_value(r.get("cagrs"), ["sales"], ["10"])
+            profit10 = _cagr_value(r.get("cagrs"), ["profit"], ["10"])
+            if sales10 is None or profit10 is None:
+                return False
+            if sales10 <= 0 or profit10 <= 0:
+                return False
+            return True
 
         return Screen(
             name="Coffee Can Portfolio",
-            description="Great companies with 10Y ROCE > 15% and ROE > 15%",
+            description="Point-in-time ROCE>=15%, ROE>=15%, mcap>=5000Cr; 10Y sales/profit growth>0 required",
             filter_fn=_filter,
         )
 
     @property
     def debt_free_compounders(self) -> Screen:
-        """High ROCE companies with negligible debt."""
+        """High ROCE, negligible debt: ROCE>=20%, mcap>=10000Cr, D/E<=0.2 (exclude when missing).
+
+        D/E falls back to statement-computed custom_ratios when info lacks it:
+        zero-debt companies (Borrowings==0, e.g. INFY) report no screener
+        "Debt to equity" value, and must PASS — not be fail-closed out.
+        """
         def _filter(t: Ticker) -> bool:
             r = t.info
             roce = r.get("returnOnCapitalEmployed") or 0.0
             mcap = r.get("marketCapInCr") or 0.0
-            return roce >= 20.0 and mcap >= 10000.0
+            if not (roce >= 20.0 and mcap >= 10000.0):
+                return False
+            de = r.get("debtToEquity")
+            if de is None:
+                try:
+                    de = t.custom_ratios.get("debt_to_equity")
+                except Exception:
+                    de = None
+            if de is None:
+                return False
+            try:
+                return float(de) <= 0.2
+            except (ValueError, TypeError):
+                return False
 
         return Screen(
             name="Debt Free Compounders",
-            description="High return on capital with strong balance sheets",
+            description="ROCE>=20%, mcap>=10000Cr with D/E<=0.2 (fail-closed)",
             filter_fn=_filter,
         )
 
@@ -147,16 +225,28 @@ class ScreenerRegistry:
 
     @property
     def undervalued_growth(self) -> Screen:
-        """P/E < 20 and ROE > 15%."""
+        """P/E<=20, ROE>=15% plus growth (sales/profit CAGR>=10% or PEG<=2 when available)."""
         def _filter(t: Ticker) -> bool:
             r = t.info
             pe = r.get("trailingPE") or 999.0
             roe = (r.get("returnOnEquity") or 0.0) * 100
-            return 0 < pe <= 22.0 and roe >= 15.0
+            if not (0 < pe <= 20.0 and roe >= 15.0):
+                return False
+            sales = _cagr_value(r.get("cagrs"), ["sales"], ["5", "3", "10"])
+            profit = _cagr_value(r.get("cagrs"), ["profit"], ["5", "3", "10"])
+            if sales is not None or profit is not None:
+                return max(sales if sales is not None else -1, profit if profit is not None else -1) >= 10.0
+            peg = r.get("pegRatio")
+            if peg is not None:
+                try:
+                    return 0 < float(peg) <= 2.0
+                except (ValueError, TypeError):
+                    return False
+            return True
 
         return Screen(
             name="Undervalued Growth",
-            description="Growing businesses trading at reasonable multiples",
+            description="P/E<=20, ROE>=15% with sales/profit growth>=10% or PEG<=2 when available",
             filter_fn=_filter,
         )
 
