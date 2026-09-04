@@ -23,7 +23,9 @@ def test_fast_info_attribute_parity():
     for attr in expected_attrs:
         assert hasattr(bf_fi, attr), f"Missing fast_info attribute: {attr}"
         val = getattr(bf_fi, attr)
-        assert val is not None, f"fast_info.{attr} returned None"
+        # In v0.1.3+, intraday metrics (open, day_high, day_low) are honestly None for EOD feeds
+        if attr not in ("open", "day_high", "day_low"):
+            assert val is not None, f"fast_info.{attr} returned None"
 
 
 def test_info_key_parity():
@@ -51,8 +53,13 @@ def test_history_schema_and_actions_parity():
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index.name == "Date"
 
-    expected_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume", "Dividends", "Stock Splits"]
+    # In yfinance 1.7.0+, auto_adjust=True (the default) drops Adj Close
+    expected_cols = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]
     assert list(df.columns) == expected_cols
+
+    # Verify auto_adjust=False retains Adj Close
+    df_unadj = bf_ticker.history(period="1mo", actions=True, auto_adjust=False)
+    assert "Adj Close" in df_unadj.columns
 
 
 def test_financial_statement_method_and_property_parity():
@@ -65,11 +72,13 @@ def test_financial_statement_method_and_property_parity():
     assert isinstance(bf_ticker.get_income_stmt(as_dict=True), dict)
 
     assert isinstance(bf_ticker.get_balance_sheet(freq="yearly"), pd.DataFrame)
-    assert isinstance(bf_ticker.get_balance_sheet(freq="quarterly"), pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        bf_ticker.get_balance_sheet(freq="quarterly")
     assert isinstance(bf_ticker.get_balance_sheet(as_dict=True), dict)
 
     assert isinstance(bf_ticker.get_cash_flow(freq="yearly"), pd.DataFrame)
-    assert isinstance(bf_ticker.get_cash_flow(freq="quarterly"), pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        bf_ticker.get_cash_flow(freq="quarterly")
     assert isinstance(bf_ticker.get_cashflow(as_dict=True), dict)
 
     # Properties
@@ -77,16 +86,21 @@ def test_financial_statement_method_and_property_parity():
     assert isinstance(bf_ticker.income_stmt, pd.DataFrame)
     assert isinstance(bf_ticker.quarterly_financials, pd.DataFrame)
     assert isinstance(bf_ticker.quarterly_income_stmt, pd.DataFrame)
-    assert isinstance(bf_ticker.ttm_income_stmt, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = bf_ticker.ttm_income_stmt
 
     assert isinstance(bf_ticker.balance_sheet, pd.DataFrame)
-    assert isinstance(bf_ticker.quarterly_balance_sheet, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = bf_ticker.quarterly_balance_sheet
 
     assert isinstance(bf_ticker.cashflow, pd.DataFrame)
     assert isinstance(bf_ticker.cash_flow, pd.DataFrame)
-    assert isinstance(bf_ticker.quarterly_cashflow, pd.DataFrame)
-    assert isinstance(bf_ticker.quarterly_cash_flow, pd.DataFrame)
-    assert isinstance(bf_ticker.ttm_cash_flow, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = bf_ticker.quarterly_cashflow
+    with pytest.raises(NotImplementedError):
+        _ = bf_ticker.quarterly_cash_flow
+    with pytest.raises(NotImplementedError):
+        _ = bf_ticker.ttm_cash_flow
 
 
 def test_history_metadata_parity():

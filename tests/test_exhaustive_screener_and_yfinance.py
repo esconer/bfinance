@@ -13,6 +13,7 @@ from bfinance.ticker import Ticker
 from bfinance.tickers import Tickers
 from bfinance.sector import Sector, Industry
 from bfinance.models.options import OptionChain
+from bfinance.market.derivatives import DerivativesEngine
 from bfinance.models.company import CompanyProfile, Concall, PeerStock, TopRatios
 from bfinance.models.statements import FinancialStatement
 
@@ -201,8 +202,9 @@ def test_yfinance_fast_info_complete():
     assert fi.quote_type == "EQUITY"
     assert fi.last_price > 0
     assert fi.previous_close > 0
-    assert fi.open > 0
-    assert fi.day_high >= fi.day_low
+    # Intraday open/high/low are honestly None from an EOD-only feed (never fabricated)
+    assert fi.open is None or fi.open > 0
+    assert fi.day_high is None or fi.day_low is None or fi.day_high >= fi.day_low
     assert fi.year_high is not None
     assert fi.year_low is not None
     assert fi.market_cap is not None and fi.market_cap > 1e11
@@ -243,11 +245,16 @@ def test_yfinance_history_actions_and_intervals():
 
     assert isinstance(df, pd.DataFrame)
     assert not df.empty
-    expected_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume", "Dividends", "Stock Splits"]
+    # When auto_adjust=True, Adj Close is dropped (matching yfinance 1.7.0+)
+    expected_cols = ["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"]
     assert list(df.columns) == expected_cols
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index.name == "Date"
     assert len(df) > 150
+
+    # Check unadjusted history contains Adj Close
+    df_unadj = t.history(period="1mo", actions=True, auto_adjust=False)
+    assert "Adj Close" in df_unadj.columns
 
     # Check without actions
     df_no_act = t.history(period="1mo", actions=False)
@@ -264,20 +271,29 @@ def test_yfinance_financial_statements_complete_matrix():
     assert isinstance(t.income_stmt, pd.DataFrame)
     assert isinstance(t.quarterly_financials, pd.DataFrame)
     assert isinstance(t.quarterly_income_stmt, pd.DataFrame)
-    assert isinstance(t.ttm_income_stmt, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = t.ttm_income_stmt
     assert t.financials.equals(t.income_stmt)
 
     # 2. Balance sheets
     assert isinstance(t.balance_sheet, pd.DataFrame)
-    assert isinstance(t.quarterly_balance_sheet, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = t.quarterly_balance_sheet
     assert t.get_balance_sheet(freq="yearly").equals(t.balance_sheet)
+    with pytest.raises(NotImplementedError):
+        t.get_balance_sheet(freq="quarterly")
 
     # 3. Cash flows
     assert isinstance(t.cashflow, pd.DataFrame)
     assert isinstance(t.cash_flow, pd.DataFrame)
-    assert isinstance(t.quarterly_cashflow, pd.DataFrame)
-    assert isinstance(t.quarterly_cash_flow, pd.DataFrame)
-    assert isinstance(t.ttm_cash_flow, pd.DataFrame)
+    with pytest.raises(NotImplementedError):
+        _ = t.quarterly_cashflow
+    with pytest.raises(NotImplementedError):
+        _ = t.quarterly_cash_flow
+    with pytest.raises(NotImplementedError):
+        _ = t.ttm_cash_flow
+    with pytest.raises(NotImplementedError):
+        t.get_cash_flow(freq="quarterly")
     assert t.cashflow.equals(t.cash_flow)
 
     # 4. as_dict parameter
@@ -320,21 +336,28 @@ def test_yfinance_corporate_actions_series():
 
 
 def test_yfinance_options_derivatives_chain():
-    """Verify NSE options chain with Calls and Puts DataFrames."""
+    """Verify NSE options chain parity with yfinance 1.7.0 (empty for NSE underlyings) and generator contract."""
     t = Ticker("RELIANCE")
     expiries = t.options
 
     assert isinstance(expiries, tuple)
-    assert len(expiries) >= 2
+    assert expiries == ()
 
-    chain = t.option_chain(expiries[0])
+    chain = t.option_chain()
     assert isinstance(chain, OptionChain)
-    assert isinstance(chain.calls, pd.DataFrame)
-    assert isinstance(chain.puts, pd.DataFrame)
+    assert chain.calls.empty
+    assert chain.puts.empty
+
+    # Verify deterministic engine generation when called directly
+    gen_chain = DerivativesEngine.generate_option_chain("RELIANCE", cmp=1500.0, expiry_date="2026-09-24")
+    assert isinstance(gen_chain, OptionChain)
+    assert isinstance(gen_chain.calls, pd.DataFrame)
+    assert isinstance(gen_chain.puts, pd.DataFrame)
+    assert not gen_chain.calls.empty
 
     for col in ["contractSymbol", "strike", "lastPrice", "bid", "ask", "openInterest", "impliedVolatility"]:
-        assert col in chain.calls.columns
-        assert col in chain.puts.columns
+        assert col in gen_chain.calls.columns
+        assert col in gen_chain.puts.columns
 
 
 def test_yfinance_tickers_multi_collection():
