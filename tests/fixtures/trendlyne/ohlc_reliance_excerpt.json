@@ -1,0 +1,360 @@
+{
+ "_fixture_note": "Trimmed recording of a live trendlyne.com OHLC payload for RELIANCE. Keeps the eight most recent eodData rows and a nine-row window around the 2024-10-28 bonus date, plus the eodDataLastWeek rows, so the price-basis claim (back-adjusted, yfinance basis) is pinnable offline. Wire order is NEWEST FIRST. Not a continuous series.",
+ "_fixture_full_row_count": 5107,
+ "_fixture_symbol": "RELIANCE",
+ "_fixture_stock_id": 1127,
+ "_fixture_price_basis": "yfinance_back_adjusted",
+ "_fixture_windows": {
+  "eodData_head8": [
+   "2026-09-18",
+   "2026-09-17",
+   "2026-09-16",
+   "2026-09-15",
+   "2026-09-11",
+   "2026-09-10",
+   "2026-09-09",
+   "2026-09-08"
+  ],
+  "around_2024-10-28": [
+   "2024-11-01",
+   "2024-10-31",
+   "2024-10-30",
+   "2024-10-29",
+   "2024-10-28",
+   "2024-10-25",
+   "2024-10-24",
+   "2024-10-23",
+   "2024-10-22"
+  ]
+ },
+ "head": {
+  "status": "0",
+  "statusDescription": "Success",
+  "responseCode": null
+ },
+ "body": {
+  "eodHeaders": [
+   {
+    "type": "date",
+    "name": "Date",
+    "unit": "date",
+    "unique_name": "date"
+   },
+   {
+    "type": "number",
+    "name": "Open Price",
+    "unit": "Rs",
+    "unique_name": "open_price"
+   },
+   {
+    "type": "number",
+    "name": "High Price",
+    "unit": "Rs",
+    "unique_name": "high_price"
+   },
+   {
+    "type": "number",
+    "name": "Low Price",
+    "unit": "Rs",
+    "unique_name": "low_price"
+   },
+   {
+    "type": "number",
+    "name": "Close Price",
+    "unit": "Rs",
+    "unique_name": "close_price"
+   },
+   {
+    "type": "number",
+    "name": "Last Price",
+    "unit": "Rs",
+    "unique_name": "last_price"
+   },
+   {
+    "type": "number",
+    "name": "Volume",
+    "unit": "abs",
+    "unique_name": "volume"
+   }
+  ],
+  "eodData": [
+   [
+    "2026-09-18T10:01:00+00:00",
+    1245.0,
+    1247.3,
+    1226.4,
+    1226.4,
+    1226.4,
+    15122715.0
+   ],
+   [
+    "2026-09-17T10:01:00+00:00",
+    1244.8,
+    1253.4,
+    1238.5,
+    1243.9,
+    1243.9,
+    7752895.0
+   ],
+   [
+    "2026-09-16T10:01:00+00:00",
+    1243.0,
+    1255.0,
+    1240.0,
+    1240.0,
+    1240.0,
+    10023997.0
+   ],
+   [
+    "2026-09-15T10:01:00+00:00",
+    1252.5,
+    1259.4,
+    1235.3,
+    1235.3,
+    1235.3,
+    13754376.0
+   ],
+   [
+    "2026-09-11T10:01:00+00:00",
+    1267.0,
+    1267.4,
+    1253.0,
+    1257.5,
+    1257.5,
+    8777736.0
+   ],
+   [
+    "2026-09-10T10:01:00+00:00",
+    1278.5,
+    1285.3,
+    1266.3,
+    1274.0,
+    1274.0,
+    9296079.0
+   ],
+   [
+    "2026-09-09T10:01:00+00:00",
+    1283.5,
+    1294.7,
+    1277.2,
+    1279.0,
+    1279.0,
+    12152819.0
+   ],
+   [
+    "2026-09-08T10:01:00+00:00",
+    1304.1,
+    1306.8,
+    1288.0,
+    1294.9,
+    1294.9,
+    9799528.0
+   ],
+   [
+    "2024-11-01T10:01:00+00:00",
+    1333.05,
+    1341.95,
+    1333.0,
+    1338.65,
+    1338.4,
+    2127335.0
+   ],
+   [
+    "2024-10-31T10:01:00+00:00",
+    1340.0,
+    1343.0,
+    1326.15,
+    1332.05,
+    1332.0,
+    9331650.0
+   ],
+   [
+    "2024-10-30T10:01:00+00:00",
+    1335.0,
+    1350.0,
+    1325.35,
+    1343.9,
+    1344.85,
+    11984423.0
+   ],
+   [
+    "2024-10-29T10:01:00+00:00",
+    1328.1,
+    1343.2,
+    1320.3,
+    1340.0,
+    1340.0,
+    12008361.0
+   ],
+   [
+    "2024-10-28T10:01:00+00:00",
+    1337.0,
+    1353.0,
+    1322.1,
+    1334.35,
+    1335.0,
+    10824350.0
+   ],
+   [
+    "2024-10-25T10:01:00+00:00",
+    1343.5,
+    1344.35,
+    1322.0,
+    1327.85,
+    1328.15,
+    18597496.0
+   ],
+   [
+    "2024-10-24T10:01:00+00:00",
+    1335.275,
+    1343.7,
+    1323.125,
+    1339.8,
+    1339.45,
+    22155934.0
+   ],
+   [
+    "2024-10-23T10:01:00+00:00",
+    1337.5,
+    1357.475,
+    1335.0,
+    1338.525,
+    1341.175,
+    17214742.0
+   ],
+   [
+    "2024-10-22T10:01:00+00:00",
+    1369.2,
+    1376.0,
+    1340.225,
+    1343.35,
+    1342.075,
+    15831960.0
+   ]
+  ],
+  "eodDataLastWeek": [
+   [
+    "2026-09-25T10:01:00+00:00",
+    1210.5,
+    1227.4,
+    1210.5,
+    1226.0,
+    1226.0,
+    13138735.0
+   ],
+   [
+    "2026-09-24T10:01:00+00:00",
+    1236.6,
+    1241.6,
+    1219.2,
+    1219.2,
+    1219.2,
+    13923795.0
+   ],
+   [
+    "2026-09-23T10:01:00+00:00",
+    1242.0,
+    1252.8,
+    1238.9,
+    1248.0,
+    1248.0,
+    8352048.0
+   ],
+   [
+    "2026-09-22T10:01:00+00:00",
+    1247.6,
+    1251.9,
+    1237.4,
+    1240.4,
+    1240.4,
+    10684376.0
+   ],
+   [
+    "2026-09-21T10:01:00+00:00",
+    1234.1,
+    1249.1,
+    1232.5,
+    1247.4,
+    1247.4,
+    10007218.0
+   ]
+  ],
+  "stockHeaders": [
+   {
+    "unique_name": "get_full_name",
+    "type": "string",
+    "name": "Stock"
+   },
+   {
+    "unique_name": "NSEcode",
+    "type": "string",
+    "name": "NSE Symbol"
+   },
+   {
+    "unique_name": "BSEcode",
+    "type": "string",
+    "name": "BSEcode"
+   },
+   {
+    "name": "Stock ID",
+    "type": "number",
+    "unique_name": "stock_id"
+   },
+   {
+    "name": "Page type",
+    "type": "string",
+    "unique_name": "page_type"
+   },
+   {
+    "unique_name": "ISIN",
+    "type": "string",
+    "name": "isin"
+   },
+   {
+    "name": "Durability Score",
+    "type": "number",
+    "unique_name": "d_value"
+   },
+   {
+    "name": "Valuation Score",
+    "type": "number",
+    "unique_name": "v_value"
+   },
+   {
+    "name": "Momentum Score",
+    "type": "number",
+    "unique_name": "m_value"
+   },
+   {
+    "name": "D color",
+    "type": "string",
+    "unique_name": "d_color"
+   },
+   {
+    "name": "V color",
+    "type": "string",
+    "unique_name": "v_color"
+   },
+   {
+    "name": "M color",
+    "type": "string",
+    "unique_name": "m_color"
+   }
+  ],
+  "stockData": [
+   "Reliance Industries Ltd.",
+   "RELIANCE",
+   "500325",
+   1127,
+   "Equity",
+   "INE002A01018",
+   60,
+   47,
+   32,
+   "positive",
+   "neutral",
+   "negative"
+  ],
+  "exchange": "NSE"
+ }
+}

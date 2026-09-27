@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+<!-- VERBATIM EXCERPT of the live trendlyne.com equity sitemap. Three disjoint
+     windows of the original <url> block list, each labelled with its 0-based
+     index range. The full document has 5922 blocks. -->
+<!-- source: https://trendlyne.com/equity-sitemap-stocks.xml -->
+<!-- window 'head': original blocks[0:3] -->
+<url><loc>https://trendlyne.com/equity/8/20MICRONS/20-microns-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/9/3IINFOLTD/3i-infotech-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/10/3MINDIA/3m-india-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<!-- window 'around-MOTHERSON': original blocks[678:685] -->
+<url><loc>https://trendlyne.com/equity/872/MOIL/moil-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/875/MORARJEE/morarjee-textiles-ltd/</loc><lastmod>2026-09-21</lastmod><priority>0.5</priority></url>
+<url><loc>https://trendlyne.com/equity/876/MOREPENLAB/morepen-laboratories-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/879/MOTILALOFS/motilal-oswal-financial-services-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<url><loc>https://trendlyne.com/equity/880/MOTOGENFIN/motor-general-finance-ltd/</loc><lastmod>2026-09-25</lastmod><priority>0.5</priority></url>
+<url><loc>https://trendlyne.com/equity/881/MPHASIS/mphasis-ltd/</loc><lastmod>2026-09-25</lastmod><priority>1</priority></url>
+<!-- window 'tail': original blocks[5920:5922] -->
+<url><loc>https://trendlyne.com/equity/3622446/1213/bse-midcap-150-momentum-30/</loc><lastmod>2026-09-25</lastmod><priority>0.5</priority></url>
+<url><loc>https://trendlyne.com/equity/3622447/1216/bse-midsmall-private-banks/</loc><lastmod>2026-09-25</lastmod><priority>0.5</priority></url>
+</urlset>
