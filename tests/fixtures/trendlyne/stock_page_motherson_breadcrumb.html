@@ -1,0 +1,41 @@
+<!--
+  Recorded from https://trendlyne.com/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/
+  (HTTP 200, 2026-09-27). Trimmed to the schema.org breadcrumb
+  <ol class="tl_breadcrumb">, verbatim and complete — all four <li> items, MARKETS / SECTOR /
+  INDUSTRY / the symbol itself.
+
+  The companion fixture stock_page_motherson.html keeps the OHLC-token window from the same
+  recording. The two are separate because they answer different questions and neither is large
+  enough to need the other: the classification parser reads only this, and the token parser reads
+  only that.
+
+  There is no data-* attribute and no embedded JSON for the sector/industry on a stock page. The
+  field name is the breadcrumb label and the value is the href, which is why this block is the
+  fixture rather than a JSON blob.
+-->
+<ol class="tl_breadcrumb" typeof="BreadcrumbList" vocab="https://schema.org/">
+<li class="tl_breadcrumb_item" property="itemListElement" typeof="ListItem">
+<a href="https://trendlyne.com/markets-today/" property="item" typeof="WebPage">
+<span property="name">MARKETS</span>
+</a>
+<meta content="1" property="position"/>
+</li>
+<li class="tl_breadcrumb_item" property="itemListElement" typeof="ListItem">
+<a href="https://trendlyne.com/equity/sector/20/automobiles-auto-components/" property="item" typeof="WebPage">
+<span property="name">SECTOR : AUTOMOBILES &amp; AUTO COMPONENTS</span>
+</a>
+<meta content="2" property="position"/>
+</li>
+<li class="tl_breadcrumb_item" property="itemListElement" typeof="ListItem">
+<a href="https://trendlyne.com/equity/industry/9/auto-parts-equipment/" property="item" typeof="WebPage">
+<span property="name">INDUSTRY : AUTO PARTS &amp; EQUIPMENT</span>
+</a>
+<meta content="3" property="position"/>
+</li>
+<li class="tl_breadcrumb_item" property="itemListElement" typeof="ListItem">
+<a href="https://trendlyne.com/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/" property="item" typeof="WebPage">
+<span property="name">SAMVARDHANA MOTHERSON INTERNATIONAL LTD.</span>
+</a>
+<meta content="4" property="position"/>
+</li>
+</ol>

@@ -1,5 +1,5 @@
 """
-trendlyne core tests â€” fully offline, driven by recorded fixtures.
+trendlyne core tests — fully offline, driven by recorded fixtures.
 
 Every fixture under ``tests/fixtures/trendlyne/`` is a real recording of trendlyne.com taken on
 2026-09-27; ``META.json`` in that directory records the source URL, HTTP status, byte count and
@@ -33,6 +33,7 @@ import pytest
 import bfinance
 from bfinance.trendlyne import client as tl
 from bfinance.trendlyne import errors as tle
+from bfinance.trendlyne import sectors as tls
 from bfinance.trendlyne import tables as tbt
 from bfinance.utils.exceptions import ParsingError
 
@@ -63,7 +64,7 @@ def indexed_client(client: tl.TrendlyneClient) -> tl.TrendlyneClient:
 
 
 def mock_client(handler, **kwargs) -> tl.TrendlyneClient:
-    """A client whose every request is served by ``handler`` â€” no network, no sockets."""
+    """A client whose every request is served by ``handler`` — no network, no sockets."""
     kwargs.setdefault("min_request_interval_ms", 0.0)
     kwargs.setdefault("max_retries", 2)
     return tl.TrendlyneClient(transport=httpx.MockTransport(handler), **kwargs)
@@ -213,7 +214,7 @@ class TestSymbolIndex:
             indexed_client.resolve("")
 
     def test_non_ticker_symbol_segments_are_indexed_verbatim(self):
-        """The live sitemap tail holds /equity/3622447/1216/bse-midsmall-private-banks/ â€” the
+        """The live sitemap tail holds /equity/3622447/1216/bse-midsmall-private-banks/ — the
         symbol segment is a number, not a ticker. Guessing a ticker shape would lose these."""
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["1216"]
         assert record.stock_id == 3622447
@@ -231,7 +232,7 @@ class TestSymbolIndex:
             indexed_client.search("  ")
 
     def test_sitemap_without_entries_raises_instead_of_returning_empty(self):
-        """An empty index would make every symbol look unresolvable â€” the silent failure this
+        """An empty index would make every symbol look unresolvable — the silent failure this
         package exists to prevent."""
         with pytest.raises(tle.TrendlyneSchemaError, match="no /equity/"):
             tl.parse_sitemap("<urlset><url><loc>https://example.com/</loc></url></urlset>")
@@ -336,7 +337,7 @@ class TestHttpStatusMapping:
 
     async def test_444_is_not_retried(self, indexed_client):
         """Only the /mapp/v1/ route is gated, so the page must succeed for the 444 to be reached
-        at all â€” and then the api call must not be repeated."""
+        at all — and then the api call must not be repeated."""
         calls = []
 
         def handler(request):
@@ -368,7 +369,7 @@ class TestHttpStatusMapping:
         assert excinfo.value.status_code == 200, "the HTTP status is 200; the envelope failed"
 
     async def test_a_rotated_token_is_re_scraped_once(self, indexed_client):
-        """If re-scraping yields a different token, retry once with it â€” and only once.
+        """If re-scraping yields a different token, retry once with it — and only once.
 
         The substitute tokens stay inside the real charset: uppercase alphanumerics plus ``=``
         padding. An underscore would not match the token pattern, which is itself worth knowing.
@@ -393,8 +394,10 @@ class TestHttpStatusMapping:
 
         indexed_client.transport = httpx.MockTransport(handler)
         # A cached-but-now-wrong token: the api rejects it, and the page yields a different one.
+        # The cache entry is (fetched_at, token, classification) — the token and the sector come
+        # off the same page fetch, so they are cached together.
         import time as _time
-        indexed_client._tokens[878] = (_time.monotonic(), "TOKEN_A======")
+        indexed_client._tokens[878] = (_time.monotonic(), "TOKEN_A======", {})
 
         frame = await indexed_client.ohlc_async("MOTHERSON")
         assert len(frame) == 125
@@ -415,7 +418,8 @@ class TestHttpStatusMapping:
 
         indexed_client.transport = httpx.MockTransport(handler)
         import time as _time
-        indexed_client._tokens[878] = (_time.monotonic(), "TQZITAIRHO5FCC7SYAKGO6M7QA======")
+        indexed_client._tokens[878] = (
+            _time.monotonic(), "TQZITAIRHO5FCC7SYAKGO6M7QA======", {})
         with pytest.raises(tle.TrendlyneNotAuthorizedError):
             await indexed_client.ohlc_async("MOTHERSON")
         api_calls = [c for c in calls if "/mapp/" in c]
@@ -885,31 +889,64 @@ class TestTableClassification:
 class TestSnapshotHonesty:
     """A snapshot must never be mistakable for a series."""
 
-    def test_the_snapshot_only_policy_is_empty_and_says_why(self):
-        """``SNAPSHOT_ONLY_ENDPOINTS`` must be a subset of ``ENDPOINTS``, and it is empty.
+    def test_the_snapshot_only_policy_table_and_its_error_are_gone(self):
+        """``SNAPSHOT_ONLY_ENDPOINTS`` and ``TrendlyneSnapshotOnlyError`` were removed as dead API.
 
-        It is empty because nothing in this package fetches a snapshot-only route: the 14
-        templates with no fetch method were deleted rather than left as promises, and
-        ``share_holding`` â€” the one route measured to 500 on any non-``latest`` period â€” went
-        with them. A non-empty set naming a route ``build_path`` would reject would be a policy
-        table that can never fire and a second false claim.
+        The set had to be a subset of ``ENDPOINTS`` to be enforceable, nothing in the package
+        fetched a snapshot-only route, so it was an empty ``frozenset()`` and the guard in
+        ``build_path`` could never fire. A public exception that cannot be raised is the same
+        category of problem as the 14 endpoint templates deleted for exactly that reason: it makes
+        the package look bigger than the code that runs.
+
+        This asserts the removal is **total** - not merely that the names are unimportable, which a
+        stale re-export in ``__all__`` would survive - and the negative control at the end is what
+        stops it passing for the wrong reason.
         """
-        assert tl.SNAPSHOT_ONLY_ENDPOINTS == frozenset()
-        assert tl.SNAPSHOT_ONLY_ENDPOINTS <= frozenset(tl.ENDPOINTS), (
-            "a snapshot-only name that is not an addressable route can never be enforced"
-        )
+        import bfinance.trendlyne as pkg
 
+        assert not hasattr(tl, "SNAPSHOT_ONLY_ENDPOINTS"), (
+            "the policy table is back. A snapshot-only name that is not an addressable route can "
+            "never be enforced, so an empty set plus a guard that cannot fire is exactly what the "
+            "removal was for. Keep the 500 fact in the module docstring instead."
+        )
+        assert not hasattr(tle, "TrendlyneSnapshotOnlyError")
+        assert not hasattr(pkg, "TrendlyneSnapshotOnlyError")
+        assert "TrendlyneSnapshotOnlyError" not in tle.__all__
+        assert "TrendlyneSnapshotOnlyError" not in pkg.__all__
+        assert "SNAPSHOT_ONLY_ENDPOINTS" not in pkg.__all__
+        # The attrs flag is a DIFFERENT thing and must survive: it is written on every frame and
+        # says the frame is a single snapshot. Only the policy table and its error went.
+        assert hasattr(tl, "SNAPSHOT_ONLY_ATTR")
+        assert "SNAPSHOT_ONLY_ATTR" in pkg.__all__
+
+        # Negative control. The two names asserted absent above really are the ones that were
+        # removed: client.py still *mentions* the error by name, as a documented decision, while
+        # errors.py must not define it. A name that never existed is still reported absent, so a
+        # typo in the assertions above fails here instead of passing silently.
+        client_source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
+        assert "TrendlyneSnapshotOnlyError" in client_source, (
+            "the removal should be visible in client.py as a documented decision, not a silent gap"
+        )
+        assert "TrendlyneSnapshotOnlyError" not in (
+            PACKAGE_DIR / "errors.py"
+        ).read_text(encoding="utf-8")
+        assert not hasattr(tl, "SNAPSHOT_ONLY_ENDPOINTZ")
     def test_the_share_holding_500_is_recorded_where_the_route_can_be_wired(self):
-        """The measured fact must survive the deletion, or the next agent spends 2 requests
-        rediscovering a guaranteed HTTP 500."""
+        """The measured fact must survive the removal, or the next agent spends two requests
+        rediscovering a guaranteed HTTP 500 and then has to re-invent the guard that went with it.
+        """
         source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
-        assert "SNAPSHOT_ONLY_ENDPOINTS" in source
         assert "HTTP 500" in source
         assert "share-holding" in source, (
             "the snapshot-only route and its verified failure belong in the docstring that tells "
-            "the next agent to add it to both sets"
+            "the next agent to add it to ENDPOINTS and restore a local guard"
         )
-
+        assert "monthly-mutual-fund-share-holding" in source, (
+            "the counter-example matters as much as the rule: that route genuinely filters by "
+            "period, so a blanket snapshot guard would break it"
+        )
+        assert tl.SNAPSHOT_PERIOD == "latest"
+        assert tl.validate_period("latest") == "latest"
     @pytest.mark.parametrize("period", ["2024", "Jun-2024", "latest2", "24"])
     def test_a_deleted_route_is_rejected_before_any_request(self, period):
         """A route the site serves but this package does not is an error, not a minted URL."""
@@ -948,7 +985,7 @@ class TestSnapshotHonesty:
             tl.validate_period(2024)
 
     def test_the_three_verified_period_forms_are_still_accepted(self):
-        """``latest`` / a year / ``Mon-YYYY`` â€” the forms the site's period routes accept.
+        """``latest`` / a year / ``Mon-YYYY`` — the forms the site's period routes accept.
 
         No addressable route takes a period today, so this exercises :func:`validate_period`
         directly rather than through a deleted template. Wiring ``mutual_fund_holdings``, which
@@ -958,7 +995,7 @@ class TestSnapshotHonesty:
             assert tl.validate_period(period) == period
 
     def test_every_frame_declares_the_snapshot_flag(self):
-        """The key is always written â€” False included â€” so a consumer can rely on it existing."""
+        """The key is always written — False included — so a consumer can rely on it existing."""
         ohlc = tl.parse_ohlc(payload(), "MOTHERSON")
         assert ohlc.attrs["bfinance_trendlyne_snapshot_only"] is False
         table = tbt.find_table(text("corporate_actions_motherson.html"), "dividend")
@@ -991,7 +1028,7 @@ class TestProvenance:
 
         It used to be ``"yfinance_back_adjusted"``, which described a *source* rather than this
         route and was false for the whole demerger class. The label now says the two things that
-        are true â€” as-traded, split/bonus adjusted â€” and the demerger exclusion is a separate
+        are true — as-traded, split/bonus adjusted — and the demerger exclusion is a separate
         boolean, because it is the part a consumer is most likely to get wrong.
         """
         frame = tl.parse_ohlc(payload(), "MOTHERSON")
@@ -1005,7 +1042,7 @@ class TestProvenance:
 
         ``"yfinance_back_adjusted"`` was wrong for every symbol measured. On ITC, the demerger
         name, trendlyne agrees with the exchange print (481.60 on 2025-01-03, same as bhavcopy)
-        while yfinance says 463.74 â€” the trendlyne/yfinance close ratio is 1.038513 at every
+        while yfinance says 463.74 — the trendlyne/yfinance close ratio is 1.038513 at every
         session of 2017, 2018, 2020, 2022 and 2024. So on a demerger it is the *exchange* that is
         unrewritten here. Anyone re-deriving the label must not land back on this string.
         """
@@ -1051,7 +1088,7 @@ class TestProvenance:
     def test_the_note_says_the_history_is_truncated_at_listing(self):
         """The note must NOT claim a fixed vendor window.
 
-        This assertion used to be ``"not the listing history" in note`` â€” i.e. the test enforced a
+        This assertion used to be ``"not the listing history" in note`` — i.e. the test enforced a
         statement that was itself false. The claim came from generalising a large-cap measurement
         (5,107 bars from 2006-01-02) to every symbol, and the counter-examples are decisive: a 2023
         IPO cannot have twenty years of bars, and IREDA returns 696 while delisted PAYTM returns
@@ -1109,8 +1146,8 @@ class TestPriceBasis:
     live 2026-09-27.
 
     The basis is **as-traded, back-adjusted for splits and bonuses only, demergers not applied**.
-    The test below demonstrates the *first* two halves from inside one series. The third half â€”
-    demergers â€” cannot be shown from a RELIANCE fixture, because RELIANCE is not a demerger name;
+    The test below demonstrates the *first* two halves from inside one series. The third half —
+    demergers — cannot be shown from a RELIANCE fixture, because RELIANCE is not a demerger name;
     it was measured over ITC against bhavcopy and yfinance and is recorded in
     ``docs/UPSTREAM_SOURCES.md`` and in the module docstring. :class:`TestProvenance` above pins
     the label that encodes all three.
@@ -1184,19 +1221,36 @@ class TestNoDeadScaffolding:
 
         ``ENDPOINTS`` is spelled out in a dict literal and read back by key, so a regex would have
         to guess; walking the tree for ``build_path("x"...)`` and ``ENDPOINTS["x"]`` is exact.
+
+        One wrinkle: the two group routes are built from a **computed** name
+        (``build_path(f"{group.kind}_page")``), because one dispatch serves both kinds. A literal
+        walk cannot see that, so f-string first arguments are collected as regex patterns - literal
+        parts escaped, each hole spelled ``.*`` - and a declared name counts as referenced when it
+        matches one. Without this the check reports the group routes as dead strings, which is
+        exactly the false positive that would tempt someone to delete working code.
         """
         tree = ast.parse((PACKAGE_DIR / "client.py").read_text(encoding="utf-8"))
         names: set[str] = set()
+        patterns: list[str] = []
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id == "build_path"
                 and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
             ):
-                names.add(node.args[0].value)
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names.add(first.value)
+                elif isinstance(first, ast.JoinedStr):
+                    # Escape the literals and spell a hole as ".*": a bare "*" is a quantifier
+                    # with nothing to repeat, and f"{kind}_page" puts the hole at position 0.
+                    patterns.append(
+                        "".join(
+                            re.escape(part.value) if isinstance(part, ast.Constant) else ".*"
+                            for part in first.values
+                        )
+                    )
             elif (
                 isinstance(node, ast.Subscript)
                 and isinstance(node.value, ast.Name)
@@ -1205,8 +1259,29 @@ class TestNoDeadScaffolding:
                 and isinstance(node.slice.value, str)
             ):
                 names.add(node.slice.value)
+        for name in set(tl.ENDPOINTS):
+            if any(re.fullmatch(pattern, name) for pattern in patterns):
+                names.add(name)
         return names
 
+    def test_the_endpoint_reference_walk_is_not_vacuous(self):
+        """Negative control for the walk above: it must find the known build sites.
+
+        A tree-walk that silently matched nothing would make
+        ``test_no_endpoint_template_is_a_dead_string`` fail loudly rather than pass wrongly, so the
+        risk is the opposite one - a walk so loose it matches everything. Both are checked here:
+        the walk finds the three literal routes, its f-string pattern is collected, and a name
+        that no build site can produce is not matched.
+        """
+        found = self._endpoint_names_referenced_in_the_module()
+        assert {"stock_page", "ohlc", "chart_metric"} <= found
+        assert {"sector_page", "industry_page"} <= found
+        assert not found & {"share_holding", "bulk_deals", "rights", "latest_news"}
+        source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
+        assert 'f"{group.kind}_page"' in source, (
+            "the f-string build site this walk depends on has been renamed; update the walk or "
+            "build the group routes with a literal name"
+        )
     def test_no_endpoint_template_is_a_dead_string(self):
         """Every template is built somewhere, or it is a claim nobody backs."""
         declared = set(tl.ENDPOINTS)
@@ -1216,12 +1291,21 @@ class TestNoDeadScaffolding:
             f"Either give the route a fetch method in the same change, or delete the template."
         )
 
-    def test_the_three_addressed_routes_are_the_ones_with_fetch_methods(self):
-        """The whole package, stated as a set: 3 templates, 3 methods, no more."""
-        assert set(tl.ENDPOINTS) == {"stock_page", "ohlc", "chart_metric"}
-        for method in ("ohlc", "ohlc_token", "chart_metric"):
-            assert callable(getattr(tl.TrendlyneClient, method))
+    def test_the_addressed_routes_are_the_ones_with_fetch_methods(self):
+        """The whole package, stated as a set: 5 templates, and a method behind each.
 
+        Two are stock routes and two are group routes, and the split is not cosmetic: a group URL
+        carries no symbol segment and puts the id first, so a single template with an optional
+        branch would match ``/equity/sector/20/...`` as a stock without complaining.
+        """
+        assert set(tl.ENDPOINTS) == {
+            "stock_page", "ohlc", "chart_metric", "sector_page", "industry_page",
+        }
+        for method in ("ohlc", "ohlc_token", "chart_metric", "group_page", "constituents",
+                       "taxonomy", "industry_aggregate"):
+            assert callable(getattr(tl.TrendlyneClient, method)), method
+        assert tl.GROUP_ENDPOINTS == {"sector_page", "industry_page"}
+        assert not (tl.GROUP_ENDPOINTS & {"stock_page", "ohlc", "chart_metric"})
     async def test_each_template_is_the_url_the_client_actually_requests(self):
         """The strongest available form of the same claim: drive the public API offline and check
         that the request matched the template, rather than trusting that a string is used."""
@@ -1252,12 +1336,56 @@ class TestNoDeadScaffolding:
                 f"{name} builds a path the client never requests"
             )
 
-    def test_the_snapshot_policy_only_names_routes_that_can_be_addressed(self):
-        assert tl.SNAPSHOT_ONLY_ENDPOINTS <= frozenset(tl.ENDPOINTS)
+    async def test_each_group_template_is_the_url_the_client_actually_requests(self):
+        """The group routes are built from a computed name, so prove them by driving them.
 
+        This is the same claim as the stock-route version above, in the only form that works when
+        the route name is ``f"{kind}_page"``: an AST walk cannot see it, so the request log is the
+        evidence. It is also the only proof that the computed dispatch resolves to the right
+        template for each kind rather than always picking one.
+        """
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, text=text("sector_20_automobiles.html"))
+
+        client = mock_client(handler)
+        sector = tls.TrendlyneGroup("sector", 20, "automobiles-auto-components", "Autos")
+        industry = tls.TrendlyneGroup("industry", 9, "auto-parts-equipment", "Auto Parts")
+        await client.constituents_async(sector)
+        await client.constituents_async(industry)
+        requested = {url.replace("https://trendlyne.com", "") for url in calls}
+        assert tl.build_path("sector_page", group=sector) in requested
+        assert tl.build_path("industry_page", group=industry) in requested
+        assert len(requested) == 2, f"one request per group, not more: {requested}"
+
+    def test_a_group_route_will_not_swallow_a_symbol_or_the_other_kind(self):
+        """The group route shape is id-first with no symbol segment; a mismatch is an error."""
+        sector = tls.TrendlyneGroup("sector", 20, "automobiles-auto-components", "Autos")
+        industry = tls.TrendlyneGroup("industry", 9, "auto-parts-equipment", "Auto Parts")
+        record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
+        with pytest.raises(ValueError, match="takes a sector or industry"):
+            tl.build_path("sector_page", record)
+        with pytest.raises(ValueError, match="requires kind='sector'"):
+            tl.build_path("sector_page", group=industry)
+        with pytest.raises(ValueError, match="requires kind='industry'"):
+            tl.build_path("industry_page", group=sector)
+        with pytest.raises(ValueError, match="takes a symbol"):
+            tl.build_path("ohlc", record, group=sector, token="T")
+        with pytest.raises(ValueError, match="takes a symbol"):
+            tl.build_path("stock_page")
+        # The shape itself: id first, no symbol segment. If this ever becomes
+        # /equity/{symbol}/{id}/{slug}/ the ids would silently move.
+        assert tl.build_path("sector_page", group=sector) == (
+            "/equity/sector/20/automobiles-auto-components/"
+        )
+        assert tl.build_path("industry_page", group=industry) == (
+            "/equity/industry/9/auto-parts-equipment/"
+        )
     def test_no_docstring_names_a_module_that_does_not_exist(self):
         """``__init__.py`` and ``client.py`` used to point at ``ownership``, ``deals`` and
-        ``corporate`` â€” modules that were never written. A cross-reference to unwritten code is a
+        ``corporate`` — modules that were never written. A cross-reference to unwritten code is a
         promise; the audit that found this one will not run again on its own."""
         pattern = re.compile(r"bfinance\.trendlyne\.([a-z_]+)")
         referenced: dict[str, set[str]] = {}
@@ -1285,6 +1413,933 @@ class TestNoDeadScaffolding:
             f"used to list ownership/deals/corporate this way -- modules that were never written."
         )
 
+
+# =========================================================== robots: the member route is gated
+
+
+class TestRobotsGate:
+    """A path trendlyne's robots.txt disallows must not be fetched by default.
+
+    ``/member/api/ac_snames/?term=`` sits under the **broad** ``Disallow: */member/``. It was the
+    ETF fallback inside ``resolve_any``, so it was reachable from any ``ohlc()`` call for a symbol
+    the equity sitemap omitted. That is a live violation in shipped code, and closing it costs
+    something real: the sitemap carries no ETF at all, so with the gate off those symbols are
+    unreachable. The tests below pin both halves - the refusal and the cost - because closing a
+    violation while hiding what it cost would just move the dishonesty.
+    """
+
+    def test_the_disallowed_path_and_its_rule_are_recorded_as_facts(self):
+        path = tl._SYMBOL_SEARCH_PATH.split("?")[0]
+        assert path in tl.ROBOTS_DISALLOWED_ROUTES
+        assert tl.ROBOTS_DISALLOWED_ROUTES[path] == "Disallow: */member/"
+        assert tl.MEMBER_SEARCH_FLAG == "allow_member_search"
+
+    def test_the_narrow_member_rule_does_not_cover_this_path(self):
+        """The broad rule is what forbids it - worth being exact about.
+
+        robots.txt carries a *second* member rule, ``*/member/api/ac_snames/stock/``, which covers
+        a sibling endpoint. It does not match ``?term=``. So citing it would be the wrong defence
+        for the right behaviour, and the constant must cite the rule that actually applies.
+        """
+        path = tl._SYMBOL_SEARCH_PATH.split("?")[0]
+        assert not path.endswith("/stock/")
+        assert tl.ROBOTS_DISALLOWED_ROUTES[path] != "Disallow: */member/api/ac_snames/stock/"
+
+    def test_the_gate_is_off_by_default(self):
+        assert tl.TrendlyneClient().allow_member_search is False
+        assert tl.TrendlyneClient(allow_member_search=False).allow_member_search is False
+        assert tl.TrendlyneClient(allow_member_search=True).allow_member_search is True
+
+    def test_search_remote_raises_a_typed_error_naming_the_conflict(self, client):
+        with pytest.raises(tle.TrendlyneRobotsDisallowedError) as excinfo:
+            client.search_remote("NIFTYBEES")
+        message = str(excinfo.value)
+        assert "/member/api/ac_snames/" in message
+        assert "Disallow: */member/" in message
+        assert tl.MEMBER_SEARCH_FLAG in message, (
+            "the message must name the switch; a caller blocked by policy needs the way to unblock"
+        )
+        assert isinstance(excinfo.value, tle.TrendlyneError)
+        assert isinstance(excinfo.value, bfinance.UpstreamServiceError)
+
+    def test_the_refusal_costs_no_request(self):
+        """Raised locally, before a socket opens - honouring robots has to be free."""
+        calls = []
+        client = mock_client(lambda r: calls.append(str(r.url)) or httpx.Response(200, json=[]))
+        with pytest.raises(tle.TrendlyneRobotsDisallowedError):
+            client.search_remote("NIFTYBEES")
+        assert calls == [], f"a disallowed path was requested: {calls}"
+
+    def test_it_raises_rather_than_returning_an_empty_list(self, client):
+        """An empty list is the wrong answer twice over.
+
+        trendlyne answers a genuine miss with ``[{"headline": "No matches found"}]``, so ``[]``
+        would be indistinguishable from "no such instrument" - and the caller would conclude the
+        ETF does not exist. It does.
+        """
+        with pytest.raises(tle.TrendlyneRobotsDisallowedError):
+            client.search_remote("NIFTYBEES")
+
+    def test_the_per_call_flag_overrides_a_closed_constructor(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, json=[
+                {"k": 1588, "id": "NIFTYBEES", "slugname": "niftybees"},
+            ])
+
+        client = mock_client(handler)  # constructor gate left closed
+        with pytest.raises(tle.TrendlyneRobotsDisallowedError):
+            client.search_remote("NIFTYBEES")
+        assert calls == []
+        found = client.search_remote("NIFTYBEES", allow_member_search=True)
+        assert [r.symbol for r in found] == ["NIFTYBEES"]
+        assert len(calls) == 1, "the opt-in costs exactly the one request it authorises"
+
+    def test_the_constructor_flag_opens_the_route_for_resolve_any(self):
+        def handler(request):
+            return httpx.Response(200, json=[
+                {"k": 1588, "id": "NIFTYBEES", "slugname": "niftybees"},
+            ])
+
+        client = mock_client(
+            handler,
+            allow_member_search=True,
+        )
+        client.load_symbol_index(text("sitemap_excerpt.xml"))
+        record = client.resolve_any("NIFTYBEES")
+        assert record.symbol == "NIFTYBEES"
+        assert record.stock_id == 1588
+        assert client.symbol_resolution == "member_search"
+
+    def test_resolve_any_skips_the_fallback_explicitly_and_records_it(self, indexed_client):
+        """The skip is a stated fact in two places, never a silent miss."""
+        with pytest.raises(tle.TrendlyneSymbolNotFoundError) as excinfo:
+            indexed_client.resolve_any("NIFTYBEES")
+        message = str(excinfo.value)
+        assert "NOT tried" in message, "the fallback was skipped, and that must be said out loud"
+        assert "Disallow: */member/" in message
+        assert "may well exist on trendlyne" in message, (
+            "the caller must be able to tell 'we will not ask' from 'it does not exist'"
+        )
+        assert indexed_client.symbol_resolution == "skipped_robots_disallowed"
+
+    def test_resolve_any_records_the_route_that_actually_worked(self, indexed_client):
+        assert indexed_client.resolve_any("MOTHERSON").symbol == "MOTHERSON"
+        assert indexed_client.symbol_resolution == "sitemap"
+
+    def test_the_recorded_sitemap_excerpt_carries_no_etf(self, indexed_client):
+        """What the 12-entry recorded excerpt can prove, which is not much - and that is the point.
+
+        The strong claim (the *full* 5,922-entry document holds no ETF) rests on a measurement too
+        large to fixture, so it is pinned as a documented fact instead. This asserts the weak half
+        that the excerpt can carry, and the next test asserts the strong half is still written down
+        where a caller will meet it.
+        """
+        index = tl.parse_sitemap(text("sitemap_excerpt.xml"))
+        etf_like = [s for s in index if "BEES" in s or s.endswith("ETF") or s.startswith("SETF")]
+        assert etf_like == [], f"the excerpt's 12 entries include an ETF: {etf_like}"
+
+    def test_the_etf_coverage_cost_is_written_down_not_hidden(self):
+        source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
+        assert "no ETF is reachable" in source, (
+            "closing the robots violation makes every ETF unreachable on the default path. That "
+            "is a real coverage loss and the module must keep saying so."
+        )
+        for name in ("NIFTYBEES", "BANKBEES", "GOLDBEES"):
+            assert name in source
+        # ...and the sitemap side of the claim, so the cost is traceable to a measurement.
+        assert "5,922" in source
+
+    def test_only_the_gated_method_can_reach_the_disallowed_path(self):
+        """Structural: the template is formatted in exactly one function, and that one is gated.
+
+        A new caller added later would show up here as a second ``.format()`` site, which is the
+        point - this is the check that stops the gate being quietly bypassed, rather than a note
+        that documents the bypass afterwards. It walks the AST for the enclosing function rather
+        than matching names, so a rename cannot quietly satisfy it.
+        """
+        import ast as _ast
+
+        source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
+        tree = _ast.parse(source)
+        parents = {}
+        for node in _ast.walk(tree):
+            for child in _ast.iter_child_nodes(node):
+                parents[child] = node
+
+        def enclosing(node) -> str:
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    return node.name
+            return "<module>"
+
+        format_sites = [
+            node for node in _ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "_SYMBOL_SEARCH_PATH"
+        ]
+        assert len(format_sites) == 1, (
+            f"the disallowed template is built in {len(format_sites)} places; each needs the gate"
+        )
+        site = format_sites[0]
+        assert enclosing(site) == "search_remote_async", (
+            f"the fetch moved to {enclosing(site)!r}; that function must call "
+            f"_require_member_search before it"
+        )
+
+        # ...and inside that function the gate comes first, the fetch second.
+        fn = site
+        while not isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            fn = parents[fn]
+        gate_lines = [
+            n.lineno for n in _ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "_require_member_search"
+        ]
+        fetch_lines = [
+            n.lineno for n in _ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "fetch_json_async"
+        ]
+        assert len(gate_lines) == 1, "the gate must be checked exactly once in the fetch path"
+        assert len(fetch_lines) == 1
+        assert gate_lines[0] < fetch_lines[0], (
+            "the gate has to run before the request, not after it"
+        )
+    async def test_the_ohlc_frame_records_how_the_symbol_was_resolved(self, indexed_client):
+        """The degradation is visible on a frame that otherwise succeeded, not only on a failure."""
+        def handler(request):
+            url = str(request.url)
+            if "equity-sitemap" in url:
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            if "/equity/878/" in url:
+                return httpx.Response(200, text=text("stock_page_motherson_breadcrumb.html")
+                                      + text("stock_page_motherson.html"))
+            return httpx.Response(200, json=payload())
+
+        indexed_client.transport = httpx.MockTransport(handler)
+        frame = await indexed_client.ohlc_async("MOTHERSON")
+        assert frame.attrs["bfinance_trendlyne_symbol_resolution"] == "sitemap"
+
+
+# =========================================================== classification, for free
+
+
+class TestSectorClassification:
+    """Sector and industry, off the page the OHLC token is already read from."""
+
+    def test_the_breadcrumb_carries_id_slug_and_name_for_both(self):
+        found = tls.parse_classification(text("stock_page_motherson_breadcrumb.html"))
+        assert set(found) == {"sector", "industry"}
+        assert (found["sector"].group_id, found["sector"].slug) == (
+            20, "automobiles-auto-components"
+        )
+        assert found["sector"].name == "AUTOMOBILES & AUTO COMPONENTS"
+        assert (found["industry"].group_id, found["industry"].slug) == (9, "auto-parts-equipment")
+        assert found["industry"].name == "AUTO PARTS & EQUIPMENT"
+
+    def test_the_group_route_puts_the_id_first_and_has_no_symbol_segment(self):
+        found = tls.parse_classification(text("stock_page_motherson_breadcrumb.html"))
+        assert found["sector"].path == "/equity/sector/20/automobiles-auto-components/"
+        assert found["industry"].path == "/equity/industry/9/auto-parts-equipment/"
+        # The stock route is the opposite shape. If these ever unify, these are the assertions
+        # that notice.
+        record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
+        assert record.page_path == "/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/"
+
+    def test_the_classification_label_is_the_only_field_name(self):
+        """There is no data-* attribute and no embedded JSON, so the label is the discriminator.
+
+        Proved by deletion rather than asserted: strip the ``SECTOR :`` label and the sector
+        disappears while the untouched industry survives. That is exactly why the label had to be
+        the key - a parser keyed on the URL would still have found the sector, and would have
+        found it by guessing.
+        """
+        page = text("stock_page_motherson_breadcrumb.html")
+        assert "data-sector" not in page and "data-industry" not in page
+        stripped = page.replace("SECTOR : AUTOMOBILES &amp; AUTO COMPONENTS", "AUTOMOBILES")
+        assert stripped != page, "the label really was removed from the fixture"
+        found = tls.parse_classification(stripped)
+        assert "sector" not in found
+        assert found["industry"].group_id == 9, "the untouched industry is still found"
+    def test_the_non_classification_breadcrumbs_are_ignored(self):
+        """MARKETS and the symbol's own item are breadcrumbs too, and neither is a group."""
+        found = tls.parse_classification(text("stock_page_motherson_breadcrumb.html"))
+        assert len(found) == 2
+        assert all(g.kind in ("sector", "industry") for g in found.values())
+        # The symbol's own breadcrumb has no label at all, so it cannot be mistaken for one.
+        page = text("stock_page_motherson_breadcrumb.html")
+        assert "<span property=\"name\">MARKETS</span>" in page
+        assert "SAMVARDHANA MOTHERSON INTERNATIONAL LTD." in page
+
+    def test_a_labelled_breadcrumb_whose_href_disagrees_raises(self):
+        """A label saying SECTOR on an industry URL is a contradiction, not a hint to pick one."""
+        contradictory = (
+            '<ol class="tl_breadcrumb" vocab="https://schema.org/" typeof="BreadcrumbList">'
+            '<li><a href="https://trendlyne.com/equity/industry/9/auto-parts-equipment/" '
+            'property="item" typeof="WebPage">'
+            '<span property="name">SECTOR : AUTO PARTS &amp; EQUIPMENT</span></a></li></ol>'
+        )
+        with pytest.raises(tle.TrendlyneSchemaError) as excinfo:
+            tls.parse_classification(contradictory)
+        assert "sector" in str(excinfo.value)
+        assert "id comes first" in str(excinfo.value)
+
+    def test_the_two_sources_disagree_on_case_and_agree_on_id(self):
+        """trendlyne spells the same sector two ways; the id is the thing to key on.
+
+        The stock-page breadcrumb is caps, the sector-page select is title case. Both are kept
+        verbatim - folding case would be inventing a spelling the site does not use - so the test
+        pins the disagreement and the agreement rather than hiding it.
+        """
+        from_breadcrumb = tls.parse_classification(text("stock_page_motherson_breadcrumb.html"))
+        from_select = tls.parse_taxonomy(text("sector_20_automobiles.html"))
+        sector_breadcrumb, sector_select = from_breadcrumb["sector"], from_select["sector:20"]
+        assert sector_breadcrumb.group_id == sector_select.group_id == 20
+        assert sector_breadcrumb.slug == sector_select.slug
+        assert sector_breadcrumb.name == "AUTOMOBILES & AUTO COMPONENTS"
+        assert sector_select.name == "Automobiles & Auto Components"
+        assert sector_breadcrumb.name != sector_select.name, (
+            "if trendlyne ever unifies the casing this test should be revisited, not deleted"
+        )
+
+    async def test_classification_costs_no_extra_request(self, indexed_client):
+        """The whole point: the page is already being fetched for the token."""
+        def counting(breadcrumb: bool):
+            calls = []
+
+            def handler(request):
+                url = str(request.url)
+                calls.append(url)
+                if "equity-sitemap" in url:
+                    return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+                if "/equity/878/" in url:
+                    # The breadcrumb goes FIRST: the token fixture is a mid-document fragment, so
+                    # appending a complete <ol> after it nests wrongly and lxml drops it.
+                    page = (
+                        text("stock_page_motherson_breadcrumb.html")
+                        if breadcrumb else ""
+                    ) + text("stock_page_motherson.html")
+                    return httpx.Response(200, text=page)
+                return httpx.Response(200, json=payload())
+
+            client = mock_client(handler)
+            client.load_symbol_index(text("sitemap_excerpt.xml"))
+            return client, calls
+
+        with_breadcrumb, calls_with = counting(True)
+        without_breadcrumb, calls_without = counting(False)
+        frame = await with_breadcrumb.ohlc_async("MOTHERSON")
+        await without_breadcrumb.ohlc_async("MOTHERSON")
+        assert len(calls_with) == len(calls_without), (
+            "reading the classification must not add a request: "
+            f"{len(calls_with)} vs {len(calls_without)}"
+        )
+        assert frame.attrs["bfinance_trendlyne_classification"] == "present"
+
+    async def test_the_ohlc_frame_carries_id_slug_and_name_for_each(self, indexed_client):
+        def handler(request):
+            url = str(request.url)
+            if "equity-sitemap" in url:
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            if "/equity/878/" in url:
+                return httpx.Response(200, text=text("stock_page_motherson_breadcrumb.html")
+                                      + text("stock_page_motherson.html"))
+            return httpx.Response(200, json=payload())
+
+        indexed_client.transport = httpx.MockTransport(handler)
+        frame = await indexed_client.ohlc_async("MOTHERSON")
+        assert frame.attrs["bfinance_trendlyne_sector"] == {
+            "id": 20, "slug": "automobiles-auto-components",
+            "name": "AUTOMOBILES & AUTO COMPONENTS",
+        }
+        assert frame.attrs["bfinance_trendlyne_industry"] == {
+            "id": 9, "slug": "auto-parts-equipment", "name": "AUTO PARTS & EQUIPMENT",
+        }
+
+    async def test_the_keys_are_written_even_when_the_breadcrumb_is_absent(self, indexed_client):
+        """A missing key reads as 'not applicable'; ``None`` plus a status string does not."""
+        def handler(request):
+            url = str(request.url)
+            if "equity-sitemap" in url:
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            if "/equity/878/" in url:
+                return httpx.Response(200, text=text("stock_page_motherson.html"))
+            return httpx.Response(200, json=payload())
+
+        indexed_client.transport = httpx.MockTransport(handler)
+        frame = await indexed_client.ohlc_async("MOTHERSON")
+        assert frame.attrs["bfinance_trendlyne_classification"] == "absent"
+        assert frame.attrs["bfinance_trendlyne_sector"] is None
+        assert frame.attrs["bfinance_trendlyne_industry"] is None
+        assert frame.attrs["bfinance_trendlyne_symbol_resolution"] == "sitemap"
+
+    async def test_a_warm_token_still_reports_the_classification(self, indexed_client):
+        """Token and classification are cached in one entry; caching the token alone would
+        silently make the classification cost a second request on every later call."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            if "equity-sitemap" in str(request.url):
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            if "/equity/878/" in str(request.url):
+                return httpx.Response(200, text=text("stock_page_motherson_breadcrumb.html")
+                                      + text("stock_page_motherson.html"))
+            return httpx.Response(200, json=payload())
+
+        indexed_client.transport = httpx.MockTransport(handler)
+        token, first = await indexed_client.ohlc_token_async("MOTHERSON")
+        page_fetches = sum(1 for c in calls if "/equity/878/" in c)
+        assert page_fetches == 1
+        token2, second = await indexed_client.ohlc_token_async("MOTHERSON")
+        assert sum(1 for c in calls if "/equity/878/" in c) == page_fetches, (
+            "a warm cache must not re-fetch the page to answer the classification"
+        )
+        assert token2 == token
+        assert first == second and first["sector"].group_id == 20
+
+    async def test_the_strict_door_raises_where_the_ohlc_path_reports(self, indexed_client):
+        """Two doors, two behaviours, on purpose: the product differs."""
+        def handler(request):
+            if "equity-sitemap" in str(request.url):
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            return httpx.Response(200, text=text("stock_page_motherson.html"))
+
+        indexed_client.transport = httpx.MockTransport(handler)
+        with pytest.raises(tle.TrendlyneSchemaError, match="breadcrumb"):
+            await indexed_client.classification_async("MOTHERSON")
+        # The token itself is unaffected: the product of ohlc_token_async is the token.
+        token, classification = await indexed_client.ohlc_token_async("MOTHERSON")
+        assert token and classification == {}
+
+
+# =========================================================== the taxonomy
+
+
+class TestSectorTaxonomy:
+    def test_the_vocabulary_is_harvested_whole_from_one_page(self):
+        taxonomy = tls.parse_taxonomy(text("sector_20_automobiles.html"))
+        assert tls.taxonomy_counts(taxonomy) == {
+            "sectors": 31, "industries": 133, "total": 164,
+        }
+        sector_ids = sorted(int(k.split(":")[1]) for k in taxonomy if k.startswith("sector:"))
+        industry_ids = sorted(int(k.split(":")[1]) for k in taxonomy if k.startswith("industry:"))
+        assert sector_ids == list(range(1, 32)), "31 sectors, ids 1-31, contiguous"
+        assert industry_ids[0] == 2 and industry_ids[-1] == 284
+        assert industry_ids != list(range(2, 285)), "133 industries over ids 2-284, so not contiguous"
+        assert len(industry_ids) == 133
+
+    def test_every_option_becomes_a_group_with_a_clean_display_name(self):
+        taxonomy = tls.parse_taxonomy(text("sector_20_automobiles.html"))
+        assert taxonomy["sector:20"] == tls.TrendlyneGroup(
+            "sector", 20, "automobiles-auto-components", "Automobiles & Auto Components",
+        )
+        assert taxonomy["industry:9"] == tls.TrendlyneGroup(
+            "industry", 9, "auto-parts-equipment", "Auto Parts & Equipment",
+        )
+        # The "Sector:"/"Industry:" prefix is a field name, not part of the name.
+        assert not any(g.name.lower().startswith(("sector", "industry")) for g in taxonomy.values())
+
+    def test_no_id_is_hardcoded_the_ids_move_with_the_page(self):
+        """Proof by mutation: renumber the select and the parser follows.
+
+        A hardcoded id would survive this and keep returning 20. The parser has no way to know 20
+        except by reading it, which is the property worth having.
+        """
+        page = text("sector_20_automobiles.html")
+        renumbered = page.replace(
+            "/equity/sector/20/automobiles-auto-components/", "/equity/sector/77/renamed-sector/"
+        ).replace("/equity/industry/9/auto-parts-equipment/", "/equity/industry/88/renamed-industry/")
+        moved = tls.parse_taxonomy(renumbered)
+        assert "sector:77" in moved and "sector:20" not in moved
+        assert moved["sector:77"].slug == "renamed-sector"
+        assert "industry:88" in moved and "industry:9" not in moved
+        # And the original page still says 20, so the substitution really did move it.
+        assert "sector:20" in tls.parse_taxonomy(page)
+
+    def test_the_group_a_page_is_about_is_the_option_it_marks_selected(self):
+        assert tls.declared_group(text("sector_20_automobiles.html")) == tls.TrendlyneGroup(
+            "sector", 20, "automobiles-auto-components", "Automobiles & Auto Components",
+        )
+
+    def test_a_page_with_no_select_raises_rather_than_returning_an_empty_vocabulary(self):
+        with pytest.raises(tle.TrendlyneSchemaError) as excinfo:
+            tls.parse_taxonomy(text("corporate_actions_motherson.html"))
+        assert tls.TAXONOMY_SELECT_ID in str(excinfo.value)
+        assert "only place trendlyne publishes the group ids" in str(excinfo.value)
+
+    def test_a_group_refuses_a_bad_kind_or_id(self):
+        with pytest.raises(ValueError, match="kind must be"):
+            tls.TrendlyneGroup("index", 1, "x", "X")
+        with pytest.raises(ValueError, match="positive integer"):
+            tls.TrendlyneGroup("sector", 0, "x", "X")
+
+    async def test_the_vocabulary_costs_exactly_one_request(self, client):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, text=text("sector_20_automobiles.html"))
+
+        client.transport = httpx.MockTransport(handler)
+        sector = tls.TrendlyneGroup("sector", 20, "automobiles-auto-components", "Autos")
+        taxonomy = await client.taxonomy_async(sector)
+        assert len(calls) == 1, f"the whole vocabulary must cost one request, not one per group"
+        assert len(taxonomy) == 164
+        assert calls[0].endswith("/equity/sector/20/automobiles-auto-components/")
+
+
+# =========================================================== constituents
+
+
+class TestSectorConstituents:
+    @pytest.fixture
+    def sector_page(self) -> str:
+        return text("sector_20_automobiles.html")
+
+    @pytest.fixture
+    def constituents(self, sector_page):
+        return tls.parse_constituents(sector_page)
+
+    # ---------------------------------------------------------------- the two signatures
+
+    def test_the_page_has_exactly_two_tables_and_each_gets_its_own_signature(self, sector_page):
+        assert tbt.page_signatures(sector_page) == {
+            0: "sector_constituents", 1: "sector_industry_aggregate",
+        }
+        assert tls.CONSTITUENTS_SIG != tls.AGGREGATE_SIG
+        assert tls.CONSTITUENTS_SIG in tbt.SIGNATURES
+        assert tls.AGGREGATE_SIG in tbt.SIGNATURES
+        assert [s.name for s in tls.load_signatures()] == [
+            tls.CONSTITUENTS_SIG, tls.AGGREGATE_SIG
+        ]
+
+    def test_the_signatures_are_mutually_exclusive_on_the_real_headers(self, sector_page):
+        """Each requires a header group the other does not have, so neither can claim both tables.
+
+        Both tables' first header cell is ``Name``-ish, so a signature keyed on that word would
+        match both. Neither one uses it. This is the assertion that keeps them apart.
+        """
+        headers = [
+            [c.get_text(" ", strip=True) for c in
+             t.find("tr").find_all(["th", "td"])]
+            for t in tbt.find_table_elements(sector_page, tls.CONSTITUENTS_SIG)
+        ] + [
+            [c.get_text(" ", strip=True) for c in
+             t.find("tr").find_all(["th", "td"])]
+            for t in tbt.find_table_elements(sector_page, tls.AGGREGATE_SIG)
+        ]
+        constituents_header, aggregate_header = headers[0], headers[1]
+        assert tbt.classify_table(constituents_header) == tls.CONSTITUENTS_SIG
+        assert tbt.classify_table(aggregate_header) == tls.AGGREGATE_SIG
+        for signature in (tls.CONSTITUENTS_SIG, tls.AGGREGATE_SIG):
+            groups = tbt.SIGNATURES[signature].required
+            other = constituents_header if signature == tls.AGGREGATE_SIG else aggregate_header
+            for group in groups:
+                assert not any(alias in {tbt.normalize_header(h) for h in other} for alias in group), (
+                    f"{signature} could also match the other table via {group}"
+                )
+
+    def test_a_bare_name_header_matches_neither(self):
+        """The negative control for the mutual-exclusion claim above.
+
+        ``Name`` alone - which is the aggregate table's actual first header - is not enough for
+        either signature. Without this, a future loosening of either one would still pass the
+        real-header test whenever the page kept its other columns.
+        """
+        assert tbt.classify_table(["Name", "Day Change %"]) is None
+        assert tbt.classify_table(["Name"]) is None
+        assert tbt.classify_table(["Stock Name"]) is None
+        assert tbt.classify_table(
+            ["Name", "Day Change %", "No. of Companies", "Advances", "Declines",
+             "Advances/Declines Ratio", "Industry Score"]
+        ) == tls.AGGREGATE_SIG
+        assert tbt.classify_table(
+            ["Stock Name", "3M Price Chart", "Market Cap", "LTP Last Traded Price"]
+        ) == tls.CONSTITUENTS_SIG
+
+    def test_heading_text_cannot_choose_between_them(self, sector_page):
+        """Selecting by heading is this repo's known failure mode, so the page is checked for it.
+
+        The sector page's ``<title>``/``<h1>`` say "Sector Analysis" once, for the whole page, and
+        the trimmed fixture drops them - which is the point: a parser that needed them could not
+        have produced this frame at all.
+        """
+        assert "Sector Analysis" not in sector_page
+        assert tbt.classify_table(["Stock Name", "Market Cap", "LTP Last Traded Price"]) \
+            == tls.CONSTITUENTS_SIG
+
+    def test_the_aggregate_block_is_a_frame_of_its_own(self, sector_page):
+        aggregate = tls.parse_industry_aggregate(sector_page)
+        assert list(aggregate.columns)[:3] == ["Name", "Day Change %", "No. of Companies"]
+        assert len(aggregate) == 5
+        assert aggregate.attrs["bfinance_trendlyne_table"] == tls.AGGREGATE_SIG
+
+    def test_an_industry_page_has_no_aggregate_block(self, sector_page):
+        """The block is a sector-page thing; asking on the wrong page raises rather than lies."""
+        without = sector_page.split("</table>")[0] + "</table>"
+        with pytest.raises(tle.TrendlyneTableNotFoundError):
+            tls.parse_industry_aggregate(without)
+
+    # ---------------------------------------------------------------- the two countings
+
+    def test_the_aggregate_block_sums_to_the_constituent_row_count(self, sector_page, constituents):
+        """Two independent server-side counts agreeing, asserted.
+
+        The block's per-industry company counts must sum to the constituent table's row count. If
+        the page were paginated, capped, or assembled from a stale cache, these would drift - and
+        the drift is the only symptom a truncated list has.
+        """
+        aggregate = tls.parse_industry_aggregate(sector_page)
+        counts = [int(v) for v in aggregate["No. of Companies"]]
+        assert counts == [7, 14, 147, 13, 29]
+        assert sum(counts) == 210
+        assert sum(counts) == constituents.row_count
+
+    def test_the_aggregate_names_the_industry_the_recorded_stock_belongs_to(self, sector_page):
+        """Ties the 147 to a symbol, using two small fixtures instead of a 1.6 MB industry page.
+
+        MOTHERSON's own breadcrumb puts it in industry 9 / "Auto Parts & Equipment", and the sector
+        page's aggregate block gives that industry 147 companies. Industry 9's own page was
+        separately observed to list exactly 147 rows (recorded in META.json notes) - a second,
+        independent server-side count, which would otherwise need its own fixture to assert.
+        """
+        group = tls.parse_classification(text("stock_page_motherson_breadcrumb.html"))["industry"]
+        assert (group.group_id, group.name) == (9, "AUTO PARTS & EQUIPMENT")
+        aggregate = tls.parse_industry_aggregate(sector_page)
+        row = aggregate[aggregate["Name"] == "Auto Parts & Equipment"]
+        assert len(row) == 1
+        assert int(row["No. of Companies"].iloc[0]) == 147
+
+    # ---------------------------------------------------------------- completeness
+
+    def test_all_210_constituents_are_returned(self, constituents):
+        assert constituents.row_count == 210
+        assert len(constituents.frame) == 210
+        assert constituents.frame["Symbol"].nunique() == 210
+        assert list(constituents.frame.columns) == [
+            "Symbol", "Company", "Stock ID", "Market Cap", "Weight %", "LTP", "Page", "Sparkline",
+        ]
+
+    def test_the_sector_total_is_the_sum_of_the_rows(self, constituents):
+        assert constituents.sector_market_cap == pytest.approx(3660716.0526652, rel=1e-12)
+        assert constituents.frame["Market Cap"].sum() == pytest.approx(
+            constituents.sector_market_cap, rel=1e-12
+        )
+
+    def test_weights_are_exact_and_partition_the_sector(self, constituents):
+        weights = constituents.frame.set_index("Symbol")["Weight %"]
+        assert weights.sum() == pytest.approx(100.0, abs=1e-9)
+        assert weights["MARUTI"] == pytest.approx(10.3621, abs=1e-4)
+        assert weights["M&M"] == pytest.approx(10.3098, abs=1e-4)
+        assert weights["BAJAJ-AUTO"] == pytest.approx(8.6131, abs=1e-4)
+        assert weights["MOTHERSON"] == pytest.approx(4.7777, abs=1e-4)
+        # The weight is exactly the ratio, not a rounded copy of it.
+        row = constituents.frame.set_index("Symbol").loc["MARUTI"]
+        assert row["Weight %"] == pytest.approx(row["Market Cap"] / 3660716.0526652 * 100)
+
+    def test_the_top_four_are_the_four_largest(self, constituents):
+        top4 = list(constituents.frame.nlargest(4, "Market Cap")["Symbol"])
+        assert top4 == ["MARUTI", "M&M", "BAJAJ-AUTO", "EICHERMOT"]
+        assert constituents.frame["Weight %"].sum() > 34.0
+
+    # ---------------------------------------------------------------- the & fix
+
+    def test_unescaping_happens_before_percent_decoding(self):
+        """The order is the whole fix, so it is asserted on the helper, not just on the frame."""
+        raw = "https://trendlyne.com/equity/807/M&amp;M/mahindra-mahindra-ltd/"
+        assert tls._decoded(raw) == "https://trendlyne.com/equity/807/M&M/mahindra-mahindra-ltd/"
+        # Percent-decoding alone leaves the entity behind, which matches no sitemap symbol.
+        from urllib.parse import unquote
+
+        assert "M&amp;M" in unquote(raw)
+        assert "M&M" in tls._decoded(raw)
+
+    def test_the_four_hostile_symbols_survive(self, constituents):
+        """Four rows share a trait that a naive pattern drops: two hold ``&``, two hold ``-``.
+
+        The brief listed all four as escaped-ampersand cases. Measured on the page, only two hrefs
+        actually carry an escaped ``&`` (``ARE&amp;M`` and ``M&amp;M``); ``BAJAJ-AUTO`` and
+        ``MMRUBBR-B`` carry a hyphen and no ampersand at all. All four are dropped by a symbol
+        pattern of ``[A-Z0-9]+``, so all four are asserted - and the *count* of escaped ones is 2,
+        not 4.
+        """
+        symbols = set(constituents.frame["Symbol"])
+        for name in ("ARE&M", "M&M", "BAJAJ-AUTO", "MMRUBBR-B"):
+            assert name in symbols, f"{name} vanished from the sector"
+        assert constituents.escaped_ampersand_rows == 2, (
+            "exactly two hrefs carry an escaped ampersand; if this reads 0 or 4, re-measure "
+            "rather than adjusting the assertion"
+        )
+        escaped = set(constituents.frame[constituents.frame["Symbol"].str.contains("&")]["Symbol"])
+        assert escaped == {"ARE&M", "M&M"}
+
+    def test_a_naive_symbol_pattern_would_lose_four_constituents(self, sector_page):
+        """Negative control: prove the tolerance is load-bearing rather than decorative."""
+        import re as _re
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(sector_page, "lxml")
+        table = tbt.find_table_elements(sector_page, tls.CONSTITUENTS_SIG)[0]
+        anchors = table.find_all("a", class_="stockrow")
+        assert len(anchors) == 210
+        naive = _re.compile(r"/equity/\d+/([A-Z0-9]+)/")
+        lost = [
+            a["href"] for a in anchors
+            if naive.search(tls._decoded(a["href"])) is None
+        ]
+        assert len(lost) == 4, f"expected 4 symbols a [A-Z0-9]+ pattern cannot read: {lost}"
+        for href in lost:
+            assert any(name in href for name in ("ARE&M", "M&M", "BAJAJ-AUTO", "MMRUBBR-B"))
+        assert soup is not None
+
+    def test_the_ampersand_rows_carry_the_right_ids(self, constituents):
+        """The id comes from the href, so the two escaped rows must not be off by a segment."""
+        rows = constituents.frame.set_index("Symbol")
+        assert rows.loc["M&M", "Stock ID"] == 807
+        assert rows.loc["ARE&M", "Stock ID"] == 68
+        assert rows.loc["M&M", "Page"] == "/equity/807/M&M/mahindra-mahindra-ltd/"
+        assert rows.loc["M&M", "Company"] == "Mahindra & Mahindra"
+
+    # ---------------------------------------------------------------- the row-cap guard
+
+    def test_a_real_count_is_not_flagged(self, constituents):
+        assert constituents.suspiciously_capped is False
+        assert 210 % tls.SUSPICIOUS_ROW_MULTIPLE != 0
+
+    def test_a_round_count_is_flagged_because_the_site_caps_at_500(self):
+        """The live precedent: the insider-trading page returns exactly 500 and may be capped.
+
+        A truncated frame looks exactly like a complete one, so the count travels with the frame
+        and the round number is flagged. A flag rather than a raise, because a genuine 500-name
+        sector is possible and refusing to return a frame would be trading one wrong answer for a
+        different one.
+        """
+        assert tls.SUSPICIOUS_ROW_MULTIPLE == 100
+        result = tls.ConstituentResult(
+            frame=tls.parse_constituents(text("sector_20_automobiles.html")).frame,
+            group=None, row_count=500, sector_market_cap=1.0, escaped_ampersand_rows=2,
+        )
+        assert result.suspiciously_capped is True
+        assert tls.ConstituentResult(
+            frame=result.frame, group=None, row_count=0, sector_market_cap=1.0,
+            escaped_ampersand_rows=0,
+        ).suspiciously_capped is False, "an empty page is a different problem, not a cap"
+
+    def test_a_500_row_page_is_flagged_end_to_end(self, sector_page):
+        """The flag has to fire on a real parse, not just on a hand-built result."""
+        page = _synthetic_sector_page(rows=500)
+        result = tls.parse_constituents(page)
+        assert result.row_count == 500
+        assert result.suspiciously_capped is True
+        attrs = tls.constituent_attrs(result)
+        assert attrs["bfinance_trendlyne_constituent_rows"] == 500
+        assert attrs["bfinance_trendlyne_rows_suspiciously_capped"] is True
+        assert "capped" in attrs["bfinance_trendlyne_note"]
+
+    def test_the_count_and_the_flag_travel_with_the_frame(self, constituents):
+        attrs = tls.constituent_attrs(constituents, source_url="https://trendlyne.com/x/")
+        assert attrs["bfinance_provenance"] == "trendlyne"
+        assert attrs["bfinance_trendlyne_table"] == tls.CONSTITUENTS_SIG
+        assert attrs["bfinance_trendlyne_constituent_rows"] == 210
+        assert attrs["bfinance_trendlyne_rows_suspiciously_capped"] is False
+        assert attrs["bfinance_trendlyne_weight_sum_percent"] == pytest.approx(100.0, abs=1e-9)
+        assert attrs["bfinance_trendlyne_escaped_ampersand_rows"] == 2
+        assert attrs["bfinance_trendlyne_group"] == "sector:20"
+        assert attrs["bfinance_trendlyne_source"] == "https://trendlyne.com/x/"
+
+    # ---------------------------------------------------------------- the market-cap unit
+
+    def test_the_market_cap_unit_is_not_asserted(self, constituents):
+        """The column header carries no unit, and the share-count test does not resolve one.
+
+        Dividing the market cap by the row's own last-traded price must give a share count. It
+        does not: the implied values span 0.13 to 1055 and 37 of 210 fall below 1 crore. So the
+        unit is recorded as unverified and the weight is the contract.
+        """
+        attrs = tls.constituent_attrs(constituents)
+        assert attrs["bfinance_trendlyne_market_cap_unit"] == "unverified"
+        assert "UNIT is not asserted" in attrs["bfinance_trendlyne_note"]
+        assert "Weight %" in attrs["bfinance_trendlyne_note"]
+        # The price column is genuine, so the failure is the ratio's, not the price's.
+        assert constituents.frame.set_index("Symbol").loc["MOTHERSON", "LTP"] == pytest.approx(
+            165.71
+        )
+
+    def test_the_implied_share_count_really_is_unusable(self, constituents):
+        """The measurement behind the decision, pinned so a future agent can see why."""
+        frame = constituents.frame.dropna(subset=["LTP"])
+        implied = frame["Market Cap"] / frame["LTP"]
+        assert len(frame) == 210
+        assert implied.min() < 1.0
+        assert (implied < 1.0).sum() == 37, "37 of 210 are impossible as a crore share count"
+        assert implied.max() > 1000.0
+        # ...while the ranking is plainly a market-cap ranking, so the column means what it says.
+        assert list(frame.nlargest(3, "Market Cap")["Symbol"]) == ["MARUTI", "M&M", "BAJAJ-AUTO"]
+
+    # ---------------------------------------------------------------- the sparkline
+
+    def test_every_row_carries_a_sparkline_left_uninterpreted(self, constituents):
+        """The sparkline is weekly and its length is **not** a constant, so none is asserted.
+
+        Measured on the recorded page: 183 of 210 rows carry 14 points and 27 carry fewer - 13, 12,
+        11, 10, 9, 8, 7, 5 and 2, all of them recently-listed names (BIMETAL, PAEL, JAINEX,
+        VELJAN, ...). A 14-point window cannot exist for a company that listed last month, so
+        "every row has 14 points" would be false and a parser that padded to 14 would be
+        fabricating history.
+        """
+        frame = constituents.frame
+        lengths = [len(tls.sparkline_points(v)) for v in frame["Sparkline"]]
+        assert min(lengths) >= 2, f"a sparkline with fewer than 2 points is not a sparkline"
+        assert max(lengths) == 14, "14 weekly points is the full window"
+        assert lengths.count(14) == 183
+        assert len(set(lengths)) > 1, (
+            "if this ever became uniformly 14 the point-count distribution below should be "
+            "re-measured, not deleted"
+        )
+
+    def test_the_last_sparkline_point_is_the_live_price_on_the_same_row(self, constituents):
+        """A real relationship between two independently-rendered values, on every row."""
+        for _, row in constituents.frame.iterrows():
+            points = tls.sparkline_points(row["Sparkline"])
+            assert points, row["Symbol"]
+            assert points[-1] == pytest.approx(row["LTP"]), (
+                f"{row['Symbol']}: sparkline ends at {points[-1]} but LTP is {row['LTP']}"
+            )
+
+    def test_the_payload_is_carried_verbatim_with_its_dates(self, constituents):
+        """Both lists are preserved and neither is interpreted; the dates are the page's own."""
+        import json as _json
+
+        raw = constituents.frame.set_index("Symbol").loc["MOTHERSON", "Sparkline"]
+        payload = _json.loads(raw)
+        assert set(payload) == {"v", "d"}
+        assert len(payload["v"]) == len(payload["d"]) == 14
+        assert payload["d"][0] == "03-Jul-2026"
+        assert payload["d"][-1] == "25-Sep-2026 03:31 PM (IST)", (
+            "the final label is a live snapshot, not a session - carried through unchanged"
+        )
+        assert payload["v"][-1] == 165.71
+        assert tls.sparkline_points(None) == []
+        assert tls.sparkline_points("not json") == []
+        assert tls.sparkline_points('{"v": "not a list"}') == []
+    # ---------------------------------------------------------------- refusals
+
+    def test_a_row_with_no_market_cap_raises(self, sector_page):
+        page = sector_page.replace(' data-parameter="mcap_q"', ' data-x="mcap_q"', 1)
+        with pytest.raises(tle.TrendlyneSchemaError) as excinfo:
+            tls.parse_constituents(page)
+        message = str(excinfo.value)
+        assert "mcap_q" in message
+        assert "the total" in message, (
+            "the reason to raise is that a dropped row would change the sector total every other "
+            "weight divides by"
+        )
+    def test_a_duplicate_symbol_raises(self, sector_page):
+        """Two rows for one symbol would double-count it in the sector total.
+
+        The mutation gives ACE's row the MARUTI symbol while keeping its own id consistent, so the
+        id-disagreement check does not fire first and the duplicate check is what is exercised.
+        """
+        page = sector_page.replace(
+            "/equity/24/ACE/action-construction-equipment-ltd/",
+            "/equity/24/MARUTI/action-construction-equipment-ltd/",
+            1,
+        )
+        assert page != sector_page
+        with pytest.raises(tle.TrendlyneSchemaError) as excinfo:
+            tls.parse_constituents(page)
+        assert "twice" in str(excinfo.value)
+        assert "double-count" in str(excinfo.value)
+    def test_a_row_whose_two_ids_disagree_raises(self, sector_page):
+        page = sector_page.replace('data-stockpk="842"', 'data-stockpk="99999"', 1)
+        with pytest.raises(tle.TrendlyneSchemaError) as excinfo:
+            tls.parse_constituents(page)
+        assert "data-stockpk" in str(excinfo.value)
+
+    def test_an_unparseable_market_cap_raises(self, sector_page):
+        page = sector_page.replace(
+            'data-order="14606.745312000"', 'data-order="n/a"', 1
+        )
+        with pytest.raises(tle.TrendlyneSchemaError, match="not a number"):
+            tls.parse_constituents(page)
+
+    def test_a_header_with_no_body_raises(self, sector_page):
+        head = sector_page[: sector_page.index("</thead>") + len("</thead>")]
+        page = head + "<tbody></tbody></table>"
+        with pytest.raises(tle.TrendlyneSchemaError, match="truncated page"):
+            tls.parse_constituents(page)
+
+    def test_the_aggregate_block_is_required_to_be_a_sector_page(self):
+        client = tl.TrendlyneClient(min_request_interval_ms=0.0)
+        industry = tls.TrendlyneGroup("industry", 9, "auto-parts-equipment", "Auto Parts")
+        import asyncio
+
+        with pytest.raises(ValueError, match="only appears on a sector page"):
+            asyncio.run(client.industry_aggregate_async(industry))
+
+    # ---------------------------------------------------------------- via the client
+
+    async def test_the_client_returns_the_frame_with_its_attrs(self, client):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            return httpx.Response(200, text=text("sector_20_automobiles.html"))
+
+        client.transport = httpx.MockTransport(handler)
+        sector = tls.TrendlyneGroup("sector", 20, "automobiles-auto-components", "Autos")
+        frame = await client.constituents_async(sector)
+        assert len(frame) == 210
+        assert frame.attrs["bfinance_trendlyne_constituent_rows"] == 210
+        assert frame.attrs["bfinance_trendlyne_rows_suspiciously_capped"] is False
+        assert frame.attrs["bfinance_trendlyne_market_cap_unit"] == "unverified"
+        assert frame.attrs["bfinance_trendlyne_group"] == "sector:20"
+        assert len(calls) == 1
+        assert calls[0].endswith("/equity/sector/20/automobiles-auto-components/")
+
+    def test_group_page_refuses_anything_that_is_not_a_group(self, client):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="must be a TrendlyneGroup"):
+            client.group_page("sector:20")
+
+
+def _synthetic_sector_page(rows: int = 500) -> str:
+    """A minimal page carrying the constituent signature and ``rows`` data rows.
+
+    Built rather than trimmed, because the point is a row count the site would never produce. The
+    market caps differ per row so the weights are not all identical, which keeps the parse honest.
+    """
+    body = "".join(
+        f'<tr><td class="fs09rem" data-order="Synthetic {i} Ltd.">'
+        f'<a class="stockrow" data-stockpk="{1000 + i}" '
+        f'href="https://trendlyne.com/equity/{1000 + i}/SYN{i}/synthetic-{i}-ltd/">SYN{i}</a></td>'
+        f"<td class=\"cen\"><div data-sparkline='{{\"v\": [1.0, 2.0], \"d\": [\"a\", \"b\"]}}'></div></td>"
+        f'<td class="rightAlgn" data-order="{i + 1}.0" data-parameter="mcap_q" '
+        f'data-stockpk="{1000 + i}"><span class="column-value">{i + 1}</span></td>'
+        f'<td class="rightAlgn" data-order="10.0" data-parameter="currentPrice" '
+        f'data-stockpk="{1000 + i}"><span class="column-value">10</span></td></tr>'
+        for i in range(rows)
+    )
+    return (
+        '<select id="JS_diviGroupSelector">'
+        '<option selected value="https://trendlyne.com/equity/sector/20/automobiles-auto-components/">'
+        "Sector: Automobiles &amp; Auto Components</option></select>"
+        "<table><thead><tr>"
+        "<th>Stock Name</th><th>3M Price Chart</th><th>Market Cap</th>"
+        "<th>LTP Last Traded Price</th>"
+        "</tr></thead><tbody>" + body + "</tbody></table>"
+    )
 
 # =========================================================== fixtures themselves
 

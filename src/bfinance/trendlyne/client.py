@@ -151,11 +151,15 @@ Two consequences, and they need different types:
 ``/mapp/v1/`` requests carry a ``Referer``; the HTML page routes do not need one (verified 200
 without). HTML pages work with a bare browser ``User-Agent``.
 
-Snapshots and series are different things — measured, and kept as prose because the routes are not wired
------------------------------------------------------------------------------------------------------
-Recorded here rather than in :data:`SNAPSHOT_ONLY_ENDPOINTS`, because the two holding routes are
-**not** in :data:`ENDPOINTS` — nothing fetches them yet. This is the note to read before wiring
-either one.
+A route that only serves a snapshot cannot address a period — measured, and kept as prose
+-------------------------------------------------------------------------------------------------
+There is **no policy table for this any more**, and the note to read before wiring a holding route
+is this section. :class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` and
+:data:`SNAPSHOT_ONLY_ENDPOINTS` were removed as dead public API: the set had to be a subset of
+:data:`ENDPOINTS` to be enforceable, nothing fetched a snapshot-only route, so it was an empty
+``frozenset()`` and the guard could never fire. A public exception that cannot be raised is the
+same category of problem as the 14 dead endpoint templates — it makes the package look bigger than
+the code that runs. The measured fact survives here, which is where whoever wires the route reads.
 
 ``share-holding`` serves **only** the literal path segment ``latest``. Verified 2026-09-27:
 ``.../Jun-2024/...`` and ``.../2024/...`` both return **HTTP 500**, not 404 and not an empty
@@ -168,12 +172,14 @@ suggests for share-holding. Verified on MOTHERSON: ``latest`` -> 200 (355 rows, 
 Aug-2026), ``2024`` -> 200 (313 rows, top period Sep-2024), ``Jun-2024`` -> 200 (260 rows, top
 period Jun-2024), ``2023`` -> 200 (179 rows). The segment genuinely filters.
 
-**Wiring either route means adding its name to :data:`ENDPOINTS` *and* — for ``share_holding`` only
-— to :data:`SNAPSHOT_ONLY_ENDPOINTS`,** which is how :func:`build_path` turns the 500 into a local
-:class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` before a request is spent on it.
-That set is empty right now, so the guard cannot fire: an honest empty policy table, not a
-feature. Deals and insider trades are the opposite extreme when they are wired — 10-16 years in
-one page — so they must **not** be added to it.
+**Wiring either route means adding its name to :data:`ENDPOINTS` in the same commit as its fetch
+method — and for ``share_holding`` also restoring a local period guard**, because ``build_path``
+no longer carries one: the 500 above is a fact, not an enforcement. The guard belongs in
+``build_path`` as an explicit check against the 500, not in a table that can be empty. Deals and
+insider trades are the opposite extreme when they are wired — 10-16 years in one page — so they
+must **not** be guarded. :data:`SNAPSHOT_PERIOD` survives as the only period segment the
+share-holding route accepts, and :func:`validate_period` already rejects anything else before a
+request is spent.
 
 ``eodData`` is newest-first, and the freshest week is in a different key
 -----------------------------------------------------------------------
@@ -259,11 +265,19 @@ from .errors import (
     TrendlyneNotAuthorizedError,
     TrendlyneNotFoundError,
     TrendlyneRateLimitedError,
+    TrendlyneRobotsDisallowedError,
     TrendlyneSchemaError,
     TrendlyneServerError,
-    TrendlyneSnapshotOnlyError,
     TrendlyneSymbolNotFoundError,
     TrendlyneTransportError,
+)
+from .sectors import (
+    TrendlyneGroup,
+    constituent_attrs,
+    parse_classification,
+    parse_constituents,
+    parse_industry_aggregate,
+    parse_taxonomy,
 )
 from .tables import PROVENANCE, extract_ohlc_token
 
@@ -275,16 +289,64 @@ BASE_URL = "https://trendlyne.com"
 #: The only symbol resolver trendlyne has. 5,922 entries, 831 KB, refreshed daily.
 SITEMAP_PATH = "/equity-sitemap-stocks.xml"
 
-#: trendlyne's own autocomplete, used as the *fallback* resolver. The sitemap does not list
-#: ETFs -- NIFTYBEES, BANKBEES, GOLDBEES, JUNIORBEES and SETFNIF50 all resolve here and serve
-#: full OHLC, yet none appear among the 5,922 sitemap entries. Query-string endpoint, so it is
-#: kept out of :data:`ENDPOINTS` (those are path templates validated by :func:`build_path`).
-#: A miss answers ``[{"headline": "No matches found"}]``, which is a result, not an error.
+#: trendlyne's own autocomplete, used as the *fallback* resolver. **This path is disallowed by
+#: trendlyne's robots.txt** and every call to it is gated behind
+#: :data:`MEMBER_SEARCH_FLAG` — see :data:`ROBOTS_DISALLOWED_ROUTES` and
+#: :meth:`TrendlyneClient.search_remote`. The sitemap does not list ETFs -- NIFTYBEES, BANKBEES,
+#: GOLDBEES, JUNIORBEES and SETFNIF50 resolve *only* here and serve full OHLC, yet **none of them
+#: appear among the 5,922 sitemap entries** (verified 2026-09-27 against the full 830,905-byte
+#: document: zero entries contain "BEES" or "ETF", and none begins "SETF"). So with the gate off
+#: — the default — **ETFs are unreachable through this package**, and
+#: :meth:`TrendlyneClient.resolve_any` says so rather than reporting the instrument as unknown.
+#: Query-string endpoint, so it is kept out of :data:`ENDPOINTS` (those are path templates
+#: validated by :func:`build_path`). A miss answers ``[{"headline": "No matches found"}]``, which is
+#: a result, not an error.
 _SYMBOL_SEARCH_PATH = "/member/api/ac_snames/?term={query}"
 
+#: Paths this package will not request unless a caller opts in, mapped to the robots.txt rule that
+#: forbids them. **Read from the live ``robots.txt`` on 2026-09-27**, whose ``User-agent: *`` block
+#: carries 28 ``Disallow`` rules and a ``Crawl-delay: 1``. (The 10 s figure that circulates for
+#: this site is scoped to ``GPTBot``/``ClaudeBot``, not to everybody.)
+#:
+#: One entry, and it is the one this package used to violate in shipped code:
+#:
+#: ==========================  =============================================================
+#: path                       covering rule
+#: ==========================  =============================================================
+#: ``/member/api/ac_snames/``  ``Disallow: */member/``
+#: ==========================  =============================================================
+#:
+#: The rule is the **broad** ``*/member/``. robots.txt has a second, narrower member rule
+#: (``*/member/api/ac_snames/stock/``) which this package's path does *not* match — the specific
+#: one covers the ``/stock/`` sibling endpoint, not the ``?term=`` search this package called. The
+#: broad rule is what forbids it, and it was forbidding it while ``search_remote`` was a default
+#: part of :meth:`TrendlyneClient.resolve_any`. That is now opt-in and off.
+#:
+#: Also disallowed, recorded so nobody re-derives it: ``*/onwards/``, ``*/edithistory/``,
+#: ``*/trendit/``, ``*/like/``, ``*/accounts/``, ``*/visitor/``, ``*/wholikes/``,
+#: ``*/get-document/``, ``*/getUserNavBar/``, ``*/relationships/``, ``*/alerts/addStockAlert/``,
+#: ``*/posts/comment/``, ``*/fundamentals/back-test/runhistory/``, ``*/fundamentals/chart/v2/``,
+#: ``*/polls/getMemberVotes/``, ``*/rapid-results/all/``, ``*/alerts/modal/stockAlert/``,
+#: ``*/create-basket/from/``, ``*/stock-screeners/by-type/?searchparam=``, and seven
+#: ``*/portfolio|equity/.../custom/?query=%E|%F`` rules. None is reachable from
+#: :data:`ENDPOINTS`, which is the point of the table being narrow rather than a deny-list.
+#:
+#: Checked against every route this package can build, the sector and industry group pages
+#: included: ``/equity/sector/{id}/{slug}/`` and ``/equity/industry/{id}/{slug}/`` match **none** of
+#: the 28. ``*/equity/technical-analysis-*`` is the only equity rule and it needs that literal
+#: prefix, which a stock or group page never has.
+ROBOTS_DISALLOWED_ROUTES: Dict[str, str] = {
+    "/member/api/ac_snames/": "Disallow: */member/",
+}
+
+#: The opt-in that permits a robots-disallowed route. ``False`` — off — is the default, and the
+#: only way to turn it on is to name it in the constructor or in the call. The name says which
+#: conflict is being overridden, because "allow_disallowed" would not.
+MEMBER_SEARCH_FLAG = "allow_member_search"
+
 #: Every route this package can address **today**, as ``str.format`` templates over
-#: ``stock_id``, ``symbol``, ``slug``, ``period``, ``metric`` and ``token``. Use
-#: :func:`build_path` instead of formatting these directly.
+#: ``stock_id``, ``symbol``, ``slug``, ``group_id``, ``group_slug``, ``period``, ``metric`` and
+#: ``token``. Use :func:`build_path` instead of formatting these directly.
 #:
 #: This held 17 templates once and 14 of them were dead strings: no method built them, so
 #: ``build_path`` would mint a plausible URL for a route nobody had requested and five of them
@@ -298,22 +360,23 @@ ENDPOINTS: Dict[str, str] = {
     "stock_page": "/equity/{stock_id}/{symbol}/{slug}/",
     "ohlc": "/mapp/v1/stock/web/ohlc/{stock_id}/{token}/",
     "chart_metric": "/mapp/v1/stock/chart-data/{stock_id}/{metric}/",
+    # Group pages. Note the shape: the id comes FIRST and there is no symbol segment, which is the
+    # opposite of stock_page above. One template with an optional branch would match a group URL
+    # as a stock without complaining, so the two shapes get two entries.
+    "sector_page": "/equity/sector/{group_id}/{group_slug}/",
+    "industry_page": "/equity/industry/{group_id}/{group_slug}/",
 }
 
-#: The only period segment a snapshot-only route accepts.
-SNAPSHOT_PERIOD = "latest"
+#: Routes that take no symbol, so :func:`build_path` needs a group id and slug rather than a
+#: :class:`TrendlyneSymbol`. Derived from the keys above rather than restated, so adding a third
+#: group route cannot leave this set behind.
+GROUP_ENDPOINTS: frozenset = frozenset({"sector_page", "industry_page"})
 
-#: Routes that serve the latest snapshot and **cannot** address a period — a subset of
-#: :data:`ENDPOINTS`, enforced by :func:`build_path`, which raises
-#: :class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` locally instead of spending a
-#: request to collect a 500. Verified 2026-09-27: ``share-holding`` answers HTTP 500 for
-#: ``Jun-2024`` and for ``2024``.
-#:
-#: **Empty, and that is the honest state.** ``share_holding`` is not in :data:`ENDPOINTS` because
-#: nothing fetches it, so the guard cannot fire. Wiring that route means adding it to *both* sets
-#: (``mutual_fund_holdings``, which genuinely filters by year and by ``Mon-YYYY`` month, goes in
-#: :data:`ENDPOINTS` alone). See the "Snapshots and series" section of the module docstring.
-SNAPSHOT_ONLY_ENDPOINTS: frozenset = frozenset()
+#: The only period segment a snapshot-only route accepts — the literal ``latest`` that
+#: ``/equity/share-holding/...`` answers for, and returns HTTP 500 for anything else. Kept as a
+#: constant because that is a measured property of the route rather than a default. See the "A
+#: route that only serves a snapshot" section of the module docstring.
+SNAPSHOT_PERIOD = "latest"
 
 #: Metrics the ``chart-data`` route accepts. Any other value returns 200 with a failed envelope,
 #: so the set is enforced locally.
@@ -503,21 +566,27 @@ def validate_period(period: str) -> str:
 
 def build_path(
     name: str,
-    record: TrendlyneSymbol,
+    record: Optional[TrendlyneSymbol] = None,
     *,
     period: str = SNAPSHOT_PERIOD,
     metric: str = "",
     token: str = "",
+    group: Optional["TrendlyneGroup"] = None,
 ) -> str:
     """Build a request path for a known endpoint, enforcing the rules that would otherwise
     produce a confusing server error.
 
     Args:
         name: A key of :data:`ENDPOINTS` — that is, a route this package has a fetch method for.
-        record: The resolved symbol.
-        period: Period segment, for the routes that take one. See :func:`validate_period`.
+        record: The resolved symbol. Required for the stock routes, ignored for the group routes
+            in :data:`GROUP_ENDPOINTS`, which have no symbol segment.
+        period: Period segment, for the routes that take one. See :func:`validate_period`. No
+            addressable route takes one today.
         metric: Metric name, required by ``chart_metric``. See :data:`METRICS`.
         token: Per-symbol OHLC token, required by ``ohlc``.
+        group: The sector or industry, required by ``sector_page`` and ``industry_page``. Its
+            ``kind`` must match the route, so a sector's id cannot be formatted into an industry
+            URL.
 
     Returns:
         A path beginning with ``/``.
@@ -525,10 +594,8 @@ def build_path(
     Raises:
         ValueError: Unknown ``name`` — including a route that exists on trendlyne but is not
             implemented here, which is an explicit error rather than a minted URL — an
-            unrecognised ``metric``, or a missing ``token``.
-        TrendlyneSnapshotOnlyError: ``name`` is in :data:`SNAPSHOT_ONLY_ENDPOINTS` and ``period``
-            is not ``latest``. Raised locally, before a request is spent on a guaranteed 500. The
-            set is currently empty, so this cannot fire; see :data:`SNAPSHOT_ONLY_ENDPOINTS`.
+            unrecognised ``metric``, a missing ``token``, a group route with no ``group``, a
+            ``group`` whose kind does not match the route, or a non-group route given a ``group``.
     """
     if name not in ENDPOINTS:
         raise ValueError(
@@ -537,30 +604,46 @@ def build_path(
             f"the site but have no fetch method here are not listed; see the 'Endpoints' section "
             f"of the module docstring and docs/UPSTREAM_SOURCES.md before adding one."
         )
-    if name in SNAPSHOT_ONLY_ENDPOINTS and period != SNAPSHOT_PERIOD:
-        raise TrendlyneSnapshotOnlyError(
-            f"endpoint {name!r} serves only the latest snapshot: period must be "
-            f"{SNAPSHOT_PERIOD!r}, got {period!r}. Verified 2026-09-27 — the share-holding "
-            f"route answers HTTP 500 for any other segment. Use the single 'latest' page and "
-            f"read its multi-period grid."
+    if name in GROUP_ENDPOINTS:
+        if group is None:
+            raise ValueError(
+                f"endpoint {name!r} takes a sector or industry, not a symbol. Pass "
+                f"group=TrendlyneGroup(kind={name.split('_')[0]!r}, group_id=..., slug=..., "
+                f"name=...), which you get from parse_taxonomy() — no id is ever hardcoded."
+            )
+        if group.kind != name.split("_")[0]:
+            raise ValueError(
+                f"endpoint {name!r} requires kind={name.split('_')[0]!r}, got "
+                f"kind={group.kind!r}. "
+                f"Formatting one kind's id into the other's URL would address a different page "
+                f"than the one whose taxonomy you read."
+            )
+    elif group is not None:
+        raise ValueError(
+            f"endpoint {name!r} takes a symbol; group= applies only to "
+            f"{', '.join(sorted(GROUP_ENDPOINTS))}."
         )
     if name == "chart_metric":
         if metric not in METRICS:
             raise ValueError(f"metric={metric!r} is not supported. Must be one of {', '.join(METRICS)}.")
+    if name in ("ohlc", "stock_page") and record is None:
+        raise ValueError(
+            f"endpoint {name!r} takes a symbol; pass record=TrendlyneSymbol from resolve()."
+        )
     if name == "ohlc" and not token:
         raise ValueError(
             "the ohlc endpoint requires a per-symbol token. Call "
             "TrendlyneClient.ohlc_token(symbol) first — the token is not a constant."
         )
     validate_period(period)
-    return ENDPOINTS[name].format(
-        stock_id=record.stock_id,
-        symbol=record.symbol,
-        slug=record.slug,
-        period=period,
-        metric=metric,
-        token=token,
-    )
+    values: Dict[str, Any] = dict(period=period, metric=metric, token=token)
+    if record is not None:
+        values.update(
+            stock_id=record.stock_id, symbol=record.symbol, slug=record.slug
+        )
+    if group is not None:
+        values.update(group_id=group.group_id, group_slug=group.slug)
+    return ENDPOINTS[name].format(**values)
 
 
 def redact(url: str) -> str:
@@ -987,6 +1070,12 @@ class TrendlyneClient:
             import edge to ``bfinance.cache``.
         transport: Optional ``httpx`` transport. ``httpx.MockTransport`` is how the test suite
             exercises the 444/404/5xx paths with no network; production callers leave it ``None``.
+        allow_member_search: Opt in to trendlyne's own autocomplete route, which its
+            ``robots.txt`` disallows via the broad ``Disallow: */member/``. **Off by default, and
+            that is the only shipped configuration.** See :data:`ROBOTS_DISALLOWED_ROUTES` and
+            :data:`MEMBER_SEARCH_FLAG`. Turning it on is the one thing in this package that
+            knowingly requests a path the site asks crawlers not to fetch, so it is named
+            explicitly and never inferred.
     """
 
     #: Absolute base for every request. Exposed as a class attribute so a subclass can point at a
@@ -1003,6 +1092,7 @@ class TrendlyneClient:
         token_ttl_hours: float = 12.0,
         cache: Optional[Any] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        allow_member_search: bool = False,
     ) -> None:
         self.timeout = timeout
         self.max_retries = max(1, int(max_retries))
@@ -1012,6 +1102,7 @@ class TrendlyneClient:
         self.token_ttl_seconds = max(0.0, float(token_ttl_hours) * 3600.0)
         self.cache = cache
         self.transport = transport
+        self.allow_member_search = bool(allow_member_search)
         self._last_request_time = 0.0
         # A threading.Lock, not asyncio.Lock: the sync wrappers call asyncio.run() per call, so
         # every call gets a fresh event loop and an asyncio primitive bound to an earlier one
@@ -1020,7 +1111,41 @@ class TrendlyneClient:
         self._index: Optional[Dict[str, TrendlyneSymbol]] = None
         self._index_at: float = 0.0
         self._index_source_bytes: int = 0
-        self._tokens: Dict[int, Tuple[float, str]] = {}
+        # (fetched_at, token, classification). The token and the sector/industry come out of the
+        # same page fetch, so they are cached together: caching the token alone would mean a warm
+        # token could not report a classification without spending a second request.
+        self._tokens: Dict[int, Tuple[float, str, Dict[str, TrendlyneGroup]]] = {}
+        #: How the most recent :meth:`resolve_any` resolved its symbol — ``"sitemap"``,
+        #: ``"member_search"`` or ``"skipped_robots_disallowed"``. Written on every call so the
+        #: degradation is recorded rather than inferred from a missing result. Read it; do not set
+        #: it.
+        self.symbol_resolution: Optional[str] = None
+
+    def _require_member_search(self, allowed: Optional[bool]) -> None:
+        """Refuse a robots-disallowed request, naming the conflict and the switch.
+
+        Args:
+            allowed: The per-call override, or ``None`` to use the constructor's setting.
+
+        Raises:
+            TrendlyneRobotsDisallowedError: The route is disallowed and the gate is closed. Raised
+                **before** any socket is opened, so honouring robots costs this package nothing.
+        """
+        if allowed if allowed is not None else self.allow_member_search:
+            return
+        path = _SYMBOL_SEARCH_PATH.split("?")[0]
+        rule = ROBOTS_DISALLOWED_ROUTES.get(path, "Disallow")
+        raise TrendlyneRobotsDisallowedError(
+            f"{path} is disallowed by trendlyne's robots.txt ({rule}), so this request was not "
+            f"made. It is the only route to instruments the equity sitemap omits — every ETF "
+            f"(NIFTYBEES, BANKBEES, GOLDBEES, JUNIORBEES and SETFNIF50 resolve here and appear in "
+            f"none of the sitemap's 5,922 entries), so with the gate off those symbols are "
+            f"unreachable through this package. That is a coverage gap, not a claim that they do "
+            f"not exist. To request it anyway, pass {MEMBER_SEARCH_FLAG}=True to "
+            f"TrendlyneClient(...) or to search_remote(...). Note robots.txt's 'User-agent: *' "
+            f"block carries Crawl-delay: 1; the 10 s figure quoted elsewhere is scoped to "
+            f"GPTBot/ClaudeBot."
+        )
 
     # ---------------------------------------------------------------- internals
 
@@ -1420,15 +1545,26 @@ class TrendlyneClient:
 
     # ------------------------------------------------------- remote symbol search
 
-    async def search_remote_async(self, query: str, *, limit: int = 10) -> List[TrendlyneSymbol]:
-        """Resolve a symbol through trendlyne's own **remote** autocomplete.
+    async def search_remote_async(
+        self, query: str, *, limit: int = 10, allow_member_search: Optional[bool] = None
+    ) -> List[TrendlyneSymbol]:
+        """Resolve a symbol through trendlyne's own **remote** autocomplete. **Opt-in; off by
+        default, because robots.txt disallows it.**
 
-        This is the only route to instruments the equity sitemap does not carry. Verified live:
-        ``NIFTYBEES`` (id 1588), ``BANKBEES`` (1581), ``GOLDBEES`` (1582), ``JUNIORBEES`` (1584)
-        and ``SETFNIF50`` (1753) all resolve here and serve full OHLC, yet **none of them appear
-        in ``/equity-sitemap-stocks.xml``** - the sitemap's 5,922 entries are equities, indices
-        and BSE scrip codes only. Searching the sitemap for an ETF therefore returns nothing and
-        the symbol looks unresolvable when it is not.
+        :data:`_SYMBOL_SEARCH_PATH` sits under trendlyne's broad ``Disallow: */member/`` rule, so
+        this method used to be a live robots violation in shipped code: it was the ETF fallback
+        inside :meth:`resolve_any`, so any ``ohlc()`` call for a symbol the sitemap omitted quietly
+        fetched a disallowed path. It is now gated.
+
+        This route is the only way to instruments the equity sitemap does not carry. Verified
+        2026-09-27: ``NIFTYBEES`` (id 1588), ``BANKBEES`` (1581), ``GOLDBEES`` (1582),
+        ``JUNIORBEES`` (1584) and ``SETFNIF50`` (1753) all resolve here and serve full OHLC, yet
+        **none of them appears in the sitemap's 5,922 entries** — checked against the full
+        830,905-byte document, which contains no entry with ``BEES`` or ``ETF`` in the symbol
+        segment and none beginning ``SETF``. The only non-ticker entries are BSE index families
+        (``1216``, ``1214``) and ``NIFTYBOND2033``. **So with the gate off, no ETF is reachable
+        through this package at all**, and that is stated here rather than discovered later as a
+        confusing "symbol not found".
 
         Use this when :meth:`search_async` finds nothing; the two are complementary, not
         competing. Costs one request and needs no token.
@@ -1436,14 +1572,27 @@ class TrendlyneClient:
         Args:
             query: Symbol or company-name fragment. trendlyne matches either.
             limit: Maximum records to return.
+            allow_member_search: Per-call override of the constructor's setting. ``True`` sends the
+                request anyway, accepting that it is robots-disallowed. ``None`` (the default)
+                defers to the constructor.
 
         Returns:
             Matching records. Empty when trendlyne has no match - it answers a miss with
             ``[{"headline": "No matches found"}]``, which is an expected outcome, not an error.
+
+        Raises:
+            TrendlyneRobotsDisallowedError: The gate is closed. The message names the disallowed
+                path, the covering ``Disallow`` rule, and the flag that opens the gate. **Raised
+                before the request**, not answered with an empty list: an empty list is
+                indistinguishable from "trendlyne has no such symbol", and a caller would conclude
+                the instrument does not exist.
+            TrendlyneSchemaError: The response was not the expected list shape.
+            ValueError: ``query`` is empty.
         """
         clean = (query or "").strip()
         if not clean:
             raise ValueError("query must be a non-empty string")
+        self._require_member_search(allow_member_search)
 
         path = _SYMBOL_SEARCH_PATH.format(query=quote_plus(clean))
         payload = await self.fetch_json_async(path, xhr=True)
@@ -1473,56 +1622,129 @@ class TrendlyneClient:
                 break
         return out
 
-    def search_remote(self, query: str, *, limit: int = 10) -> List[TrendlyneSymbol]:
+    def search_remote(
+        self, query: str, *, limit: int = 10, allow_member_search: Optional[bool] = None
+    ) -> List[TrendlyneSymbol]:
         """Sync variant of :meth:`search_remote_async`."""
-        return _run_async(self.search_remote_async(query, limit=limit))
+        return _run_async(
+            self.search_remote_async(query, limit=limit, allow_member_search=allow_member_search)
+        )
 
-    async def resolve_any_async(self, symbol: str) -> TrendlyneSymbol:
-        """Resolve via the sitemap index first, then fall back to the remote search.
+    async def resolve_any_async(
+        self, symbol: str, *, allow_member_search: Optional[bool] = None
+    ) -> TrendlyneSymbol:
+        """Resolve via the sitemap index first, then fall back to the remote search — **if that is
+        allowed**.
 
-        The sitemap is one bulk request that covers 5,922 instruments, so it is tried first and
-        is the cheaper path for equities. The remote search is the fallback that rescues ETFs and
-        anything else trendlyne indexes but does not list.
+        The sitemap is one bulk request that covers 5,922 instruments, so it is tried first and is
+        the cheaper path for equities. The remote search is the fallback that rescues ETFs and
+        anything else trendlyne indexes but does not list — and it is the route robots.txt
+        disallows, so the fallback is **gated** by :data:`MEMBER_SEARCH_FLAG` and is **off** in the
+        default configuration.
 
-        A miss raises :class:`TrendlyneSymbolNotFoundError` naming **both** routes, because
-        "not in the sitemap" and "not on trendlyne" are different facts and the caller should not
-        have to guess which one applies.
+        When the gate is closed the fallback is **skipped explicitly** — not attempted, not
+        silently ignored — and the skip is recorded in two places: on
+        :attr:`TrendlyneClient.symbol_resolution` as ``"skipped_robots_disallowed"``, and in the
+        message of the :class:`TrendlyneSymbolNotFoundError` that follows. That distinction is the
+        point. A caller who asks for ``NIFTYBEES`` has to be able to tell "this package will not
+        ask" from "this instrument does not exist", and only the first is true. :meth:`ohlc`
+        copies the recorded value onto the frame as
+        ``attrs["bfinance_trendlyne_symbol_resolution"]``, so the degradation is visible on every
+        OHLC frame and not only on the failure path.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            allow_member_search: Per-call override of the constructor's setting, forwarded to
+                :meth:`search_remote_async`.
+
+        Returns:
+            The symbol's record.
+
+        Raises:
+            TrendlyneSymbolNotFoundError: Neither route produced a record. The message separates the
+                two reasons — the sitemap does not carry the symbol, and the remote route was
+                either tried and found nothing or skipped because it is robots-disallowed.
+            TrendlyneRobotsDisallowedError: Never from here. The skip is reported as a not-found,
+                because the caller asked "resolve this symbol" and a robots-policy failure is not a
+                different answer to that question, only a narrower way of giving the same one.
+                Raising it here would make every ETF lookup fail with something the caller cannot
+                act on. :meth:`search_remote` is where the policy error belongs.
         """
         try:
-            return await self.resolve_async(symbol)
+            record = await self.resolve_async(symbol)
         except TrendlyneSymbolNotFoundError:
-            matches = await self.search_remote_async(symbol, limit=5)
-            if matches:
-                return matches[0]
-            raise TrendlyneSymbolNotFoundError(
-                f"{symbol!r} resolved by neither route: not in the equity sitemap "
-                f"({self.index_size} entries) and trendlyne's own search returned no match. "
-                f"Mutual funds are a separate namespace (/mutual-fund/nav/{{id}}/) and are not "
-                f"reachable from here."
-            ) from None
+            pass
+        else:
+            self.symbol_resolution = "sitemap"
+            return record
 
-    def resolve_any(self, symbol: str) -> TrendlyneSymbol:
+        gate_open = (
+            allow_member_search if allow_member_search is not None else self.allow_member_search
+        )
+        disallowed = _SYMBOL_SEARCH_PATH.split("?")[0]
+        if not gate_open:
+            self.symbol_resolution = "skipped_robots_disallowed"
+            raise TrendlyneSymbolNotFoundError(
+                f"{symbol!r} is not in trendlyne's equity sitemap "
+                f"({self.index_size} entries). The remote route was NOT tried: {disallowed} is "
+                f"disallowed by trendlyne's robots.txt "
+                f"({ROBOTS_DISALLOWED_ROUTES[disallowed]}), so the gate is closed. {symbol!r} may "
+                f"well exist on trendlyne — the sitemap does not carry it, and it is exactly the "
+                f"instruments the sitemap omits (every ETF) that the disallowed route would have "
+                f"resolved. Pass {MEMBER_SEARCH_FLAG}=True to use it anyway. Mutual funds are a "
+                f"separate namespace (/mutual-fund/nav/{{id}}/) and are not reachable from here."
+            )
+
+        matches = await self.search_remote_async(symbol, limit=5, allow_member_search=True)
+        if matches:
+            self.symbol_resolution = "member_search"
+            return matches[0]
+        self.symbol_resolution = "sitemap"
+        raise TrendlyneSymbolNotFoundError(
+            f"{symbol!r} resolved by neither route: not in the equity sitemap "
+            f"({self.index_size} entries) and trendlyne's own search returned no match. "
+            f"Mutual funds are a separate namespace (/mutual-fund/nav/{{id}}/) and are not "
+            f"reachable from here."
+        )
+
+    def resolve_any(
+        self, symbol: str, *, allow_member_search: Optional[bool] = None
+    ) -> TrendlyneSymbol:
         """Sync variant of :meth:`resolve_any_async`."""
-        return _run_async(self.resolve_any_async(symbol))
+        return _run_async(
+            self.resolve_any_async(symbol, allow_member_search=allow_member_search)
+        )
 
     # ------------------------------------------------------------------ token
 
-    async def ohlc_token_async(self, symbol: str, *, force_refresh: bool = False) -> str:
-        """The per-symbol OHLC token, cached.
+    async def ohlc_token_async(
+        self, symbol: str, *, force_refresh: bool = False
+    ) -> Tuple[str, Dict[str, TrendlyneGroup]]:
+        """The per-symbol OHLC token **and** the symbol's classification, cached together.
 
         Costs one HTML request the first time per symbol and none afterwards. The token lives only
         in the symbol page's ``data-eodurl`` attribute and differs per symbol.
+
+        **The classification is free and rides along here.** :func:`parse_classification` reads the
+        sector and industry out of the schema.org breadcrumb on the very same page, so attaching it
+        costs **no request at all** — a second fetch would double the cold cost of every symbol for
+        data the page already carried. It is cached in the same entry as the token for the same
+        reason: caching the token alone would mean a warm token could not report a classification
+        without a second request.
 
         Args:
             symbol: Anything :meth:`resolve_async` accepts.
             force_refresh: Re-scrape even if a cached token is still fresh.
 
         Returns:
-            The token, verbatim, including any ``=`` padding.
+            ``(token, classification)``. The token is verbatim, including any ``=`` padding. The
+            classification is ``{"sector": ..., "industry": ...}`` and may be **empty** — see
+            :func:`parse_classification`; an absent breadcrumb is a fact to report, not a reason to
+            fail a call whose product is a price series.
 
         Raises:
-            TrendlyneSymbolNotFoundError: The symbol resolves by neither the sitemap nor
-                trendlyne's own search.
+            TrendlyneSymbolNotFoundError: The symbol resolves by neither the sitemap nor — when the
+                gate is open — trendlyne's own search.
             TrendlyneTokenError: The page carried no token (a markup change).
             TrendlyneAccessDeniedError / TrendlyneNotFoundError: The page itself failed.
         """
@@ -1531,17 +1753,46 @@ class TrendlyneClient:
             with self._state_lock:
                 cached = self._tokens.get(record.stock_id)
             if cached and (time.monotonic() - cached[0]) <= self.token_ttl_seconds:
-                return cached[1]
+                return cached[1], cached[2]
 
         html = await self._get_text(record.page_path)
         token = extract_ohlc_token(html)
+        classification = parse_classification(html)
         with self._state_lock:
-            self._tokens[record.stock_id] = (time.monotonic(), token)
-        return token
+            self._tokens[record.stock_id] = (time.monotonic(), token, classification)
+        return token, classification
 
     def ohlc_token(self, symbol: str, *, force_refresh: bool = False) -> str:
-        """Sync variant of :meth:`ohlc_token_async`."""
-        return _run_async(self.ohlc_token_async(symbol, force_refresh=force_refresh))
+        """Sync variant of :meth:`ohlc_token_async`, returning just the token."""
+        return _run_async(self.ohlc_token_async(symbol, force_refresh=force_refresh))[0]
+
+    async def classification_async(self, symbol: str) -> Dict[str, TrendlyneGroup]:
+        """The symbol's sector and industry, off the page the token fetch already makes.
+
+        The strict door onto :func:`parse_classification`: a page with no classification breadcrumb
+        **raises** here instead of returning an empty mapping, because a caller who asked for the
+        classification must not be handed ``{}`` and left to guess whether the stock is genuinely
+        unclassified or the markup changed. :meth:`ohlc_async` uses the lenient parser instead —
+        there the classification is a bonus and the price series is the product.
+
+        Costs nothing beyond :meth:`ohlc_token_async`, whose page it shares.
+
+        Raises:
+            TrendlyneSchemaError: The page carried no ``SECTOR :`` or ``INDUSTRY :`` breadcrumb.
+        """
+        _, classification = await self.ohlc_token_async(symbol)
+        if not classification:
+            raise TrendlyneSchemaError(
+                f"the page fetched for {symbol!r} carried no 'SECTOR :' or 'INDUSTRY :' "
+                f"breadcrumb. That label plus the href is the only place the classification "
+                f"exists — there is no data-* attribute and no embedded JSON for it — so a "
+                f"missing one is a markup change, not an unclassified stock."
+            )
+        return classification
+
+    def classification(self, symbol: str) -> Dict[str, TrendlyneGroup]:
+        """Sync variant of :meth:`classification_async`."""
+        return _run_async(self.classification_async(symbol))
 
     # ------------------------------------------------------------------ payloads
 
@@ -1561,10 +1812,17 @@ class TrendlyneClient:
         Returns:
             A ``DatetimeIndex`` frame with columns :data:`COLUMNS` and ``attrs`` recording
             provenance, price basis, vendor window and every missing value. Never empty: a
-            symbol with no usable bars raises instead.
+            symbol with no usable bars raises instead. It also carries
+            ``bfinance_trendlyne_sector`` and ``bfinance_trendlyne_industry`` — each a
+            ``{"id", "slug", "name"}`` mapping, or ``None`` — and
+            ``bfinance_trendlyne_symbol_resolution``, read off the page the OHLC token came from
+            at no extra request cost. See
+            :meth:`TrendlyneClient._resolution_and_classification_attrs`.
 
         Raises:
-            TrendlyneSymbolNotFoundError: The symbol is not in the sitemap.
+            TrendlyneSymbolNotFoundError: The symbol is not in the sitemap, and the remote route
+                that would have found it was skipped because it is robots-disallowed. The message
+                says which, so an ETF miss is distinguishable from a typo.
             TrendlyneTokenError: No token in the symbol page.
             TrendlyneAccessDeniedError: HTTP 444 — the ``/mapp/v1/`` gate.
             TrendlyneNotAuthorizedError: The envelope rejected the token, and re-scraping it once
@@ -1573,12 +1831,13 @@ class TrendlyneClient:
         """
         record = await self.resolve_any_async(symbol)
         retrieved_at = datetime.now(timezone.utc)
-        token = await self.ohlc_token_async(record.symbol)
+        token, classification = await self.ohlc_token_async(record.symbol)
         path = build_path("ohlc", record, token=token)
         payload = await self._get_json(path, referer=record.page_url)
+        extra = self._resolution_and_classification_attrs(classification)
 
         try:
-            return parse_ohlc(
+            frame = parse_ohlc(
                 payload,
                 record.symbol,
                 source_url=self._absolute(path),
@@ -1589,7 +1848,7 @@ class TrendlyneClient:
         except TrendlyneNotAuthorizedError:
             # The token may have rotated upstream. Re-scrape once — and only if it actually
             # changed, so a genuinely rejected token costs one page fetch, not a retry storm.
-            fresh = await self.ohlc_token_async(record.symbol, force_refresh=True)
+            fresh, _ = await self.ohlc_token_async(record.symbol, force_refresh=True)
             if fresh == token:
                 raise
             logger.info(
@@ -1598,7 +1857,7 @@ class TrendlyneClient:
             )
             retry_path = build_path("ohlc", record, token=fresh)
             payload = await self._get_json(retry_path, referer=record.page_url)
-            return parse_ohlc(
+            frame = parse_ohlc(
                 payload,
                 record.symbol,
                 source_url=self._absolute(retry_path),
@@ -1606,6 +1865,40 @@ class TrendlyneClient:
                 retrieved_at=retrieved_at,
                 stock_id=record.stock_id,
             )
+        frame.attrs.update(extra)
+        return frame
+
+    def _resolution_and_classification_attrs(
+        self, classification: Mapping[str, "TrendlyneGroup"]
+    ) -> Dict[str, Any]:
+        """The sector/industry and resolver facts every OHLC frame carries.
+
+        Two separate things travel here and they must not be conflated:
+
+        * **Classification** — what the symbol *is*. ``bfinance_trendlyne_sector`` and
+          ``bfinance_trendlyne_industry`` are each a ``(id, slug, name)`` triple, taken from the
+          page the OHLC token was read out of, so they cost no request. When the page carried no
+          breadcrumb, ``bfinance_trendlyne_classification`` is the string ``"absent"`` — stated
+          rather than omitted, because a missing key reads as "not applicable" and this is a
+          change to the page.
+        * **Resolution** — how the symbol was found. ``bfinance_trendlyne_symbol_resolution`` is
+          ``"sitemap"``, ``"member_search"``, or ``"skipped_robots_disallowed"``. The third is the
+          one that matters: it is how a caller learns that a whole class of instrument (ETFs) is
+          unreachable in this configuration, on a frame that otherwise succeeded.
+
+        Written on every frame, values included, so a consumer can rely on the keys existing.
+        """
+        extra: Dict[str, Any] = {
+            "bfinance_trendlyne_symbol_resolution": self.symbol_resolution,
+            "bfinance_trendlyne_classification": "absent" if not classification else "present",
+        }
+        for kind in ("sector", "industry"):
+            key = f"bfinance_trendlyne_{kind}"
+            group = classification.get(kind)
+            extra[key] = None if group is None else {
+                "id": group.group_id, "slug": group.slug, "name": group.name,
+            }
+        return extra
 
     def ohlc(self, symbol: str, *, include_last_week: bool = True) -> pd.DataFrame:
         """Sync variant of :meth:`ohlc_async`."""
@@ -1639,6 +1932,104 @@ class TrendlyneClient:
     def chart_metric(self, symbol: str, metric: str) -> Any:
         """Sync variant of :meth:`chart_metric_async`."""
         return _run_async(self.chart_metric_async(symbol, metric))
+
+    # ------------------------------------------------------------------ sector & industry
+
+    async def group_page_async(self, group: TrendlyneGroup) -> str:
+        """The raw HTML of a sector or industry page.
+
+        The one fetch every group helper below shares. Returned unparsed because the two products
+        are independent: :func:`~bfinance.trendlyne.sectors.parse_constituents` and
+        :func:`~bfinance.trendlyne.sectors.parse_taxonomy` read disjoint parts of the same
+        document, and a caller who wants both should pay for one request.
+
+        Checked against every ``User-agent: *`` ``Disallow`` rule in trendlyne's robots.txt
+        (28 of them, read live 2026-09-27): ``/equity/sector/{id}/{slug}/`` and
+        ``/equity/industry/{id}/{slug}/`` match **none**. The only equity rule is
+        ``*/equity/technical-analysis-*``, which needs that literal prefix.
+
+        Args:
+            group: From :func:`~bfinance.trendlyne.sectors.parse_taxonomy` or
+                :meth:`taxonomy_async`. No group id is ever hardcoded in this package.
+
+        Raises:
+            ValueError: ``group`` is not a :class:`~bfinance.trendlyne.sectors.TrendlyneGroup`.
+            TrendlyneNotFoundError: HTTP 404 — no such group id.
+        """
+        if not isinstance(group, TrendlyneGroup):
+            raise ValueError(
+                f"group must be a TrendlyneGroup, got {type(group).__name__}. Build one from "
+                f"parse_taxonomy() so the id, slug and name all come off a page."
+            )
+        return await self._get_text(build_path(f"{group.kind}_page", group=group))
+
+    def group_page(self, group: TrendlyneGroup) -> str:
+        """Sync variant of :meth:`group_page_async`."""
+        return _run_async(self.group_page_async(group))
+
+    async def constituents_async(self, group: TrendlyneGroup) -> pd.DataFrame:
+        """Every constituent of a sector or industry, weighted by market cap.
+
+        One request. The frame's ``attrs`` carry the row count and
+        ``bfinance_trendlyne_rows_suspiciously_capped`` so a server-side truncation is visible —
+        the site caps other pages at **exactly 500** rows, and a truncated list is otherwise
+        indistinguishable from a complete one. The market-cap **unit is not asserted**; use
+        ``Weight %``, which is exact and unit-free. See :mod:`bfinance.trendlyne.sectors`.
+        """
+        html = await self.group_page_async(group)
+        result = parse_constituents(html)
+        frame = result.frame
+        frame.attrs.update(constituent_attrs(result, source_url=group.url))
+        return frame
+
+    def constituents(self, group: TrendlyneGroup) -> pd.DataFrame:
+        """Sync variant of :meth:`constituents_async`."""
+        return _run_async(self.constituents_async(group))
+
+    async def taxonomy_async(self, group: TrendlyneGroup) -> Dict[str, TrendlyneGroup]:
+        """The complete sector and industry vocabulary, from **one** page fetch.
+
+        The select carries the same 164 options on every group page, so any one of them will do —
+        which is what makes this cheap. The group is an explicit argument rather than a hardcoded
+        probe page because **no group id is hardcoded anywhere in this package**: ids are read off
+        a page or supplied by the caller, never invented. Once you have a
+        :class:`~bfinance.trendlyne.sectors.TrendlyneGroup` — from here, or built yourself from
+        an id you know — the rest of the vocabulary costs nothing more.
+
+        Args:
+            group: Which page to read the vocabulary off.
+
+        Returns:
+            ``{"sector:20": TrendlyneGroup, "industry:9": TrendlyneGroup, ...}``.
+
+        Raises:
+            ValueError: ``group`` is not a
+                :class:`~bfinance.trendlyne.sectors.TrendlyneGroup`.
+            TrendlyneSchemaError: The page carried no taxonomy select.
+        """
+        return parse_taxonomy(await self.group_page_async(group))
+
+    def taxonomy(self, group: TrendlyneGroup) -> Dict[str, TrendlyneGroup]:
+        """Sync variant of :meth:`taxonomy_async`."""
+        return _run_async(self.taxonomy_async(group))
+
+    async def industry_aggregate_async(self, sector: TrendlyneGroup) -> pd.DataFrame:
+        """The per-industry aggregate block that sits beside a sector's constituent list.
+
+        A second, **separately signed** table on the same page. It is what makes the sector
+        constituent list trustworthy: the block's per-industry company counts must sum to the
+        list's row count, which is a server-side cross-check that needs no second request.
+        """
+        if sector.kind != "sector":
+            raise ValueError(
+                f"the industry aggregate block only appears on a sector page; got kind="
+                f"{sector.kind!r}. Its own constituent list is available via constituents()."
+            )
+        return parse_industry_aggregate(await self.group_page_async(sector))
+
+    def industry_aggregate(self, sector: TrendlyneGroup) -> pd.DataFrame:
+        """Sync variant of :meth:`industry_aggregate_async`."""
+        return _run_async(self.industry_aggregate_async(sector))
 
 
 #: Shared client for the module-level shortcuts. Created on first use, never at import.

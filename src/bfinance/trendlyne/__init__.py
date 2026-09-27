@@ -21,6 +21,10 @@ What is here
 ------------
 - :mod:`~bfinance.trendlyne.client` — HTTP client, symbol index, token resolution, pacing, and
   the daily OHLCV frame. This is the working part.
+- :mod:`~bfinance.trendlyne.sectors` — sector and industry support: the classification every OHLC
+  frame already carries, the complete sector/industry taxonomy, and the constituent list with
+  exact market-cap weights. The module docstring records why the market-cap **unit** is not
+  asserted, and what was measured instead.
 - :mod:`~bfinance.trendlyne.tables` — server-rendered table extraction classified by **header
   signature**, not by heading text. Usable against any saved page, and currently the only way to
   reach the section tables: no route in this package fetches one yet.
@@ -29,10 +33,24 @@ What is here
   ``BFinanceError`` hierarchy, so ``except UpstreamServiceError`` still catches them.
 
 **That is the whole package.** There is no ``ownership``, ``deals`` or ``corporate`` module: the
-section tables trendlyne serves are written up in ``docs/UPSTREAM_SOURCES.md`` and not yet
-extracted, and nothing in this package refers to code that does not exist. A caller who wants one
-today composes :meth:`~bfinance.trendlyne.client.TrendlyneClient.fetch_text` with
+remaining section tables trendlyne serves are written up in ``docs/UPSTREAM_SOURCES.md`` and not
+yet extracted, and nothing in this package refers to code that does not exist. A caller who wants
+one today composes :meth:`~bfinance.trendlyne.client.TrendlyneClient.fetch_text` with
 :func:`~bfinance.trendlyne.tables.find_table` directly.
+
+One route is opt-in, and off
+---------------------------
+trendlyne's ``robots.txt`` disallows ``/member/api/ac_snames/`` — trendlyne's own autocomplete —
+under the broad rule ``Disallow: */member/``. It is the only resolver for **every ETF**, and the
+equity sitemap carries none: its 5,922 entries hold equities, BSE index families and one bond
+index, and nothing with ``BEES`` or ``ETF`` in the symbol segment. So
+:meth:`~bfinance.trendlyne.client.TrendlyneClient.search_remote` raises
+:class:`~bfinance.trendlyne.errors.TrendlyneRobotsDisallowedError` unless a caller passes
+``allow_member_search=True``, and :meth:`~bfinance.trendlyne.client.TrendlyneClient.resolve_any`
+**skips the fallback explicitly and records it** rather than reporting the instrument as unknown.
+The consequence is stated rather than hidden: with the default configuration, ETFs are not
+reachable through this package. :data:`~bfinance.trendlyne.client.ROBOTS_DISALLOWED_ROUTES` holds
+the rules, and the 28 ``Disallow`` entries that were read to produce it are listed there.
 
 Nothing is fabricated. A table that is absent raises, a value that is missing stays missing, and
 every returned frame carries its provenance and a note on what it does not contain.
@@ -45,15 +63,17 @@ from .client import (
     DEMERGER_APPLIED,
     DEMERGER_APPLIED_ATTR,
     ENDPOINTS,
+    GROUP_ENDPOINTS,
+    MEMBER_SEARCH_FLAG,
     METRICS,
     NOTE_ATTR,
     PRICE_BASIS,
     PRICE_BASIS_ATTR,
     PROVENANCE,
     RETRIEVED_AT_ATTR,
+    ROBOTS_DISALLOWED_ROUTES,
     SITEMAP_PATH,
     SNAPSHOT_ONLY_ATTR,
-    SNAPSHOT_ONLY_ENDPOINTS,
     SNAPSHOT_PERIOD,
     SOURCE_ATTR,
     WINDOW_ATTR,
@@ -78,13 +98,29 @@ from .errors import (
     TrendlyneNotAuthorizedError,
     TrendlyneNotFoundError,
     TrendlyneRateLimitedError,
+    TrendlyneRobotsDisallowedError,
     TrendlyneSchemaError,
     TrendlyneServerError,
-    TrendlyneSnapshotOnlyError,
     TrendlyneSymbolNotFoundError,
     TrendlyneTableNotFoundError,
     TrendlyneTokenError,
     TrendlyneTransportError,
+)
+from .sectors import (
+    AGGREGATE_SIG,
+    CONSTITUENTS_SIG,
+    SUSPICIOUS_ROW_MULTIPLE,
+    TAXONOMY_SELECT_ID,
+    ConstituentResult,
+    TrendlyneGroup,
+    constituent_attrs,
+    declared_group,
+    parse_classification,
+    parse_constituents,
+    parse_industry_aggregate,
+    parse_taxonomy,
+    sparkline_points,
+    taxonomy_counts,
 )
 from .tables import (
     SIGNATURES,
@@ -93,6 +129,7 @@ from .tables import (
     extract_ohlc_token,
     find_ohlc_tokens,
     find_table,
+    find_table_elements,
     find_tables,
     known_signatures,
     normalize_header,
@@ -108,15 +145,17 @@ __all__ = [
     "DEMERGER_APPLIED",
     "DEMERGER_APPLIED_ATTR",
     "ENDPOINTS",
+    "GROUP_ENDPOINTS",
+    "MEMBER_SEARCH_FLAG",
     "METRICS",
     "NOTE_ATTR",
     "PRICE_BASIS",
     "PRICE_BASIS_ATTR",
     "PROVENANCE",
     "RETRIEVED_AT_ATTR",
+    "ROBOTS_DISALLOWED_ROUTES",
     "SITEMAP_PATH",
     "SNAPSHOT_ONLY_ATTR",
-    "SNAPSHOT_ONLY_ENDPOINTS",
     "SNAPSHOT_PERIOD",
     "SOURCE_ATTR",
     "WINDOW_ATTR",
@@ -140,11 +179,27 @@ __all__ = [
     "extract_ohlc_token",
     "find_ohlc_tokens",
     "find_table",
+    "find_table_elements",
     "find_tables",
     "known_signatures",
     "normalize_header",
     "page_signatures",
     "register_signature",
+    # sectors
+    "AGGREGATE_SIG",
+    "CONSTITUENTS_SIG",
+    "SUSPICIOUS_ROW_MULTIPLE",
+    "TAXONOMY_SELECT_ID",
+    "ConstituentResult",
+    "TrendlyneGroup",
+    "constituent_attrs",
+    "declared_group",
+    "parse_classification",
+    "parse_constituents",
+    "parse_industry_aggregate",
+    "parse_taxonomy",
+    "sparkline_points",
+    "taxonomy_counts",
     # errors
     "TrendlyneError",
     "TrendlyneHTTPError",
@@ -152,11 +207,11 @@ __all__ = [
     "TrendlyneNotAuthorizedError",
     "TrendlyneNotFoundError",
     "TrendlyneRateLimitedError",
+    "TrendlyneRobotsDisallowedError",
     "TrendlyneServerError",
     "TrendlyneTransportError",
     "TrendlyneSymbolNotFoundError",
     "TrendlyneTokenError",
     "TrendlyneSchemaError",
     "TrendlyneTableNotFoundError",
-    "TrendlyneSnapshotOnlyError",
 ]

@@ -3,7 +3,7 @@ Server-rendered table extraction for trendlyne.com, classified by **header signa
 
 trendlyne renders the tables this package reads into the initial HTML — ``requests``/``httpx``
 plus ``bs4`` is enough, no headless browser, no JS execution. Verified 2026-09-27 for the
-corporate-actions, share-holding and bulk-deal pages.
+corporate-actions, share-holding, bulk-deal and sector/industry pages.
 
 Classify by header row, never by the heading above the table
 ------------------------------------------------------------
@@ -52,6 +52,17 @@ silently turn a value into ``NaN``, which is indistinguishable from "the vendor 
 it". ``read_html`` is called with ``keep_default_na=False`` and ``thousands=None`` for the same
 reason: its own type inference would perform that rewrite — ``"N/A"`` to ``NaN``, ``"1,234"`` to
 ``1234`` — before any rule here could see it.
+
+A frame, or the element?
+-----------------------
+:func:`find_table` is the answer when a cell's **text** is the value. When the value only exists as
+an **attribute**, ``read_html`` has already thrown it away: on a sector page the sortable market cap
+is ``<td data-parameter="mcap_q" data-order="14606.745312000">14,606.7</td>``, and the 3-month
+sparkline is a ``data-sparkline`` JSON blob on a cell whose text is empty. Promoting either to a
+visible column would invent markup trendlyne never rendered, so :func:`find_table_elements` hands
+back the ``bs4`` ``Tag`` and the caller reads the attributes itself. It classifies through the same
+registry and the same header-row rule as :func:`find_tables`, so the two can never disagree about
+which table on a page is which.
 """
 
 from __future__ import annotations
@@ -167,6 +178,33 @@ SIGNATURES: Dict[str, TableSignature] = {
         ("Deal Type", "Type"),
         ("Quantity", "Qty"),
         description="bulk / block deals (verified headers: 'Client Name' + 'Deal Type' + 'Quantity')",
+    ),
+    # The two tables of a sector page. Registered separately and on purpose: they sit on the same
+    # page, and the known failure mode in this package is selecting a table by its heading or by
+    # one loose word. Both were verified 2026-09-27 on
+    # /equity/sector/20/automobiles-auto-components/ (2,275,767 bytes, 2 outermost tables).
+    #
+    # The discriminator is the group each signature requires and the other lacks. The constituent
+    # table requires "Market Cap"; the aggregate block does not have it. The aggregate requires
+    # "No. of Companies" and "Industry Score"; the constituent table does not have them. Neither
+    # signature uses the bare word "Name" -- the aggregate's first header cell is literally
+    # "Name", and requiring it would be exactly the loose match this module's docstring warns
+    # about.
+    "sector_constituents": _sig(
+        "sector_constituents",
+        ("Stock Name", "Company Name"),
+        ("Market Cap", "Market Capitalisation", "Market Capitalization"),
+        ("LTP Last Traded Price", "LTP", "Last Traded Price"),
+        description="sector/industry constituent list (verified headers: 'Stock Name' + "
+                    "'Market Cap' + 'LTP Last Traded Price')",
+    ),
+    "sector_industry_aggregate": _sig(
+        "sector_industry_aggregate",
+        ("No. of Companies", "No of Companies", "No. of Companies."),
+        ("Industry Score",),
+        ("Advances/Declines Ratio", "A/D Ratio", "Advances / Declines Ratio"),
+        description="per-industry aggregate block on a sector page (verified headers: "
+                    "'No. of Companies' + 'Industry Score' + 'Advances/Declines Ratio')",
     ),
 }
 
@@ -395,17 +433,68 @@ def find_tables(
             break
 
     if not frames and signature is not None:
-        found = []
-        for table in _outermost_tables(soup):
-            matched = classify_table(_header_row(table))
-            found.append(matched or f"<no signature: {_header_row(table)[:4]}>")
         raise TrendlyneTableNotFoundError(
             f"no table matched signature={signature!r}. Signature(s) present on this page: "
-            f"{', '.join(found) if found else '<no tables at all>'}. "
+            f"{_page_signature_report(soup)}. "
             f"Classification is by header row, not by heading text, so a heading change alone "
             f"cannot cause this — it means the headers changed."
         )
     return frames
+
+
+def find_table_elements(html: str, signature: str) -> List[Tag]:
+    """The outermost ``<table>`` **elements** whose header row matches ``signature``, in document
+    order.
+
+    For a caller that needs the markup rather than a frame. The reason it exists: ``read_html``
+    keeps a cell's *text* and drops its *attributes*, so a value that only exists as
+    ``data-parameter="mcap_q"``, ``data-order="14606.74"`` or ``data-sparkline='{"v": [...]}'`` is
+    unreachable from :func:`find_tables`. Rewriting those cells as visible text would fabricate a
+    column trendlyne never rendered, so the parser keeps the element and reads the attributes
+    itself.
+
+    Classification is identical to :func:`find_tables` — same registry, same first-header-row
+    rule, same outermost-only sweep — so the two can never disagree about which table is which.
+
+    Args:
+        html: A trendlyne page, or a verbatim excerpt of one.
+        signature: A key of :data:`SIGNATURES`.
+
+    Returns:
+        The matching ``bs4`` ``Tag`` objects. Empty only if nothing matched, which raises.
+
+    Raises:
+        ValueError: ``signature`` is not a registered name.
+        TrendlyneTableNotFoundError: Nothing on the page matched.
+    """
+    if signature not in SIGNATURES:
+        raise ValueError(
+            f"unknown signature={signature!r}. Registered: {', '.join(known_signatures())}. "
+            f"Register a new one with tables.register_signature() after checking the live page."
+        )
+    soup = BeautifulSoup(html, "lxml")
+    found = [
+        table
+        for table in _outermost_tables(soup)
+        if classify_table(_header_row(table)) == signature
+    ]
+    if not found:
+        raise TrendlyneTableNotFoundError(
+            f"no table matched signature={signature!r}. Signature(s) present on this page: "
+            f"{_page_signature_report(soup)}. "
+            f"Classification is by header row, not by heading text, so a heading change alone "
+            f"cannot cause this — it means the headers changed."
+        )
+    return found
+
+
+def _page_signature_report(soup: BeautifulSoup) -> str:
+    """One line naming every outermost table's signature, for a "not found" message."""
+    found = []
+    for table in _outermost_tables(soup):
+        matched = classify_table(_header_row(table))
+        found.append(matched or f"<no signature: {_header_row(table)[:4]}>")
+    return ", ".join(found) if found else "<no tables at all>"
 
 
 def find_table(

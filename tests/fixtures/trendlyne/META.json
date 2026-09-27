@@ -99,6 +99,30 @@
       "notes": "full eodData had 5107 rows spanning 2006-01-02..2026-09-18. Used to pin the price-basis claim: the 2026-09-24 bar must equal the MarketLens-recorded close/volume for the same session.",
       "stored_sha256": "f2b5785621fd578c9d4537b82a1eaf194983df2446e8b2d18a51a894c0b54a8b",
       "stored_line_endings": "lf"
+    },
+    "sector_20_automobiles.html": {
+      "url": "https://trendlyne.com/equity/sector/20/automobiles-auto-components/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T18:25:51+00:00",
+      "original_bytes": 2275767,
+      "original_sha256_16": "b6b76677bd0f3d66",
+      "stored_bytes": 325008,
+      "trim_rule": "taxonomy <select id=\"JS_diviGroupSelector\"> and both outermost <table> elements kept; page chrome, nav, scripts and CSS dropped. All 210 constituent rows of table[0] kept in full, because every weight divides by the sector total. table[0]'s header row is byte-identical to the original, since the signature classifier reads it. Per data-row <td>: div.hidden (CSS-hidden sprite) and span.dropdown.js_commondd removed; div.low-high-charts replaced by a <span> holding exactly its rendered text; on the nine High/Low <td>s only, class/data-order/data-export cleared (those numbers are already in the text and no parser reads that column's sort metadata); a.stockrow's title= removed, as it duplicates the company name. Verbatim: the header row, every a.stockrow href and data-stockpk, data-parameter and data-order on the Market Cap and LTP cells, every data-sparkline value, all of table[1], all 164 select options.",
+      "notes": "2 outermost tables, not 3: table[0] is the 210-row constituent list and table[1] the 5-row per-industry aggregate block. They are separate header signatures (sector_constituents / sector_industry_aggregate) because both have 'Name' as a first header cell. table[1]'s 'No. of Companies' values sum to 210, matching table[0] exactly. The aggregate names 'Auto Parts & Equipment' with 147 companies, and industry 9 (same name, same id, per stock_page_motherson_breadcrumb.html) was separately observed to list exactly 147 rows on its own 1,634,726-byte page -- two independent server-side counts, recorded here rather than pinned by a second 1.6 MB fixture. The select carries 164 options = 31 sectors (ids 1-31 contiguous) + 133 industries (ids 2-284 non-contiguous). The sector total of sum(mcap_q data-order) is 3,660,716.0527. The Market Cap column carries NO unit label anywhere on the page, and dividing it by each row's own LTP does not reproduce a plausible share count on 37 of 210 rows, so the unit is recorded as unverified and the weight is the contract. Bytes by block: name cells 52,471; 210 data-sparkline values 91,292; 9 High/Low cells 62,491; Market Cap cells 37,644; LTP cells 37,485; select 28,081; table[1] 5,330.",
+      "stored_sha256": "af18ec766294c0cea89ce7b3fea11e95c5daac60f9a83e309f764c61fa545d89",
+      "stored_line_endings": "lf"
+    },
+    "stock_page_motherson_breadcrumb.html": {
+      "url": "https://trendlyne.com/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T18:25:49+00:00",
+      "original_bytes": 292029,
+      "original_sha256_16": "5a714426cbef6d75",
+      "stored_bytes": 2097,
+      "trim_rule": "verbatim <ol class=\"tl_breadcrumb\"> block, all four <li> items; page chrome dropped",
+      "notes": "Same recording as stock_page_motherson.html, which keeps the OHLC-token window. Labels are MARKETS, 'SECTOR : AUTOMOBILES & AUTO COMPONENTS', 'INDUSTRY : AUTO PARTS & EQUIPMENT', and the symbol. This is the only place a stock page carries its classification -- there is no data-* attribute and no embedded JSON for it. Note the label renders the name in caps where the sector page's select renders the same sector 20 as 'Automobiles & Auto Components'; both spellings are preserved rather than normalised, and the id and slug agree.",
+      "stored_sha256": "189bf2a8f6492eb1a4834b2d94a257776742aba76291e7bcbae7a856d26f3870",
+      "stored_line_endings": "lf"
     }
   }
 }

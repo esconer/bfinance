@@ -73,7 +73,7 @@ __all__ = [
     "TrendlyneTokenError",
     "TrendlyneSchemaError",
     "TrendlyneTableNotFoundError",
-    "TrendlyneSnapshotOnlyError",
+    "TrendlyneRobotsDisallowedError",
 ]
 
 
@@ -172,6 +172,25 @@ class TrendlyneSchemaError(TrendlyneError, ParsingError):
     """
 
 
+class TrendlyneRobotsDisallowedError(TrendlyneError, UpstreamServiceError):
+    """A request was refused **locally** because trendlyne's ``robots.txt`` disallows the path.
+
+    Raised before any socket is opened, so honouring robots costs this package nothing. The
+    message names the path, the exact ``Disallow`` rule that covers it, and the flag that would
+    permit the request — because a caller who hits this is usually looking for a symbol this
+    package cannot reach, and the useful answer is *"here is why, and here is the switch"*.
+
+    Why a type and not a silent empty result: the only route this applies to is trendlyne's own
+    autocomplete, which is the sole resolver for instruments the equity sitemap omits — **all
+    ETFs**. Returning ``[]`` would be indistinguishable from "trendlyne has no such symbol", and
+    a caller would conclude the instrument does not exist. It does; this package just will not
+    ask about it. See :data:`bfinance.trendlyne.client.ROBOTS_DISALLOWED_ROUTES`.
+
+    The 10-second ``Crawl-delay`` that is widely quoted for this site is **not** the general one:
+    it is scoped to ``GPTBot`` and ``ClaudeBot``. ``User-agent: *`` carries ``Crawl-delay: 1``.
+    """
+
+
 class TrendlyneTableNotFoundError(TrendlyneError, ParsingError):
     """No table on the page matched the requested header signature.
 
@@ -179,10 +198,3 @@ class TrendlyneTableNotFoundError(TrendlyneError, ParsingError):
     trendlyne restyles a page.
     """
 
-
-class TrendlyneSnapshotOnlyError(TrendlyneError):
-    """A period was requested from a route that only serves the latest snapshot.
-
-    Raised locally, before any request, so a caller cannot spend a request to learn what a URL
-    shape already told us.
-    """
