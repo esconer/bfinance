@@ -52,13 +52,30 @@ position.** There is no evidence this is a deliberate sentinel; do not "fix" it.
   TIMESTAMP,TOTALTRADES,ISIN` — OHLCV is `OPEN`/`HIGH`/`LOW`/`CLOSE`/`TOTTRDQTY`
 - **`SctySrs` must be filtered to `EQ`.** Raw files mix equities with `GB` (gold bonds, e.g. `SGBJUN28`)
   and blanks. Legacy `SYMBOL` can be a numeric BSE scrip code (`1018GS2026`).
-- ⚠ **The `EQ` filter silently drops the first sessions of a newly listed stub.** A new listing
-  debuts in series **`BE`** (trade-to-trade) and migrates to `EQ` weeks later. `ITCHOTELS` first
-  appears 2025-01-29 as `BE` and only reaches `EQ` on 2025-02-11 (`FinInstrmId` 29253 → 29251), so
-  `bhavcopy_range(series="EQ")` **loses the first 9 sessions and mis-dates the listing by 13
-  sessions.** Cause: `bhavcopy.py:401` filters on `== "EQ"` with no union. Callers who want listing
-  history must request `BE` explicitly or take the union. This is not cosmetic — the *entire* demerger
-  computation in §6 needs the child's first print, so this bug is a prerequisite for fixing §6 at all.
+- ⚠ **The `EQ` filter silently dropped sessions in BOTH directions. Now fixed.** A new listing debuts
+  in series **`BE`** (trade-to-trade) and migrates to `EQ` weeks later. `ITCHOTELS` first appears
+  2025-01-29 as `BE` (`FinInstrmId` 29253) and only reaches `EQ` on 2025-02-11 (29251), so the old
+  `series="EQ"` default **lost the first 9 sessions and mis-dated the listing by 13 days**.
+  Worse — the migration is **bidirectional and routine**: 43 distinct symbols changed series in a
+  15-day window, and `AGSTRA`, `AHL`, `EVERESTIND`, `SADBHAV`, `VERTOZ` go **EQ→BE**. So an
+  `EQ`-only read also **punches single-session holes in the middle of established histories**, which
+  no listing-date sanity check would ever catch. `POWERMECH` was `BE` on one day and `EQ` on the
+  other 14.
+  The default is now `("EQ", "BE")`. That is safe because **same-day `EQ`∩`BE` overlap is 0** across
+  24 archives, so the union is strictly additive.
+  ⚠ **Do not default to "all series".** Measured cost: **9,964 extra rows = 22.6% of a file**, none
+  of them equities — gold bonds (`SGBDE30III` @ 8,223.30), G-sec loans, T-bills, NCD codes,
+  structured notes, and **`EMBASSY` the REIT @ 365.26** and `IRBINVIT` the invit. Every one carries a
+  plausible price and would land in a portfolio as an instrument. The archives hold **100+ distinct
+  `SctySrs` values**. `series=None` exists for callers who want everything and is never a default;
+  `series=[]` raises rather than silently meaning "everything".
+  ⚠ **Still excluded: `SM` (SME) and `ST`.** Both are equity companies. Including SME changes the risk
+  profile of a large-cap screen, so that is a product decision, not a bug fix.
+  ⚠ **Unresolved, pre-existing:** upstream prints **the same ticker twice in one file under two
+  series** — **65 instances across 24 archives** (`RADIOCITY` as `EQ`+`P1`). `parse_bhavcopy` keys on
+  `(Date, Symbol)` and dedups, so one bar is silently dropped. Outside `EQ`∪`BE` so the fix neither
+  causes nor worsens it, but the union makes the general hazard newly reachable. Fixing it means
+  keying on `(Date, Symbol, Series)`, which changes the public output contract.
 
 ### Performance — one file covers the WHOLE market
 
@@ -90,6 +107,24 @@ Measured bhavcopy ÷ yfinance, 2024-09-01..2024-11-15:
 | HDFCBANK | 0/53 → **53/53** after fix | 2.000000 | 1:1 bonus **2025-08-26 (outside the window)** |
 | TCS | 53/53 | 1.000000 | Rs 238 dividends after the window |
 | ITC | 0/53 | 1.038513 | demerger 2025-01-06 — see §6 |
+
+Volume scaling rule, and **why the obvious test is the wrong test.** Volume is scaled by the
+**inverse** factor so `price × volume` is invariant. Do **not** verify that by asserting volume
+roughly doubles across a 1:1 bonus. Measured on RELIANCE, 2024-09-01..2024-11-16, 39 bars pre /
+14 post:
+
+```
+median Close   2924.90 -> 1305.47   ratio 0.446331
+median Volume  8132084 -> 11996392  ratio 1.475193
+mean   Volume  8388982 -> 12883285  ratio 1.535739
+```
+
+Neither halves nor doubles. **The confirming evidence is direction, not magnitude:** if volume were
+already denominated in post-bonus shares it would have *fallen* ~2.2× along with the price. It rose,
+so the column carries two share-count bases. Assert the **invariant** — `price_adjusted ×
+volume_adjusted` identical on every bar (21,476,020,636 on both sides) — not the ratio. And do not
+scale `Dividends` (rupees) or `Stock Splits` (a ratio): `Volume` is the only share-count column in
+the history schema.
 
 Consequences, all learned the hard way:
 - **TWO factors, not one.** `share-count` (bonus/split/bonus-issue) → O/H/L/C. `dividend` → `Adj Close`
@@ -267,7 +302,17 @@ exchange, suggestions`
   bhavcopy 481.60, yfinance 463.74. Across 2017 / 2018 / 2020 / 2022 / 2024 the Trendlyne ÷ yfinance
   ratio is **1.038513 to six decimals every time** — the exact reciprocal of Yahoo's 0.962915
   constant. So on a demerger **Trendlyne is the exchange and yfinance is the one that rewrote history.**
-- ⚠ **`attrs["bfinance_trendlyne_price_basis"] = "yfinance_back_adjusted"` is a false blanket claim.**
+- ✅ **`attrs["bfinance_trendlyne_price_basis"]` no longer lies — fixed.** It was set unconditionally
+  to `"yfinance_back_adjusted"`, which was wrong for the whole demerger class. It is now
+  `as_traded_split_bonus_adjusted`, a **constant rather than a per-symbol derivation** — re-measured
+  across 8 symbols × 2 windows, with a second window past each event confirming the same two names
+  then match byte-identically. A separate machine-readable
+  `attrs["bfinance_trendlyne_demerger_applied"] = False` lets a consumer branch on the demerger
+  fact without parsing a label string.
+  The guard asserts the value is **neither** `yfinance_back_adjusted` **nor** bare `as_traded` — the
+  latter is also false, because splits and bonuses *are* applied. Basis keys are stamped by
+  `parse_ohlc` only, **not** by `build_attrs`: a deals list or a holdings grid has no price basis,
+  and stamping one on it is the same class of false claim.
   It is set unconditionally and it is wrong for the entire demerger class. The honest value names
   what is actually applied: `as_traded_split_bonus_adjusted`, demergers explicitly not applied.
 - Consequence: Trendlyne **can** be blended with bhavcopy for demerger work — they agree exactly
@@ -327,14 +372,30 @@ audit found:
   fixtures, not a route.
 - **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON, and the 6
   registered signatures were validated against just **2** of them.
-- The `board_meeting` signature was **verified against the corporate-actions page, never on
-  `/equity/board-meeting/`** — the one route it exists to serve. `tables.py:24` still documents it
-  as having "no signature" while `SIGNATURES["board_meeting"]` claims one; the docstring is stale.
-- **14 of 17 `ENDPOINTS` templates are dead strings** (`client.py:223-242`). Only `stock_page`,
-  `ohlc` and `chart_metric` are referenced. `share_holding` / `mutual_fund_holdings` appear solely
-  inside a snapshot-only list and an error message.
-- `__init__.py:23-25` and `client.py:1512` name sibling modules `ownership`, `deals` and
-  `corporate` that **do not exist on disk**. Forward references to unwritten code.
+- The `board_meeting` signature's **only ever validation is a corporate-actions table.** So
+  `find_table(corporate_actions_page, "board_meeting")` returns a 10×3 corporate-actions *purpose*
+  table, and `/equity/board-meeting/` — the route the name exists to serve — has never been checked.
+  Two honest options: rename the signature to what it was actually measured on
+  (`corporate_action_purpose`), or re-measure it on its own route. **Undecided.**
+  Separately, `tables.py:24` annotates the corporate-actions page's 4th table as having "no
+  signature" when that table **is** the `board_meeting` signature — the docstring is simply wrong,
+  and `test_trendlyne_core.py` already asserts the truth.
+- ✅ **The 14 dead `ENDPOINTS` templates are deleted.** `ENDPOINTS` now means exactly *routes this
+  package has a fetch method for* — `stock_page`, `ohlc`, `chart_metric`, and nothing else.
+  The reason deletion beat wiring-later: a template with no method behind it still lets `build_path`
+  mint a plausible URL for a route nobody asked for, and **5 of the 14 had never returned HTTP 200 at
+  all** (`rights`, `news`, `news_only`, `news_analyst_calls`, `news_bse_announcements`) — pure
+  invention. `TestNoDeadScaffolding` now enforces declared == referenced by AST walk **and** by
+  driving the real methods against `httpx.MockTransport`, plus a guard that no docstring names a
+  module absent from disk. All guards proven non-vacuous by negative control.
+- ✅ **The forward references to `ownership`, `deals` and `corporate` are removed.** The package
+  manifest now says explicitly that no such modules exist.
+
+### Still true, worth re-reading
+- **0 of 8 pages have a fetch method.** The tests exercise the generic `tables.find_table` against
+  fixtures, not a route. Deleting the templates did not add them.
+- **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON, and the 6
+  registered signatures were validated against just **2** of them.
 
 So the honest description of `bfinance.trendlyne` is: **a working OHLC client and symbol resolver,
 plus scaffolding for 8 section tables that are not yet wired.** Treat the row counts as a scraping
@@ -561,7 +622,16 @@ assertions and asserted against `F_true` instead.
    wrong as the policy** — declining to invent a number is correct only when there is no number to
    be had.
 
-The 16,863-row `other` bucket is **69.5% AGM notices**, with 124 demerger rows (0.74%) lumped in.
+The `other` bucket is **16,797 rows, 81.9% AGM notices** (13,803 rows), with 124 demerger rows
+(0.74%) lumped in. Structural keywords measured over a fresh 43,788-row pull: `demerger`/`de-merger`
+**124** (123 unhyphenated + exactly 1 `De-Merger`, disjoint), `scheme` **142**, `amalgam` **6**,
+`composit` **5** — union **255** rows over 202 symbols, 1996-05-29 → 2026-09-08. `composit` is a false
+friend: one of its three distinct subjects is a *company* (`Gujarat Composite Ltd`), so `composite`
+only counts when it qualifies a scheme or amalgamation.
+
+**Counts corrected from an earlier pass:** 43,788 rows, not 43,789; the `other` bucket is 81.9% AGM,
+not 69.5%; `demerger` is 124 rows, not 123; and the largest committed corporate-actions fixture was
+only 223 curated rows, so the figures above come from a live 43,788-row re-pull.
 
 ---
 
