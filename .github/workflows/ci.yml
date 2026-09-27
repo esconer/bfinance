@@ -9,10 +9,17 @@ on:
       - main
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # REQUIRED job: the deterministic, network-free suite.
+  # `-m "not live"` is what makes it deterministic -- it selects every test that
+  # carries no `@pytest.mark.live`, i.e. every test that must pass without
+  # screener.in, yfinance or Yahoo Finance being reachable.
+  # ---------------------------------------------------------------------------
   test:
-    name: Test across Python Versions
+    name: Offline Suite (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
@@ -32,5 +39,39 @@ jobs:
       - name: Install Dependencies
         run: uv sync --extra dev
 
-      - name: Run Pytest
-        run: uv run pytest
+      - name: Run Offline Test Suite (-m "not live")
+        run: uv run pytest -m "not live"
+
+  # ---------------------------------------------------------------------------
+  # NON-BLOCKING job: the live suite, so marking tests `live` never hides them.
+  #
+  # Single Python version on purpose: the live tests cost real wall-clock time
+  # and get rate-limited by screener.in, so running them four times in parallel
+  # makes the run slower *and* less reliable. `continue-on-error` keeps a
+  # throttled upstream from reddening the build, which would train everyone to
+  # ignore it. The offline job above stays the required gate.
+  # ---------------------------------------------------------------------------
+  live:
+    name: Live Network Suite (screener.in / yfinance, non-blocking)
+    runs-on: ubuntu-latest
+    needs: test
+    continue-on-error: true
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install Dependencies
+        run: uv sync --extra dev
+
+      - name: Run Live Test Suite (-m live)
+        run: uv run pytest -m live
