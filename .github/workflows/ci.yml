@@ -42,6 +42,18 @@ jobs:
       - name: Run Offline Test Suite (-m "not live")
         run: uv run pytest -m "not live"
 
+      # A marker convention is only as good as the next person remembering it. This re-runs
+      # the required selection with HOME pointed at an empty directory and every non-loopback
+      # socket blocked, so a test that quietly reaches an upstream fails HERE instead of
+      # passing on a machine with a warm ~/.bfinance cache.
+      #
+      # Three such tests existed, all invisible locally: two called
+      # hasattr(Ticker(...), "sector") -- the property getter calls _ensure_profile() -- and
+      # four passed actions=True without injecting a corporate-actions client, so
+      # resolve_actions_async built a real one and called www.nseindia.com.
+      - name: Prove the offline selection is network-free (cold cache)
+        run: uv run python tests/hermetic_offline_suite.py
+
   # ---------------------------------------------------------------------------
   # NON-BLOCKING job: the live suite, so marking tests `live` never hides them.
   #

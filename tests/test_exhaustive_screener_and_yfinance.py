@@ -4,7 +4,6 @@ Validates that 100% of Screener.in fundamental details, documents, and timeserie
 and that 100% of modern yfinance 1.7.0+ APIs, methods, and properties are compatible.
 """
 
-from datetime import datetime
 import importlib
 
 import pandas as pd
@@ -15,7 +14,7 @@ from bfinance.ticker import Ticker
 from bfinance.tickers import Tickers
 from bfinance.models.options import OptionChain
 from bfinance.market.derivatives import DerivativesEngine
-from bfinance.models.company import CompanyProfile, Concall, PeerStock, TopRatios
+from bfinance.models.company import CompanyProfile, Concall, TopRatios
 from bfinance.models.statements import FinancialStatement
 
 
@@ -409,7 +408,13 @@ def test_fabricated_sector_explorer_is_gone():
     ``sector.py`` was a hardcoded 4-sector / 20-company table of made-up prices and P/Es with no
     HTTP anywhere, and this very test used to be what *enforced* that fiction — it ran offline and
     asserted ``not tech.top_companies.empty``, so the required CI gate pinned the fabrication as
-    correct. This guard pins the removal instead, and points at the real classification path.
+    correct. This guard pins the removal instead.
+
+    **No network.** An earlier version of this docstring claimed the check was "pure hasattr /
+    importlib, no network" and that was false: it ended with ``hasattr(Ticker("RELIANCE"), "sector")``,
+    which invokes the property getter, which calls ``_ensure_profile()`` and fetches a profile from
+    screener.in. A cold-cache instrumented run of the offline selection found it making a DNS
+    request. The taxonomy surface is therefore asserted on the *class*, never on an instance.
     """
     import bfinance
 
@@ -422,10 +427,11 @@ def test_fabricated_sector_explorer_is_gone():
     with pytest.raises(ImportError):
         importlib.import_module("bfinance.sector")
 
-    # Real classification still exists, sourced from the company profile taxonomy.
-    t = bf.Ticker("RELIANCE")
+    # Real classification still exists, sourced from the company profile taxonomy. Asserted on the
+    # class so no getter runs and no request is made.
     for attr in ("sector", "industry", "industry_group", "sub_industry"):
-        assert hasattr(t, attr), f"Ticker.{attr} is the real taxonomy path and must survive"
+        assert hasattr(bf.Ticker, attr), f"Ticker.{attr} is the real taxonomy path and must survive"
+        assert isinstance(getattr(bf.Ticker, attr), property), f"Ticker.{attr} must stay a property"
 
 
 @pytest.mark.live

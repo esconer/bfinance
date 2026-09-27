@@ -31,6 +31,8 @@ from bfinance.nse import corporate_actions as ca
 from bfinance.ticker import Ticker
 from bfinance.utils.exceptions import TickerNotFoundError
 
+from conftest import StubCorporateActionsClient
+
 _ACTIONS_FIXTURE = Path(__file__).parent / "fixtures" / "corporate_actions" / (
     "nse_reliance_2020_2026.json"
 )
@@ -134,8 +136,17 @@ def stub_bhavcopy(monkeypatch):
     return _factory
 
 
-def _engine(chart_df=None, profile=None):
-    return OHLCVEngine(_StubScreener(chart_df, profile))
+def _engine(chart_df=None, profile=None, actions_client=None):
+    # Inject a stub corporate-actions client so the actions=True tests stay offline. Without it,
+    # CorporateActionsEngine.resolve_actions_async builds a REAL client and calls
+    # www.nseindia.com -- a live DNS request that only shows up when ~/.bfinance is cold, i.e. on
+    # a fresh CI runner, and is invisible on a developer machine with a warm cache.
+    return OHLCVEngine(
+        _StubScreener(chart_df, profile),
+        corporate_actions_client=(
+            actions_client if actions_client is not None else StubCorporateActionsClient()
+        ),
+    )
 
 
 # --------------------------------------------------------------- provenance of the bars

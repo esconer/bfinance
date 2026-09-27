@@ -130,6 +130,7 @@ def test_tickers_group_parity():
     assert isinstance(df_hist, pd.DataFrame)
 
 
+@pytest.mark.live
 def test_sector_and_industry_parity():
     """bf.Sector/bf.Industry are gone, so there is nothing to hold parity with.
 
@@ -137,6 +138,13 @@ def test_sector_and_industry_parity():
     bfinance equivalents were a hardcoded table of invented prices, so matching them was never
     possible and asserting parity only locked the fabrication in place. Real classification is
     ``Ticker.sector`` / ``.industry`` / ``.industry_group`` / ``.sub_industry``.
+
+    Marked ``live`` deliberately. It was previously unmarked, so it ran inside the required
+    ``-m "not live"`` CI job and made a real request: ``hasattr(t, "sector")`` invokes the property
+    getter, which calls ``_ensure_profile()`` and hits the network. And ``hasattr`` swallows
+    exceptions, so on a 403 it asserted almost nothing *while still making the request*. The
+    removal itself is pinned offline, with no network at all, in
+    ``test_exhaustive_screener_and_yfinance.py``.
     """
     import bfinance
 

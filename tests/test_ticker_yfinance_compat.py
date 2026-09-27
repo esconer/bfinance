@@ -149,6 +149,7 @@ def test_yfinance_tickers_group():
     assert not df_hist.empty
 
 
+@pytest.mark.live
 def test_fabricated_sector_is_not_exported():
     """The yfinance ``Sector``/``Industry`` drop-in surface was removed, deliberately.
 
@@ -156,6 +157,12 @@ def test_fabricated_sector_is_not_exported():
     table with invented prices and P/Es and no HTTP call at all. This test previously asserted
     ``not sec.top_companies.empty``, i.e. it enforced the fabrication. It now pins the removal and
     confirms the genuine taxonomy path is untouched.
+
+    Marked ``live`` deliberately — it was unmarked, so it ran inside the required ``-m "not live"``
+    CI job and made a real request. ``hasattr(t, "sector")`` invokes the property getter, which
+    calls ``_ensure_profile()``; and ``hasattr`` swallows exceptions, so on a 403 this asserted
+    almost nothing while still hitting the network. The removal is pinned offline, without any
+    network, in ``test_exhaustive_screener_and_yfinance.py``.
     """
     import bfinance
 

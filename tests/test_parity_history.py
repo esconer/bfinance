@@ -14,6 +14,8 @@ from bfinance.market.ohlcv import OHLCVEngine
 from bfinance.models.company import CompanyProfile
 from bfinance.models.statements import FinancialStatement
 
+from conftest import StubCorporateActionsClient
+
 
 def _synthetic_chart_frame():
     idx = pd.to_datetime(["2024-03-28", "2024-03-31", "2024-04-01"])
@@ -58,8 +60,17 @@ class _StubScreener:
         return self._profile
 
 
-async def _fetch(chart_df, profile=None, **kwargs):
-    engine = OHLCVEngine(_StubScreener(chart_df, profile))
+async def _fetch(chart_df, profile=None, actions_client=None, **kwargs):
+    # The corporate-actions client is injected so this stays offline. Left as None,
+    # CorporateActionsEngine.resolve_actions_async constructs a REAL client, and the tests that
+    # pass actions=True then make a live DNS call to www.nseindia.com -- visible only when
+    # ~/.bfinance is cold, which is the normal state on a CI runner.
+    engine = OHLCVEngine(
+        _StubScreener(chart_df, profile),
+        corporate_actions_client=(
+            actions_client if actions_client is not None else StubCorporateActionsClient()
+        ),
+    )
     # ohlc="synthetic": every test below describes the *close-only* feed, which is now an
     # explicit opt-in. The default source is the NSE bhavcopy (real O/H/L) -- see
     # tests/test_nse_bhavcopy_wiring.py for that path.
