@@ -1,0 +1,66 @@
+{
+  "_fixture_symbol": "RELIANCE",
+  "_fixture_period": "30Y",
+  "_fixture_full_row_count": 8069,
+  "success": true,
+  "error": null,
+  "timestamp": "2026-09-26T20:36:02.278473550Z",
+  "meta": {
+    "page": null,
+    "limit": null,
+    "total": 8069,
+    "hasMore": null
+  },
+  "data": [
+    {
+      "date": "1996-09-30",
+      "price": 191.05,
+      "volume": 8880950
+    },
+    {
+      "date": "1996-10-01",
+      "price": 190.55,
+      "volume": 6648800
+    },
+    {
+      "date": "1996-10-03",
+      "price": 189.7,
+      "volume": 5450600
+    },
+    {
+      "date": "1996-10-04",
+      "price": 190.7,
+      "volume": 6429800
+    },
+    {
+      "date": "1996-10-07",
+      "price": 187,
+      "volume": 9715800
+    },
+    {
+      "date": "2026-09-18",
+      "price": 1226.4,
+      "volume": 15122715
+    },
+    {
+      "date": "2026-09-21",
+      "price": 1247.4,
+      "volume": 10007218
+    },
+    {
+      "date": "2026-09-22",
+      "price": 1240.4,
+      "volume": 10684376
+    },
+    {
+      "date": "2026-09-23",
+      "price": 1248,
+      "volume": 8352048
+    },
+    {
+      "date": "2026-09-24",
+      "price": 1219.2,
+      "volume": 13923795
+    }
+  ]
+}

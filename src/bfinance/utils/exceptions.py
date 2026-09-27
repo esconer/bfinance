@@ -25,3 +25,13 @@ class RateLimitExceededError(UpstreamServiceError):
 class ParsingError(BFinanceError):
     """Raised when HTML/JSON parsing fails due to unexpected upstream schema changes."""
     pass
+
+
+class NotAnNseSymbolError(BFinanceError):
+    """Raised when a symbol cannot be used with an NSE-only source.
+
+    NSE-only endpoints (the MarketLens price history, for example) return an empty result with
+    ``error: null`` for BSE tickers, BSE scrip codes, and indices. That silence is
+    indistinguishable from a vendor outage, so these inputs are rejected loudly instead.
+    """
+    pass

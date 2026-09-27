@@ -56,7 +56,7 @@ addopts = "-ra -q --asyncio-mode=auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [
-    "live: requires network access (screener.in / yfinance)",
+    "live: requires network access (screener.in / yfinance) or reads the default ~/.bfinance cache. Excluded from the required CI job by `-m \"not live\"`; run separately by `-m live`.",
 ]
 
 [tool.ruff]

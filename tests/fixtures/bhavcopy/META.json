@@ -1,0 +1,32 @@
+{
+  "udiff_cm_20260925": {
+    "url": "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260925_F_0000.csv.zip",
+    "captured": "2026-09-27",
+    "schema": "udiff",
+    "header_fields": 34,
+    "data_row_fields": 34,
+    "full_row_count": 3654,
+    "trimmed_row_count": 7,
+    "notes": "34-column UDiFF. Untrimmed SctySrs spread: EQ 2660, SM 380, BE 239, ST 84, GB 40."
+  },
+  "udiff_cm_20240101_35col": {
+    "url": "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20240101_F_0000.csv.zip",
+    "captured": "2026-09-27",
+    "schema": "udiff",
+    "header_fields": 35,
+    "data_row_fields": 34,
+    "full_row_count": 2683,
+    "trimmed_row_count": 4,
+    "notes": "MALFORMED CSV: the header line carries 35 fields (trailing comma -> pandas 'Unnamed: 34') while every data row carries 34. Also names the tail columns 'Rsvd01'..'Rsvd04' where the 2026 file uses 'Rsvd1'..'Rsvd4'. Fixtures the parse-by-column-name requirement."
+  },
+  "legacy_cm_20230515": {
+    "url": "https://nsearchives.nseindia.com/content/historical/EQUITIES/2023/MAY/cm15MAY2023bhav.csv.zip",
+    "captured": "2026-09-27",
+    "schema": "legacy",
+    "header_fields": 14,
+    "data_row_fields": 14,
+    "full_row_count": 2427,
+    "trimmed_row_count": 6,
+    "notes": "Uppercase legacy schema, TIMESTAMP='15-MAY-2023'. SYMBOL is a numeric scrip code on non-EQ rows."
+  }
+}

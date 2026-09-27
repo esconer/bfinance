@@ -1,0 +1,14 @@
+{
+  "_fixture_symbol": "RELIANCEEQ",
+  "_fixture_period": "1Y",
+  "success": true,
+  "data": [],
+  "error": null,
+  "timestamp": "2026-09-26T20:35:56.862308276Z",
+  "meta": {
+    "page": null,
+    "limit": null,
+    "total": 0,
+    "hasMore": null
+  }
+}
