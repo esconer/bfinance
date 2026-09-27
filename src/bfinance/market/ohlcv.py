@@ -30,15 +30,50 @@ BHAVCOPY_FIRST_DATE = "2024-01-01"
 
 OHLC_SOURCES = ("bhavcopy", "synthetic")
 
-#: The columns a corporate-action back-adjustment restates. ``Volume`` is deliberately absent.
-#:
-#: A back-adjustment puts a past price on today's share count; it says nothing about how many
-#: shares actually changed hands that day, and the share count NSE published for a day is a fact
-#: about that day. Multiplying volume by the same factor would report a traded share count that
-#: never traded (RELIANCE's 28-Oct-2024 bonus would make the prior fortnight's volume look halved
-#: on days when the full, doubled share count traded). "Scale everything by the factor" is the
-#: obvious wrong move, and this tuple is where that is written down.
+#: The columns a corporate-action back-adjustment restates *as prices*. ``Volume`` is deliberately
+#: absent: it is a share count, not a rupee price, and it is restated separately by the rule below.
 ADJUSTED_PRICE_COLUMNS = ("Open", "High", "Low", "Close")
+
+#: The one share-count column, and the only column scaled by the **inverse** of the price factor.
+#:
+#: A share-count back-adjustment restates prices onto today's share count, so
+#: ``price_adjusted = price / F`` for share-count factor ``F``. The same restatement has to be
+#: applied to the share count, in the opposite direction, or the frame ends up describing two bars
+#: in two different units: ``volume_adjusted = volume * F``. One then-share became ``F`` now-shares,
+#: so a bar that traded ``V`` then-shares traded ``V * F`` now-shares' worth of stock. That is what
+#: makes ``price * volume`` -- the rupee value traded -- invariant across the boundary, which is the
+#: whole point of putting a bar on one share count.
+#:
+#: Measured on the real feed (RELIANCE, 2024-09-01..2024-11-16, 39 bars before and 14 after its
+#: 1:1 bonus of ex-date 2024-10-28; run
+#: ``uv run python <scratch>/measure_reliance_wide.py`` against ``nse.bhavcopy.bhavcopy_range``):
+#:
+#:     median Close   2924.90 -> 1305.47   ratio 0.446331   (the bonus, plus a soft session)
+#:     median Volume  8132084 -> 11996392  ratio 1.475193   <- volume did NOT halve
+#:     mean   Volume  8388982 -> 12883285  ratio 1.535739
+#:
+#: The direction is the finding. Had the published volume already been on the post-bonus share
+#: count it would have fallen by ~2.2x, matching the halved price. It rose ~1.5x instead, so the
+#: column mixes two share-count bases: pre-bonus bars are counted in then-shares, post-bonus bars
+#: in now-shares. Leaving it alone while halving the price would understate the traded value of
+#: every pre-bonus bar by exactly ``F`` -- a 2.0x step at the bonus, on a series where no other
+#: event produces one. The correct test is therefore the invariant ``price * volume``, not
+#: "did volume change".
+VOLUME_COLUMN = "Volume"
+
+#: Machine-readable price bases, recorded on every frame as ``attrs["price_basis"]``.
+#:
+#: Five sources on four different bases for one stock is the problem this vocabulary exists to
+#: make visible: the values are self-describing and a consumer can branch on them without parsing
+#: prose. Deliberately *not* called ``"yfinance_adjusted"``, because it is not yfinance parity --
+#: no demerger, buy-back, rights issue or REIT per-unit distribution is applied, and no dividend
+#: reaches O/H/L/C. The name states what was actually done.
+PRICE_BASIS_AS_TRADED = "as_traded"
+PRICE_BASIS_SHARE_COUNT_ADJUSTED = "as_traded_share_count_adjusted"
+#: The synthetic path is not a price basis at all: Close and Volume are real Screener.in values and
+#: Open/High/Low are *derived* from Close (previous close open, +/-0.2% envelope). It is named as
+#: what it is rather than dressed up as an as-traded series.
+PRICE_BASIS_SYNTHETIC = "screener_close_real_derived_ohlc_unadjusted"
 
 # Key names a whole-market bhavcopy frame may carry the scrip identity under. The daily
 # file lists every NSE symbol, so a range fetch is sliced down to one symbol by these.
@@ -134,6 +169,9 @@ def _split_adjustment_factor(index: pd.DatetimeIndex, splits) -> pd.Series:
     which is exactly why :meth:`CorporateActionsEngine.resolve_actions_async` asks for the whole
     history rather than the caller's window.
 
+    Note the sign: this is the factor prices are *multiplied* by, so a 1:1 bonus (ratio 2.0) gives
+    0.5 on every earlier bar. Volume therefore takes its **reciprocal**; see :data:`VOLUME_COLUMN`.
+
     No price is needed to build it, so unlike the dividend factor this one is exact for ex-dates
     outside the returned window.
     """
@@ -156,6 +194,77 @@ def _split_adjustment_factor(index: pd.DatetimeIndex, splits) -> pd.Series:
         if position > 0:
             multipliers[:position] *= 1.0 / ratio
     return pd.Series(multipliers[: len(index)], index=index)
+
+
+def _incomplete_adjustment(symbol: str, extra: Optional[dict]) -> Optional[dict]:
+    """Describe the action classes the feed recorded that this engine declined to convert.
+
+    Returns ``None`` when nothing was declined, else a dict carrying a machine-readable ``reason``,
+    the symbol, the declined-row count, the full action-kind histogram, and a human ``detail``.
+    The key lands on ``df.attrs["bfinance_adjustment_incomplete"]`` so a caller that asked for
+    ``adjust_corporate_actions=True`` can detect an incomplete adjustment from the frame alone.
+
+    Why a count is the signal, and not a price test
+    ------------------------------------------------
+    The obvious alternative -- look for a price move no applied factor explains -- was measured and
+    does not work. On ITC's real 2025-01-06 demerger the as-traded close fell 8.0876%
+    (481.60 -> 442.65) with the factor at exactly 1.000000, which looks like a clean detection.
+    It is not: an 8% single-day fall is ordinary volatility, and
+    :func:`bfinance.nse.corporate_actions.unexplained_price_jumps` at its documented 0.25 tolerance
+    reports **no** jump for those bars. Catching the demerger that way needs a tolerance tight
+    enough to false-positive on every earnings drop, and then the flag stops meaning anything. A
+    price move cannot tell a demerger from a bad day; the feed's own record can, because the feed
+    wrote the row down and :mod:`bfinance.nse.corporate_actions` classified it ``other`` and
+    refused to make a factor of it.
+
+    So the signal is the feed's own ``bfinance_actions_unconverted_rows``. The cost is precision,
+    and it is a deliberate trade: that bucket holds declared-but-unpriceable rows that are not
+    events at all (8,649 ``Annual General Meeting`` notices on the full 1995-2026 pull) alongside
+    real skipped ones (90 demergers, 177 rights, 159 buy-backs, 843 interest payments). A symbol
+    whose only declined rows are AGM notices is therefore reported incomplete too. That direction of
+    error is the safe one -- a frame that says "possibly incomplete" when it was complete costs a
+    consumer one attrs check, whereas the current behaviour costs them a silently wrong factor.
+    Exposing the count and the histogram lets a consumer see how much of it is AGM noise.
+
+    Ex-dates of the declined rows are **not** in here, because the feed does not pass them through
+    :func:`~bfinance.market.corporate.CorporateActionsEngine.resolve_actions_async`: it forwards only
+    the count. Naming the ex-date and the subject (ITC, 2025-01-06, "Demerger") needs one added key
+    on the resolved-actions ``extra`` in ``bfinance/nse/corporate_actions.py``.
+
+    A precise signal now exists upstream and would remove the AGM over-reporting: the parsed-events
+    frame carries ``attrs["bfinance_structural_action_rows"]``, which counts demergers, buy-backs
+    and rights issues rather than every declined row. It cannot be used yet, because
+    :func:`~bfinance.nse.corporate_actions.actions_frame` does not propagate that key onto the
+    collapsed frame that ``resolve_actions_async`` receives. Two lines -- propagate in
+    ``actions_frame``, forward in the ``extra`` -- would let this report a demerger without
+    condemning a symbol whose only declined rows are AGM notices.
+    """
+    if not extra:
+        return None
+    declined = int(extra.get("bfinance_actions_unconverted_rows") or 0)
+    if declined <= 0:
+        return None
+    counts = dict(extra.get("bfinance_actions_event_counts") or {})
+    return {
+        "reason": "unconverted_action_classes",
+        "symbol": (symbol or "").upper() or None,
+        "unconverted_rows": declined,
+        "action_counts": counts,
+        # The feed collapses every declined class into one ``other`` bucket, so this is the only
+        # class name available. Reported next to the count so a consumer can see it is a bucket and
+        # not a specific finding, rather than mistaking "other" for a diagnosis.
+        "declined_action_classes": ["other"],
+        "detail": (
+            f"the corporate-actions feed recorded {declined} row(s) for "
+            f"{(symbol or '').upper()} in a class this engine never converts into a factor "
+            f"(buy-backs, rights, demergers, AGM notices, REIT/SML per-unit distributions), so "
+            f"the share-count factor is incomplete for the window's prices. Measured on ITC's "
+            f"real 2025-01-06 demerger: bhavcopy fell 8.0876% across the ex-date (481.60 -> "
+            f"442.65) and the correct factor is 1.047332, but the factor applied is 1.000000. The "
+            f"count cannot separate a demerger from an AGM notice, so this is conservative: it "
+            f"over-reports rather than under-reports."
+        ),
+    }
 
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -211,13 +320,18 @@ class OHLCVEngine:
     ``tests/test_bhavcopy_parity_adjust.py``. Trendlyne, an independent third source, agreed with
     yfinance on 7 of 8 symbols, so yfinance's basis is the reference and a drop-in must reproduce
     it. So the default path multiplies Open/High/Low/Close by the cumulative **share-count**
-    factor -- but NOT Volume, which is a share count, not a price (see
-    :data:`ADJUSTED_PRICE_COLUMNS`) -- and that factor is the product over the instrument's WHOLE
+    factor, and that factor is the product over the instrument's WHOLE
     corporate-action history, not just the events that land inside the window. It has to be:
     HDFCBANK's 1:1 bonus has a 2025-08-26 ex-date, so for a 2024-09..2024-11 request nothing in
     the frame shows it, and a window-only product is 1.0 for every bar where yfinance halves all
     53. ``adjust_corporate_actions=False`` returns the as-traded series, for anyone reconstructing
     what actually traded.
+
+    Volume is the one column that is **not** a price, so it is not scaled by the same factor -- it
+    is scaled by the factor's *inverse*, which is what keeps ``price * volume`` (the rupee value
+    traded) continuous across a share-count event. The as-traded bhavcopy mixes two share-count
+    bases in that one column; see :data:`VOLUME_COLUMN` for the measurement that establishes the
+    direction, and ``attrs["price_basis"]`` for the resulting label.
 
     ``Adj Close`` is the full back-adjusted series: the share-count factor *and* the dividend
     factor. Dividends are deliberately NOT on the price columns, because yfinance's raw OHLC are
@@ -243,6 +357,36 @@ class OHLCVEngine:
     truthful label -- so the third option (unadjusted and unlabelled) is the one thing that is
     never done. ``attrs["bfinance_corporate_actions_applied_detail"]`` says which of the four
     cases applies: explicit opt-out, actions not requested, synthetic path, or no source.
+
+    A fifth case exists and is the reason the flag alone was not enough
+    ---------------------------------------------------------------
+    ``bfinance_corporate_actions_applied`` used to read ``True`` whenever a real factor was derived
+    from a real feed, which is a *different* claim from "this frame is fully adjusted".
+    :mod:`bfinance.nse.corporate_actions` deliberately never turns a ``Demerger``, buy-back, rights
+    issue, AGM notice or REIT per-unit distribution into a factor -- folding those in would corrupt
+    the arithmetic -- so the feed can hold known price-affecting events that the factor does not
+    cover, and the frame had no way to say so. Measured on ITC, ex-date 2025-01-06:
+
+        bhavcopy as-traded   481.60 (2025-01-03) -> 442.65 (2025-01-06)   -8.0876%
+        factor applied       1.000000   (the feed's splits series has nothing on that date)
+        factor that is right 1.047332   (= P_pre / (P_ex + 0.1 x 171.85), the stub listing close)
+
+    So the frame was claiming to have applied an adjustment that was 4.7332% short. The flag is now
+    ``False`` in that state, and ``attrs["bfinance_adjustment_incomplete"]`` carries a
+    machine-readable ``reason``, the symbol, the declined-row count and the action-kind histogram.
+    That key is present on **every** frame (``None`` when complete), so the check is
+    ``df.attrs["bfinance_adjustment_incomplete"] is not None`` rather than a probe for absence.
+    The factor that *was* derived is still applied to the columns -- it is right about what it
+    covers, and discarding it would regress parity -- so the frame delivers an adjustment and
+    reports it as incomplete rather than quietly delivering less than it promises.
+
+    Volume and the share-count basis
+    --------------------------------
+    The share-count factor restates prices onto today's share count (``price / F``), and Volume is
+    restated by its inverse (``volume * F``) so that ``price * volume`` -- the rupee value traded --
+    is one quantity across the boundary instead of stepping by exactly ``F`` there. The as-traded
+    bhavcopy mixes the two share-count bases in a single column, which the RELIANCE measurement in
+    :data:`VOLUME_COLUMN` demonstrates. ``attrs["price_basis"]`` states the result on every frame.
     """
 
     PERIOD_DAYS_MAP = {
@@ -320,10 +464,15 @@ class OHLCVEngine:
                 corporate-action history, so an ex-date outside the window still restates the
                 window (HDFCBANK's 2025-08-26 bonus halves all 53 bars of a 2024-09..2024-11
                 request). ``False`` returns the as-traded series, which is what the bhavcopy
-                natively is and what trade reconstruction needs. Volume is never scaled either
-                way, and dividends never touch O/H/L/C -- see the class docstring.
+                natively is and what trade reconstruction needs. Volume is restated on this path by
+                the factor's inverse rather than by the factor itself, so that ``price * volume``
+                stays the rupee value traded; see the class docstring. Dividends never touch
+                O/H/L/C -- see the class docstring.
                 ``attrs["bfinance_corporate_actions_applied"]`` records which basis came back, in
-                every combination.
+                every combination, and reads ``False`` whenever a known action class was left
+                unconverted. ``attrs["bfinance_adjustment_incomplete"]`` is then a dict naming why
+                (``None`` when the adjustment is complete), and ``attrs["price_basis"]`` names the
+                basis in a machine-readable form.
             auto_adjust: Refused when True (:class:`AdjustmentNotAvailableError`) -- see below.
 
         yfinance 1.7.0 parity notes (measured live, bhavcopy / yfinance over
@@ -444,12 +593,19 @@ class OHLCVEngine:
             empty.attrs["bfinance_corporate_actions_applied_detail"] = (
                 "no bars in the requested window, so there is nothing to adjust"
             )
+            # Present on every frame, complete or not, so a consumer can branch on one key instead
+            # of probing for the absence of one.
+            empty.attrs["bfinance_adjustment_incomplete"] = None
+            empty.attrs["price_basis"] = (
+                PRICE_BASIS_SYNTHETIC if synthetic else PRICE_BASIS_AS_TRADED
+            )
             return empty
 
         df = bars.copy()
 
         actions_source = None
         actions_detail = ""
+        actions_extra: dict = {}
         splits_history = None
         dividends_history = None
         if actions:
@@ -483,6 +639,7 @@ class OHLCVEngine:
                 dividends_history = resolved.dividends
                 actions_source = resolved.source
                 actions_detail = resolved.detail
+                actions_extra = dict(resolved.extra or {})
                 df.attrs.update(resolved.extra)
             except Exception as e:  # noqa: BLE001 - resolve_actions_async already degrades
                 logger.warning(
@@ -521,24 +678,67 @@ class OHLCVEngine:
         dividend_factor = _dividend_adjustment_factor(df)
         adjusted_close = df["Close"].astype(float) * split_factor * dividend_factor
 
-        applied, applied_detail = self._resolve_adjustment(
+        factor_applied, applied_detail = self._resolve_adjustment(
             synthetic=synthetic,
             actions=actions,
             adjust_corporate_actions=adjust_corporate_actions,
             actions_source=actions_source,
             actions_detail=actions_detail,
         )
+        # A factor was derived -- but is it the whole story? The feed may have recorded action classes
+        # that are deliberately never converted into a factor (ITC's real 2025-01-06 demerger is
+        # one: the as-traded close fell 8.0876% across the ex-date and the correct factor is
+        # 1.047332, while the one derived here is exactly 1.000000). Claiming success in that state
+        # is the false flag this closes.
+        #
+        # `scaled` and `applied` are deliberately two different facts, because the caller asked for an
+        # adjustment and should still GET one. The bonus and sub-division factors that *were*
+        # derived are real and correct for what they cover, and dropping them because an unrelated
+        # demerger is unconverted would regress the yfinance parity this module exists to reach.
+        # So the columns are scaled, and the frame says it did not finish:
+        #   scaled  -> were the columns restated (what the data did)
+        #   applied -> does the frame claim a COMPLETE adjustment (what attrs reports)
+        # Only meaningful when a factor was actually derived. On the opt-out path there is no
+        # adjustment to be incomplete, and reporting a declined row there would conflate "you asked
+        # for no adjustment" with "we could not finish one" -- two different reasons for the same
+        # False, already distinguished by bfinance_corporate_actions_applied_detail.
+        incomplete = (
+            _incomplete_adjustment(clean_symbol, actions_extra) if factor_applied else None
+        )
+        scaled = factor_applied
+        applied = factor_applied
+        if incomplete is not None and applied:
+            applied = False
+            applied_detail = (
+                f"{applied_detail} -- but the adjustment is INCOMPLETE and this frame does not "
+                f"claim parity. The share-count factor WAS applied to O/H/L/C and Volume; it is "
+                f"just not the whole factor. {incomplete['detail']}"
+            )
         if adjust_corporate_actions and not synthetic and actions and not applied:
             # The one degradation that is not the caller's own choice. attrs carries the label for
             # whoever inspects the frame later; this is for whoever is watching the log now.
+            # Once per frame, not per row, and non-fatal: a consumer that wants to fail hard reads
+            # attrs["bfinance_adjustment_incomplete"] / ["bfinance_corporate_actions_applied"]
+            # instead of parsing this line. Deliberately a logger call, not warnings.warn -- the
+            # module's degradation channel is logger + attrs, and raising a Python warning as well
+            # would duplicate one fact through two channels that can drift apart.
             logger.warning(
-                "%s: yfinance parity NOT established. %s. The prices are as traded; "
-                "attrs['bfinance_corporate_actions_applied'] is False.",
+                "%s: yfinance parity NOT established. %s. attrs"
+                "['bfinance_corporate_actions_applied'] is False and "
+                "attrs['bfinance_adjustment_incomplete'] names the reason.",
                 symbol, applied_detail,
             )
-        if applied:
+        if scaled:
             for column in ADJUSTED_PRICE_COLUMNS:
                 df[column] = df[column].astype(float) * split_factor
+            # Volume takes the INVERSE factor, so that price * volume -- the rupee value traded --
+            # is the same quantity on both sides of a share-count event instead of stepping by
+            # exactly F there. See :data:`VOLUME_COLUMN` for the measurement that establishes the
+            # direction. Rounded back to int64 because a share count is a whole number; the
+            # rounding error is under one share, so the invariant holds to ~1e-7 on a real bar.
+            if VOLUME_COLUMN in df.columns:
+                scaled_volume = df[VOLUME_COLUMN].astype(float) / split_factor
+                df[VOLUME_COLUMN] = np.rint(scaled_volume).astype(np.int64)
         # Adj Close always carries BOTH factors, on either path. That is what makes it usable: on
         # the adjusted path it is Close x the dividend factor, and on the as-traded path it is the
         # full adjusted series, recoverable from the published prices. The flag, not the column,
@@ -599,6 +799,14 @@ class OHLCVEngine:
         df.attrs["bfinance_ohlc_source"] = ohlc
         df.attrs["bfinance_corporate_actions_applied"] = applied
         df.attrs["bfinance_corporate_actions_applied_detail"] = applied_detail
+        # The one key a consumer needs to detect a half-done adjustment without reading logs. It is
+        # present on EVERY frame -- None when the adjustment is complete -- so the check is
+        # ``df.attrs["bfinance_adjustment_incomplete"] is not None`` and never a probe for absence.
+        df.attrs["bfinance_adjustment_incomplete"] = incomplete
+        # Which basis the rupee prices in this frame actually sit on. Set on every path, including
+        # the empty one, because a frame with no bars is exactly the frame a consumer is most
+        # likely to treat as "nothing to worry about".
+        df.attrs["price_basis"] = self._price_basis(synthetic=synthetic, scaled=scaled)
         # Which feed produced the Dividends / Stock Splits columns, so a frame built on the
         # fiscal-year-end approximation is never mistaken for one carrying true ex-dates.
         df.attrs["bfinance_actions_source"] = actions_source or ACTIONS_SOURCE_NONE
@@ -606,9 +814,10 @@ class OHLCVEngine:
         if actions and actions_source == ACTIONS_SOURCE_NSE:
             df.attrs["bfinance_adj_close_source"] = (
                 "back-adjusted Close by NSE ex-dated corporate actions: O/H/L/C carry the "
-                "share-count factor over the whole history, Adj Close carries that plus the "
-                "dividend factor for ex-dates inside the window"
-                if applied
+                "share-count factor over the whole history, Volume carries its inverse, and "
+                "Adj Close carries the share-count factor plus the dividend factor for ex-dates "
+                "inside the window"
+                if scaled
                 else "back-adjusted Close by NSE ex-dated corporate actions (prices as traded; "
                 "only Adj Close is restated)"
             )
@@ -619,6 +828,27 @@ class OHLCVEngine:
                 "Adj Close adds the in-window dividend factor"
             )
         return df
+
+    @staticmethod
+    def _price_basis(synthetic: bool, scaled: bool) -> str:
+        """Name the rupee-price basis of this frame, as one of the ``PRICE_BASIS_*`` constants.
+
+        This is the attribute a consumer should branch on instead of inferring the basis from the
+        values. Five sources on four different bases for one stock is a real hazard -- bhavcopy is
+        the exchange print, yfinance's raw OHLC are already split-adjusted, and the two differ by
+        the full action factor over whole date ranges -- so the package that resolves them is the
+        one place that should say which one it used.
+
+        Deliberately *not* named ``"yfinance_adjusted"``. It is not yfinance parity: no demerger,
+        buy-back, rights issue or per-unit distribution is applied, and no dividend reaches
+        O/H/L/C. ``as_traded_share_count_adjusted`` says what was done instead of claiming parity
+        that the unconverted-row gap makes untrue.
+        """
+        if synthetic:
+            return PRICE_BASIS_SYNTHETIC
+        return (
+            PRICE_BASIS_SHARE_COUNT_ADJUSTED if scaled else PRICE_BASIS_AS_TRADED
+        )
 
     @staticmethod
     def _resolve_adjustment(
@@ -632,8 +862,16 @@ class OHLCVEngine:
 
         Returns ``(applied, detail)``. The detail string is not decoration: it is the only place a
         consumer learns WHICH of the four not-adjusted cases they are in, and the rule is that
-        there is no fifth case. Every path out of here either applies the factor or names the
+        there is no silent fifth case. Every path out of here either applies the factor or names the
         reason it did not.
+
+        There IS a fifth case -- a factor that was applied but is not the whole factor, because the
+        feed recorded action classes this engine declines to convert. It cannot be decided here,
+        because it needs the resolved actions' ``extra``, so it is layered on top by
+        :func:`_incomplete_adjustment` in the caller. What matters is that the layering happens
+        *before* the columns are scaled, so the flag and the data can never disagree: this method
+        answers "was a factor derived", the incompleteness check answers "is it complete", and
+        attrs reports the second.
 
         A requested-but-unresolvable factor degrades to as-traded plus this label rather than
         raising. bfinance's convention is lenient degradation -- an answer with a truthful label --

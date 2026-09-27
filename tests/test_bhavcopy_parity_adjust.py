@@ -317,7 +317,12 @@ async def test_no_action_at_all_means_a_factor_of_exactly_one(bhavcopy):
     pd.testing.assert_series_equal(df["Adj Close"], df["Close"], check_names=False)
     assert df["Close"].tolist() == [2440.00, 2460.00]
     assert df.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_NSE, "the feed was consulted"
-    assert df.attrs["bfinance_corporate_actions_applied"] is True
+    # The share-count factor IS 1.0 everywhere (asserted above via the data), but this frame still
+    # does not claim a COMPLETE adjustment: dropping the two bonus rows left the feed's two
+    # unconverted rows -- its 2023-07-20 demerger among them -- in the payload, and a declined
+    # action class is exactly the case the flag exists to refuse to call a success.
+    assert df.attrs["bfinance_corporate_actions_applied"] is False
+    assert df.attrs["bfinance_adjustment_incomplete"]["reason"] == "unconverted_action_classes"
 
 
 async def test_a_later_bonus_still_restates_a_window_with_no_events_in_it(bhavcopy):
@@ -369,21 +374,75 @@ async def test_dividends_after_the_window_are_named_rather_than_silently_dropped
 # ---------------------------------------------------------- 2. volume is a share count
 
 
-async def test_volume_is_never_scaled(bhavcopy):
+async def test_volume_is_scaled_so_that_price_times_volume_is_invariant(bhavcopy):
     """
-    "Scale everything by the factor" is the obvious wrong move and this is where it is refused.
+    The share-count factor restates prices, so Volume has to be restated by its **inverse**.
 
-    A back-adjustment restates *prices* onto the current share count. The shares that traded on
-    25-Oct did not halve; the share count did. Multiplying volume by 1/2 would report a traded
-    share count that never existed, and would do it silently -- nobody checks volume against
-    bhavcopy, because volume is not supposed to need adjusting.
+    Volume is the one column that is not a rupee price, and the previous rule left it alone on the
+    theory that "the shares that traded did not halve; the share count did". That is true of any
+    individual bar and false of the *series*: the as-traded bhavcopy counts pre-bonus bars in
+    then-shares and post-bonus bars in now-shares, so one column carries two share-count bases.
+    Halving the price while leaving the volume alone therefore drops ``price * volume`` -- the rupee
+    value traded -- by exactly the factor at the bonus, on a series where nothing else produces a
+    step like that.
+
+    Measured on the real feed to fix the direction (RELIANCE, 2024-09-01..2024-11-16, 39 bars before
+    and 14 after its 1:1 bonus; ``nse.bhavcopy.bhavcopy_range``):
+
+        median Close   2924.90 -> 1305.47   ratio 0.446331
+        median Volume  8132084 -> 11996392  ratio 1.475193
+
+    Had volume already been on the post-bonus share count it would have fallen ~2.2x with the
+    price. It *rose* ~1.5x, which is only consistent with the old share count. Hence the inverse.
     """
     bhavcopy()
     df = await _history(_ActionsClient())
 
-    assert df["Volume"].tolist() == PUBLISHED_VOLUME
-    assert df["Volume"].dtype.kind == "i"
+    # Volume takes 1/split_factor: the three pre-bonus bars double, the ex-date bar is unchanged.
+    assert df["Volume"].tolist() == [2_000, 4_000, 8_000, 5_000]
+    assert df["Volume"].dtype.kind == "i", "a share count is a whole number"
+    # Volume is still not a *price* column; it is the share-count column, scaled separately.
     assert "Volume" not in ohlcv_mod.ADJUSTED_PRICE_COLUMNS
+    assert ohlcv_mod.VOLUME_COLUMN == "Volume"
+
+    # The assertion that matters: price * volume is the SAME quantity on both sides of the bonus.
+    # (Close * split_factor) * (Volume / split_factor) == Close * Volume, exactly, per bar.
+    for published_close, published_volume, factor, adj_close, adj_volume in zip(
+        PUBLISHED_CLOSE, PUBLISHED_VOLUME, SPLIT_FACTORS, df["Close"], df["Volume"]
+    ):
+        assert adj_close * adj_volume == pytest.approx(
+            published_close * published_volume, rel=1e-9
+        ), "price * volume must be invariant across the share-count boundary"
+        assert adj_close == pytest.approx(published_close * factor)
+
+    # And the boundary itself: without the volume restatement the traded value of the last pre-bonus
+    # bar would be understated by the full factor relative to the ex-date bar's.
+    traded = (df["Close"] * df["Volume"]).tolist()
+    step = traded[3] / traded[2]
+    assert step == pytest.approx(
+        (PUBLISHED_CLOSE[3] * PUBLISHED_VOLUME[3]) / (PUBLISHED_CLOSE[2] * PUBLISHED_VOLUME[2])
+    )
+    assert 0.1 < step < 10, f"traded value stepped {step:.3f}x at the bonus, which F would not do"
+
+
+async def test_as_traded_path_leaves_price_and_volume_on_the_exchange_basis(bhavcopy):
+    """
+    ``adjust_corporate_actions=False`` must return the exchange print untouched, volume included.
+
+    This is the path trade reconstruction needs, so it is the one place the published share count is
+    the answer. Scaling here would defeat the flag: the caller asked what actually traded and would
+    get a restatement of it.
+    """
+    bhavcopy()
+    df = await _history(_ActionsClient(), adjust_corporate_actions=False)
+
+    assert df["Close"].tolist() == pytest.approx(PUBLISHED_CLOSE)
+    assert df["Volume"].tolist() == PUBLISHED_VOLUME
+    assert df.attrs["price_basis"] == "as_traded"
+    # As-traded is also the "incomplete" answer, and for a different reason than a declined row:
+    # the caller opted out.
+    assert df.attrs["bfinance_corporate_actions_applied"] is False
+    assert df.attrs["bfinance_adjustment_incomplete"] is None
 
 
 async def test_the_dividend_and_split_columns_are_amounts_not_prices(bhavcopy):
@@ -430,14 +489,33 @@ async def test_the_default_is_parity_not_as_traded():
 
 
 async def test_bhavcopy_adjusted_is_recorded_as_both(bhavcopy):
+    """
+    The provenance pair, plus the two keys that say whether the adjustment *finished*.
+
+    The recorded RELIANCE payload holds two rows bfinance declines to convert (its real 2023-07-20
+    demerger and one 2011 row with no derivable amount), so the honest answer here is "adjusted, but
+    not completely" -- the columns carry the share-count factor, and the flag says so rather than
+    claiming a finished adjustment it cannot make.
+    """
     bhavcopy()
     df = await _history(_ActionsClient())
 
     assert df.attrs["bfinance_ohlc_source"] == "bhavcopy"
     assert df.attrs["bfinance_synthetic_ohlc"] is False
-    assert df.attrs["bfinance_corporate_actions_applied"] is True
     assert df.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_NSE
+    # The columns WERE restated -- the data assertions above are the real proof of that.
+    assert df["Close"].iloc[0] == pytest.approx(2956.40 * 0.5)
+    assert df.attrs["price_basis"] == "as_traded_share_count_adjusted"
+    # ...and the frame does not claim the adjustment was complete.
+    assert df.attrs["bfinance_corporate_actions_applied"] is False
     assert ACTIONS_SOURCE_NSE in df.attrs["bfinance_corporate_actions_applied_detail"]
+    assert "INCOMPLETE" in df.attrs["bfinance_corporate_actions_applied_detail"]
+    incomplete = df.attrs["bfinance_adjustment_incomplete"]
+    assert incomplete["reason"] == "unconverted_action_classes"
+    assert incomplete["symbol"] == "RELIANCE"
+    assert incomplete["unconverted_rows"] == 2
+    assert incomplete["action_counts"]["other"] == 2
+    assert incomplete["action_counts"]["bonus"] == 1, "the applied side is reported too"
 
 
 async def test_bhavcopy_unadjusted_is_recorded_as_both(bhavcopy):

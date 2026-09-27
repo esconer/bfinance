@@ -413,7 +413,6 @@ async def test_adj_close_reflects_dividends_on_the_real_bars(stub_bhavcopy):
     # apart: the recorded payload's 2024-10-28 1:1 bonus halves all three bars (a share-count
     # event restates every earlier price, and its ex-date is outside these three bars), while the
     # Rs 10 dividend lands only on Adj Close. The price columns never see the dividend.
-    assert df.attrs["bfinance_corporate_actions_applied"] is True
     assert df["Open"].iloc[0] == pytest.approx(2900.0 * 0.5)
     assert df["High"].iloc[0] == pytest.approx(2970.0 * 0.5)
     assert df["Low"].iloc[0] == pytest.approx(2890.0 * 0.5)
@@ -423,8 +422,21 @@ async def test_adj_close_reflects_dividends_on_the_real_bars(stub_bhavcopy):
     # Adj Close is the full adjustment: only the bar before the ex-date differs from Close.
     assert df["Adj Close"].iloc[0] == pytest.approx(2956.40 * 0.5 * (1.0 - 10.0 / 2956.40))
     assert df["Adj Close"].iloc[1:].tolist() == pytest.approx([2976.80 * 0.5, 3000.00 * 0.5])
-    # Volume is a share count, not a price: it must not move.
-    assert df["Volume"].tolist() == [1_000, 2_000, 3_000]
+    # The recorded payload holds rows bfinance declines to convert (RELIANCE's real 2023-07-20
+    # demerger among them), so the frame reports an incomplete adjustment rather than a success.
+    assert df.attrs["bfinance_corporate_actions_applied"] is False
+    assert df.attrs["bfinance_adjustment_incomplete"]["unconverted_rows"] == 2
+    assert df.attrs["price_basis"] == "as_traded_share_count_adjusted"
+    # Volume is a share count, so it takes the INVERSE of the price factor: the two pre-bonus bars
+    # double, the post-bonus bars are unchanged. price * volume is then invariant across the bonus,
+    # which is the whole point of putting every bar on one share count.
+    assert df["Volume"].tolist() == [2_000, 4_000, 6_000]
+    for published_close, published_volume, adj_close, adj_volume in zip(
+        [2956.40, 2976.80, 3000.00], [1_000, 2_000, 3_000], df["Close"], df["Volume"]
+    ):
+        assert adj_close * adj_volume == pytest.approx(
+            published_close * published_volume, rel=1e-9
+        )
 
 
 async def test_adj_close_equals_close_when_there_are_no_actions(stub_bhavcopy):

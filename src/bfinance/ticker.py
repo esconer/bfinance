@@ -192,11 +192,18 @@ class Ticker:
                 cumulative share-count factor over the instrument's whole corporate-action
                 history, so the default path matches yfinance's own ``auto_adjust=False`` series
                 bar-for-bar (the bhavcopy is as-traded; Yahoo's raw OHLC are not). ``False``
-                returns the as-traded series, which is what the exchange printed. Volume is never
-                scaled, and dividends never touch O/H/L/C -- they go on ``Adj Close``, which is
+                returns the as-traded series, which is what the exchange printed. Dividends never
+                touch O/H/L/C -- they go on ``Adj Close``, which is
                 therefore not always equal to ``Close`` (it is, when no dividend ex-date falls in
-                the window). ``attrs["bfinance_corporate_actions_applied"]`` records which basis
-                came back.
+                the window). Volume is restated by the *inverse* of the share-count factor, so that
+                ``price * volume`` stays the rupee value traded across a bonus or sub-division.
+
+                Three attrs keys describe the result and are present on every frame:
+                ``bfinance_corporate_actions_applied`` (a complete adjustment was made),
+                ``bfinance_adjustment_incomplete`` (``None``, or a dict naming the action classes
+                the feed recorded that bfinance declines to convert -- e.g. a demerger), and
+                ``price_basis`` (a machine-readable basis string, e.g.
+                ``as_traded_share_count_adjusted``).
             auto_adjust: must be False. bfinance's default path already returns yfinance's
                 adjusted basis, and yfinance's ``auto_adjust=True`` differs only in the column
                 set (no ``Adj Close``), so True raises rather than silently changing which
