@@ -150,8 +150,22 @@ number for them, and their count is in ``attrs["bfinance_unconverted_action_rows
 Widening the dividend grammar is worth measuring rather than guessing: three passes over the full
 pull moved the converted count 25,177 -> 25,407 -> 25,573, and every widening was re-audited for
 false positives against all 43,789 rows. That audit is what caught the spellings listed beside
-:data:`_DIVIDEND_RE`; it also caught a real regression, when a loosened separator class stopped
+:data:`_DIVIDEND_NOUN_RE`; it also caught a real regression, when a loosened separator class stopped
 consuming the compound ``/-`` token and silently halved the dividend count.
+
+A fourth pass removed the adjacency requirement altogether — **25,572 -> 25,638 dividends, 16,863
+-> 16,797 unconverted, 149,589.86 -> 150,364.44 rupees of declared dividend** on a re-pulled
+43,788-row set. The old pattern needed the dividend noun *and* a trailing ``Per Share`` both adjacent
+to the amount, which is unsatisfiable when a subject declares several components under one shared
+``Per Share``: ITC's ex-date 2011-06-10, ``Dividend Final Rs 2.80 And Special Rs 1.65 Per Share``,
+matched nothing and a holder's **Rs 4.45/share** vanished. Re-measured over every subject in the
+pull, the change gained 65 subjects, changed the amount on 19 more (every one of them a second
+component that was being dropped), and lost **zero**. The exclusions did not move with the pattern —
+they are the explicit word-class guards beside :data:`_DIVIDEND_AMOUNT_RE`, and the dividend count
+inside each excluded class is identical before and after: 78 per-share rights rows yield 5 both
+ways (the 5 that pair a real dividend with a rights issue on one ex-date), 395 ``Sub-Division``
+rows yield 2 both ways, 3 per-share buy-back rows yield 3 both ways, and all 359 ``Per Unit`` and
+all 100 ``... Div - Nil`` rows yield **nothing** both ways.
 
 The ``PrvsClsgPric`` oracle does **not** work, and this module records why
 ----------------------------------------------------------------------
@@ -266,29 +280,71 @@ _GLOBAL_LAST_REQUEST_TIME = 0.0
 # pattern below was taken from the 43,789-row market-wide pull, not invented. The awkward parts
 # (double spaces, "Re" for paise, a leading slash, "Per Sh") are all observed spellings.
 
-#: ``Dividend - Rs 6 Per Share`` / ``Interim Dividend - Rs 10 Per Share`` /
-#: ``Annual General Meeting/Dividend - Rs  15 Per Share`` (double space is a real upstream value) /
-#: ``Special Dividend - Rs 5 Per Share`` / ``Dividend - Rs 1.50/- Per Share``.
+#: A rupee amount, and nothing else.
 #:
-#: Four legacy spellings are live on RELIANCE's own record: ``Int Div-Rs.11/- Per Sh``,
-#: ``Int Div-Rs.13/- Per Share``, ``Dividend Rs. 9.50 Per Equity Share`` and
-#: ``Annual General Meeting/ Dividend Rs. 9 Per Equity Share``. A full 43,788-row pull added three
-#: more that a strict pattern missed, and each is a real dividend being dropped:
+#: Deliberately **not** anchored to the word "dividend", because a subject may declare several
+#: components and share one trailing ``Per Share`` between them: ITC's ex-date 2011-06-10 is
+#: ``Dividend Final Rs 2.80 And Special Rs 1.65 Per Share`` and a holder received **both**. The old
+#: pattern required "div" adjacent to the amount and a ``Per Share`` adjacent to the amount, which is
+#: unsatisfiable for that string, so it returned nothing and silently dropped Rs 4.45/share. The same
+#: shape loses a component even when one *is* found — ``Final Dividend Rs 6/- Plus Special Dividend
+#: Rs 4/- Per Share`` has a single trailing ``Per Share``, so only Rs 6 ever parsed.
 #:
-#: * ``Pr Share`` / ``Pr Sh`` — a typo for ``Per Share``, ~120 rows (``Dividend-Rs.5 Pr Share``).
-#: * ``Annual General Meetingdividend - Rs 9 Per Share`` — "dividend" run into the preceding word,
-#:   16 rows. A ``\b`` or lookbehind before "div" cannot match it, so there is no guard on the
-#:   prefix at all: what keeps this from over-matching is the ``Rs <digits> per share`` body, which
-#:   a full 43,788-row pull was re-audited against for false positives.
-#: * ``Dividend Rs- 5 Per Share``, ``Dividend Of Rs.5 Per Share``, ``Div.Rs.5 Per Share``,
-#:   ``Dividend-Rs.5/ Per Share`` — punctuation between the tokens varies (4+4+3+3 rows).
+#: Which of the amounts a subject declares are dividends is decided by the explicit word-class guards
+#: below, in the same style as :data:`_BONUS_RE` / :data:`_NON_EQUITY_BONUS_RE`: the pattern stays
+#: loose and the exclusions stay visible in code rather than implicit in a pattern.
+_DIVIDEND_AMOUNT_RE = re.compile(
+    r"\b(?:rs|re)\.?\s*[-:.=/]*\s*([\d,]+(?:\.\d+)?)\s*(?:/-|[-/])?\s*", re.IGNORECASE
+)
+#: A dividend must be declared *somewhere* in the subject. Measured: every real spelling of the noun
+#: in the 43,788-row pull begins with ``div`` — ``dividend`` (21,279), ``div`` (1,641), ``meetingdividend``
+#: (20), ``divided`` (10), ``divdend`` (6), and a tail of one-off typos (``divdnd``, ``divi``,
+#: ``diviednd``, ``divividend`` …) — so a stem, not a word, is the right class. Requiring it
+#: *somewhere* rather than adjacent to the amount is what lets a component out of a shared
+#: ``Per Share``.
 #:
-#: A trailing ``Per Share`` is still **required**: it is what separates an equity cash dividend from
-#: a REIT/SML "Total Dividend ... Per Unit" row, and from a ``Dividend - Nil`` declaration.
-_DIVIDEND_RE = re.compile(
-    r"div(?:idend|s)?\s*[-:.=/]*\s*(?:of\s*)?(?:rs|re)\.?\s*[-:.=/]*\s*"
-    r"([\d,]+(?:\.\d+)?)\s*(?:/-|[-/])?\s*(?:per|pr)\s*(?:equity\s*)?sh",
+#: The one word that starts with ``div`` and is **not** a dividend is ``Division``: 396 per-share rows
+#: read ``Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share``, and their
+#: two rupee amounts are face values, not cash. The negative lookahead is what keeps them out.
+_DIVIDEND_NOUN_RE = re.compile(r"div(?!ision)", re.IGNORECASE)
+#: ``Per Share`` / ``Pr Share`` / ``Per Sh`` / ``Per Equity Share`` / ``Pershare`` / ``Per Shr``.
+#: Still **required**: it is what separates an equity cash dividend from a REIT/SML
+#: ``Total Dividend ... Per Unit`` row and from a ``Dividend - Nil`` declaration. (The ``Per Unit``
+#: half is additionally refused by an early return in :func:`parse_dividend_amount`.)
+_PER_SHARE_RE = re.compile(r"(?:per|pr)\s*(?:equity\s*)?sh", re.IGNORECASE)
+#: Amounts a restructuring clause owns rather than the dividend. ``From Rs 10 ... To Rs 2`` is a
+#: face-value change; reading Rs 10 as cash would be a 10x overstatement. Measured on the documented
+#: RSSOFTWARE row, whose three amounts are 1.50 (cash), 10 and 5 (the Rs 10 -> Rs 5 sub-division) —
+#: the guards keep only the 1.50, which is the figure the module docstring and yfinance agree on.
+_RESTRUCTURING_LEADIN_RE = re.compile(r"(?:from|frm|to)\s*[-:.=/]*\s*(?:of\s*)?$", re.IGNORECASE)
+#: Amounts priced per share that are **not** a dividend, and which the dividend noun can sit next to.
+#: Measured: 78 rights rows, 75 of them ``Rights a:b @ Premium Rs X Per Share``, and 5 rows that
+#: combine a real dividend with a rights issue on one ex-date
+#: (``Interim Dividend- Rs 3 Per Share / Rights 1:16 @ Premium Rs 554 Per Share`` — the Rs 554 is the
+#: subscription price and must not become a dividend; the Rs 3 must).
+_NON_DIVIDEND_LEADIN_RE = re.compile(
+    r"(?:prem(?:ium)?|rht|rights?|buy\s*-?\s*back|warrant|debenture|ncrps|issue\s+price|at\s+par"
+    r"|par\b|split|sub-?division|bonus|scheme|demerger|amalgam)\W*$",
     re.IGNORECASE,
+)
+#: Where a trailing ``Per Share`` stops governing the amounts before it. ``Rights 1:16 @ Premium Rs
+#: 554 Per Share / Dividend Rs 2 Per Share`` is two clauses, and only the second one's amount is a
+#: dividend, so the search for a per-share phrase stops at the first restructuring keyword.
+_DIVIDEND_CLAUSE_BREAK_RE = re.compile(
+    r"(?:face\s*val|fv\s*s?plt|fv\s*split|stock\s*split|split|sub-?division|bonus|rights?|rht"
+    r"|buy\s*-?\s*back|warrant|debenture|ncrps|scheme|demerger|amalgam|premium)",
+    re.IGNORECASE,
+)
+#: Amounts that cannot be read cleanly, so no number is taken from them. Each is a real upstream
+#: value, and each is a case where a plausible-looking number would be wrong:
+#:
+#: * ``Rs 62..50/-`` and ``Rs 0 .70`` — a decimal point that got doubled or spaced. The pattern reads
+#:   ``62`` and ``0``, which are not the filed amounts.
+#: * ``Re.0.60 Paise Per Share`` — the unit word contradicts the numeral (0.60 paise is Rs 0.006).
+#: * ``Div Fin-Rs18+Spl-18 Pr Sh`` — a dividend and a split ratio under one ``Pr Sh``, so the phrase
+#:   that qualifies Rs 18 is ambiguous. Left unconverted rather than half-converted.
+_AMBIGUOUS_AMOUNT_TAIL_RE = re.compile(
+    r"\s*\.+\s*\d|\s*[-:]?\s*paise\b|\+?\s*spl\b\s*[-:.=/]*\s*[\d(]", re.IGNORECASE
 )
 #: Legacy filings quote a percentage of paid-up capital rather than a rupee amount:
 #: ``Agm/Dividend-10%`` (877 rows) and ``Agm/Dividend - 12.5 %`` (644 rows) over 2005-2026.
@@ -330,6 +386,42 @@ _FROM_AMT_RE = re.compile(
 )
 _TO_AMT_RE = re.compile(r"\bto\s*(?:rs\.?|re\.?)?\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE)
 _AMOUNT_RE = re.compile(r"(?:rs\.?|re\.?)\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE)
+
+# ------------------------------------------------------------------ structural events
+#
+# A demerger, an amalgamation or a scheme of arrangement is a real corporate action with a real
+# ex-date, and :func:`parse_action_subject` classifies every one of them as :data:`OTHER_ACTION` —
+# deliberately, and for a reason that is measured rather than assumed. So they sit inside the
+# unconverted bucket, which is 16,863 rows in the 43,788-row pull and is 81.9% AGM notices. That is
+# honest about the *factor* (there is none) and silent about the *event* (there is one), and a
+# reader counting "other" rows has no way to tell an AGM notice from a demerger.
+#
+# The surface below makes the decline knowing. It names the event and nothing else: it does **not**
+# invent an entitlement ratio, and it does **not** turn a demerger into a split factor. That refusal
+# is a separate, measured decision — see :func:`structural_actions`.
+#
+# Counts measured on the 43,788-row pull (case-insensitive substring over every subject):
+# ``demerger``/``de-merger`` 124, ``scheme`` 142, ``amalgam`` 6, ``composit`` 5; 256 rows in total
+# across 203 symbols. All five proposed keywords do occur, but they are not equal, and one is a trap.
+STRUCTURAL_ACTION_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    # 124 rows, 100 distinct subjects: `Demerger`, `De-Merger`, `Capital Red./Demerger`,
+    # `Scheme Of Arrangement In The Nature Of Demerger`, `Sch Of Arngment-Demerger`.
+    ("demerger", re.compile(r"demerger|de-?merger", re.IGNORECASE)),
+    # 142 rows but only 26 distinct subjects — this one is a small, highly repeated vocabulary.
+    ("scheme", re.compile(r"scheme", re.IGNORECASE)),
+    # 6 rows, 5 distinct: `Scheme Of Amalgamation`, `Amalgamation With Tewl . To Be Suspended.`
+    ("amalgamation", re.compile(r"amalgam", re.IGNORECASE)),
+    # 5 rows, 3 distinct — and one of the three is a *company name*, not an event:
+    # `Allotment Of Shares Of Gujarat Composite Ltd & Digvijay Finlease Ltd ...`. `Composite` here
+    # is an adjective qualifying a scheme, so it only counts when it actually qualifies one. The
+    # other two (`Composite Scheme Of Arrangement`, `Composite Scheme Of Amalgamation And
+    # Arrangement`) both carry "scheme", which is the measured discriminator.
+    ("composite", re.compile(r"composit", re.IGNORECASE)),
+)
+#: The word ``composite`` must be qualifying to count, per the note above.
+_COMPOSITE_QUALIFIER_RE = re.compile(r"scheme|amalgam|arrang", re.IGNORECASE)
+#: Kinds a structural event can be labelled, in precedence order.
+STRUCTURAL_ACTION_KINDS: Tuple[str, ...] = tuple(name for name, _ in STRUCTURAL_ACTION_PATTERNS)
 
 
 # ------------------------------------------------------------------ pure helpers
@@ -414,6 +506,42 @@ def _ex_date(text: Optional[str]) -> Optional[pd.Timestamp]:
     return None if pd.isna(parsed) else pd.Timestamp(parsed)
 
 
+def dividend_amounts(subject: str) -> List[str]:
+    """Every rupee amount in ``subject`` that the filing declares as a per-share cash dividend.
+
+    One subject can declare several and a holder receives all of them, so this returns a **list**;
+    :func:`parse_dividend_amount` sums it. Verified case: ITC ex-date 2011-06-10,
+    ``Dividend Final Rs 2.80 And Special Rs 1.65 Per Share`` -> ``["2.80", "1.65"]`` -> Rs 4.45.
+
+    Returns ``[]`` — never a partial read — for a REIT/SML ``... Per Unit`` distribution, a subject
+    that declares no dividend at all, and an amount that belongs to a restructuring clause.
+    """
+    if not subject or "per unit" in subject.lower():
+        # A distribution on a unit is not a per-share equity cash flow. Independently safe: no
+        # per-unit row in the 43,788-row pull also contains a per-share phrase, so the
+        # _PER_SHARE_RE window below would refuse them anyway.
+        return []
+    if not _DIVIDEND_NOUN_RE.search(subject):
+        return []
+    found: List[str] = []
+    for match in _DIVIDEND_AMOUNT_RE.finditer(subject):
+        prefix = subject[: match.start()]
+        if _RESTRUCTURING_LEADIN_RE.search(prefix) or _NON_DIVIDEND_LEADIN_RE.search(prefix):
+            continue
+        if _AMBIGUOUS_AMOUNT_TAIL_RE.match(subject, match.end()):
+            continue
+        # The per-share phrase may follow this amount directly, or close the clause it belongs to —
+        # `Dividend Final Rs 2.80 And Special Rs 1.65 Per Share` shares one phrase across two
+        # amounts. It must not reach past a restructuring keyword into the next clause.
+        tail = subject[match.end():]
+        stop = _DIVIDEND_CLAUSE_BREAK_RE.search(tail)
+        window = tail[: stop.start()] if stop else tail
+        if not _PER_SHARE_RE.search(window):
+            continue
+        found.append(match.group(1))
+    return found
+
+
 def parse_dividend_amount(subject: str, face_value: Optional[float]) -> Tuple[Optional[float], str]:
     """Extract the cash dividend per share from a free-text ``subject``.
 
@@ -430,14 +558,15 @@ def parse_dividend_amount(subject: str, face_value: Optional[float]) -> Tuple[Op
 
     A ``... Per Unit`` subject never reaches here as a dividend: :func:`parse_action_subject`
     rejects it first, because a REIT/SML distribution is not a per-share equity cash flow.
+
+    A subject may declare more than one component and a holder receives all of them, so the
+    components are summed: ``Dividend - Rs 22 Per Share/Special Dividend - Rs 5 Per Share`` is
+    Rs 27, and yfinance has exactly one slot per date to put them in.
     """
     if not subject or "per unit" in subject.lower():
         return None, ""
-    amounts = [float(a.replace(",", "")) for a in _DIVIDEND_RE.findall(subject)]
+    amounts = [float(a.replace(",", "")) for a in dividend_amounts(subject)]
     if amounts:
-        # A subject may declare a dividend and a special dividend on one ex-date
-        # ("Dividend - Rs 22 Per Share/Special Dividend - Rs 5 Per Share"). A holder receives both,
-        # and yfinance has exactly one slot per date, so the components are summed.
         return round(sum(amounts), 4), "per_share"
     pct = _DIVIDEND_PCT_RE.search(subject)
     if pct and face_value:
@@ -556,6 +685,88 @@ def parse_action_subject(
     if parse_subdivision_ratio(text) is not None:
         return SUBDIVISION, None, "ratio"
     return OTHER_ACTION, None, ""
+
+
+def structural_action_kinds(subject: Optional[str]) -> Tuple[str, ...]:
+    """Which structural event(s) a ``subject`` declares, in :data:`STRUCTURAL_ACTION_KINDS` order.
+
+    Returns an empty tuple for a subject that declares none. More than one is possible and both are
+    real: ``Scheme Of Arrangement Cum Demerger`` is a ``("demerger", "scheme")``.
+
+    ``composite`` is conditional, and the condition is measured rather than stylistic: the only
+    3 distinct subjects containing "composit" in the 43,788-row pull include a *company* called
+    Gujarat Composite Ltd, so ``composite`` alone would report an allotment as a structural event.
+    It counts only when it qualifies a scheme or an amalgamation, which is what the other 2 rows do.
+    """
+    text = (subject or "").strip()
+    if not text or text == ABSENT:
+        return ()
+    kinds: List[str] = []
+    for name, pattern in STRUCTURAL_ACTION_PATTERNS:
+        if not pattern.search(text):
+            continue
+        if name == "composite" and not _COMPOSITE_QUALIFIER_RE.search(text):
+            continue
+        kinds.append(name)
+    return tuple(kinds)
+
+
+def structural_actions(events: pd.DataFrame) -> pd.DataFrame:
+    """The demerger / scheme / amalgamation rows inside a parsed events frame.
+
+    This is a **reader, not a converter**. It returns columns ``Symbol``, ``Kind``, ``Subject`` on a
+    naive ``DatetimeIndex`` named ``Date``, sorted ascending, mirroring
+    :func:`parse_corporate_actions` (naive, not tz-aware — the feed's ex-dates are IST calendar days
+    and the actions frame is what adds the zone). Empty in, empty out with the same columns.
+
+    ``Kind`` is ``+``-joined, in :data:`STRUCTURAL_ACTION_KINDS` order, matching the ``Components``
+    convention elsewhere in this module.
+
+    **A demerger is not turned into a split factor, here or anywhere in this module.** That refusal
+    is deliberate and separately evidenced, not an omission:
+
+    * The mechanically correct factor for ITC's 2011-06-10 demerger is **1.047332**, derived from the
+      published prices around the ex-date.
+    * Reproducing it needs a *curated* entitlement ratio — 0.1 ITCHL per ITC — which NSE does not
+      publish in this feed. The subject is the string ``Demerger``: no ratio, no share count, no
+      consideration.
+    * 122 of the 123 ``Demerger`` rows have no such ratio available anywhere in the feed, so a
+      conversion would be right for at most one row and fabricated for the rest.
+
+    So the event is named and dated and left unconverted. ``Action`` stays :data:`OTHER_ACTION` and
+    ``SplitRatio`` stays ``None``; the count is on the frame as
+    ``attrs["bfinance_structural_action_rows"]``.
+    """
+    columns = ["Symbol", "Kind", "Subject"]
+    if events is None or events.empty:
+        return pd.DataFrame(
+            {c: pd.Series(dtype=object) for c in columns},
+            index=pd.DatetimeIndex([], name="Date"),
+        )
+    records: List[Dict[str, Any]] = []
+    for stamp, symbol, subject in zip(
+        events.index, events["Symbol"], events["Subject"]
+    ):
+        kinds = structural_action_kinds(subject)
+        if not kinds:
+            continue
+        records.append(
+            {"Date": stamp, "Symbol": symbol, "Kind": "+".join(kinds), "Subject": subject}
+        )
+    if not records:
+        return pd.DataFrame(
+            {c: pd.Series(dtype=object) for c in columns},
+            index=pd.DatetimeIndex([], name="Date"),
+        )
+    frame = pd.DataFrame(records).set_index("Date")
+    # Only a frame this module produced carries a DatetimeIndex. Coercing anything else would invent
+    # a date -- pd.to_datetime(RangeIndex(1)) is 1970-01-01, which reads as a real ex-date -- so a
+    # foreign index is passed through as-is and the caller keeps ownership of its own labelling.
+    if isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"), name="Date")
+    else:
+        frame.index.name = "Date"
+    return frame.sort_index(kind="stable", na_position="last")[columns]
 
 
 def split_ratio(subject: Optional[str]) -> Tuple[Optional[float], str]:
@@ -682,6 +893,14 @@ def parse_corporate_actions(
     frame.attrs["bfinance_undated_action_rows"] = undated
     frame.attrs["bfinance_action_counts"] = {k: int(v) for k, v in counts.items()}
     frame.attrs["bfinance_unconverted_action_rows"] = int(counts.get(OTHER_ACTION, 0))
+    # Named, dated, and still unconverted. A demerger is a real event that carries no factor this
+    # feed can justify, so it has to be countable without being counted as a factor -- see
+    # structural_actions() for why no entitlement ratio is invented for it.
+    frame.attrs["bfinance_structural_action_rows"] = (
+        sum(1 for subject in frame["Subject"] if structural_action_kinds(subject))
+        if not frame.empty
+        else 0
+    )
     frame.attrs["bfinance_undated_action_subjects"] = (
         [str(s) for s in frame.loc[frame.index.isna(), "Subject"]] if undated else []
     )

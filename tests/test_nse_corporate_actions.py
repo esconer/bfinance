@@ -240,6 +240,96 @@ def test_dividend_and_special_dividend_on_one_ex_date_sum():
     assert parsed == pytest.approx(27.0)
 
 
+def test_two_components_sharing_one_trailing_per_share_are_both_kept():
+    """ITC, ex-date 2011-06-10. A holder received Rs 4.45/share and the parse returned nothing.
+
+    ``Dividend Final Rs 2.80 And Special Rs 1.65 Per Share`` declares two components and puts
+    **one** ``Per Share`` at the end, so a pattern that needs "div" next to the amount *and*
+    "Per Share" next to the amount is unsatisfiable. The row became a zero dividend and a
+    silently wrong back-adjustment. Both components are kept and summed.
+    """
+    subject = "Dividend Final Rs 2.80 And Special Rs 1.65 Per Share"
+    assert ca.dividend_amounts(subject) == ["2.80", "1.65"]
+    parsed, basis = ca.parse_dividend_amount(subject, 1.0)
+    assert parsed == pytest.approx(4.45)
+    assert basis == "per_share"
+    # The same filing with the qualifier word omitted parses identically — the amount never needed
+    # the noun beside it, only the declaration of a dividend somewhere in the subject.
+    assert ca.parse_dividend_amount(
+        "Dividend Rs 2.80 And Special Rs 1.65 Per Share", 1.0
+    )[0] == pytest.approx(4.45)
+
+
+@pytest.mark.parametrize("subject,components,total", [
+    # 19 real rows in the pull where a second component was dropped behind a single trailing
+    # "Per Share". Every one of them now sums. These are the shapes, verbatim.
+    ("Final Dividend Rs. 4 And Special Dividend Rs 8 Per Share", ["4", "8"], 12.0),
+    ("Annual General Meeting/Dividend Final Rs.13 +Special Dividend Rs.20 Per Share", ["13", "20"], 33.0),
+    ("Annual General Meeting/Dividend - Final Rs 25 + Special Rs 25 Per Share", ["25", "25"], 50.0),
+    ("Annual General Meeting/Dividend Final Rs 16 + Special Rs 5 Per Share", ["16", "5"], 21.0),
+    ("Agm/Dividend - Final Re 1 + Special Re 0.20 Per Share", ["1", "0.20"], 1.20),
+    ("Annual General Meeting And Dividend - Final - Rs.23/- And Special - Rs.28/- Per Share",
+     ["23", "28"], 51.0),
+    ("Interim Dividend Rs 5.75/- + Special Dividend - Rs 1.25/- Per Share (Purpose Revised)",
+     ["5.75", "1.25"], 7.0),
+    ("Annual General Meeting / Final Dividend Rs 0.60  And Special Dividend Rs 1.40 Per Share.",
+     ["0.60", "1.40"], 2.0),
+])
+def test_a_component_behind_a_shared_per_share_is_not_dropped(subject, components, total):
+    assert ca.dividend_amounts(subject) == components
+    assert ca.parse_dividend_amount(subject, 10.0)[0] == pytest.approx(total)
+
+
+def test_per_unit_and_nil_declarations_stay_out():
+    """The discriminator that must survive the loosening.
+
+    ``Total Dividend ... Per Unit`` is a REIT/SML distribution and ``Dividend - Nil`` is a real
+    declaration of zero. Neither is a per-share equity cash flow, so both must stay empty. Neither
+    is protected by the dividend noun alone — both say "Dividend" — only by the per-share
+    requirement plus the per-unit refusal.
+    """
+    for subject in ("Total Dividend Rs 5.00 Per Unit", "Dividend - Nil"):
+        assert ca.dividend_amounts(subject) == [], subject
+        assert ca.parse_dividend_amount(subject, 10.0) == (None, ""), subject
+        assert ca.parse_action_subject(subject, 10.0) == (ca.OTHER_ACTION, None, ""), subject
+
+
+@pytest.mark.parametrize("subject,expected", [
+    # A real dividend noun, but the rupee amount is a face value, not cash. Reading Rs 10 as a
+    # dividend would overstate it 10x. This is the documented RSSOFTWARE row: three amounts, one
+    # cash.
+    ("Interim Dividend - Rs 1.50/- Per Share / Face Value Split - From Rs 10/- Per Share "
+     "To Rs 5/- Per Share", ["1.50"]),
+    ("Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share", []),
+    # A dividend and a rights issue on one ex-date. The Rs 554 is the subscription price.
+    ("Interim Dividend- Rs 3 Per Share / Rights 1:16 @ Premium Rs 554 Per Share", ["3"]),
+    ("Dividend Rs.1.80 Per Share And Rights 1:3 @ Premium Rs.30/- Per Share", ["1.80"]),
+    ("Rights 7:5@Premium Rs.55 Per Share/Annual General Meeting / Dividend Re.1/- Per Equity Share",
+     ["1"]),
+    # A bonus ratio is not cash. "Sub-Division" contains "Div" but declares no dividend.
+    ("Bonus 1:1/Div-Rs.5 Per Sh", ["5"]),
+    ("Bonus 1:1 And Face Value Split Rs.10/- To Rs.5/- Per Share", []),
+])
+def test_a_price_per_share_that_is_not_cash_is_never_read_as_a_dividend(subject, expected):
+    assert ca.dividend_amounts(subject) == expected
+
+
+@pytest.mark.parametrize("subject", [
+    # A number that cannot be read cleanly, so no number is taken from it. `Rs 62..50` and
+    # `Rs 0 .70` both yield a plausible-looking wrong value; `Re.0.60 Paise` has a unit word that
+    # contradicts the numeral; `Div Fin-Rs18+Spl-18 Pr Sh` fuses a dividend and a split ratio under
+    # one "Pr Sh", so the phrase qualifying it is ambiguous. All four are real upstream values.
+    "Annual General Meeting/Dividend - Rs 62..50/- Per Share",
+    "Annual General Meeting/Dividend - Re 0..30 Per Share",
+    "Dividend - Rs 0 .70 Per Share",
+    "Dividend - Re.0.60 Paise Per Share",
+    "Div Fin-Rs18+Spl-18 Pr Sh",
+])
+def test_an_amount_that_cannot_be_read_cleanly_is_left_unconverted(subject):
+    assert ca.dividend_amounts(subject) == [], subject
+    assert ca.parse_dividend_amount(subject, 10.0) == (None, ""), subject
+
+
 def test_legacy_percentage_dividend_uses_the_published_face_value():
     """`Dividend-10%` on a Rs 10 face value is Rs 1.00/share.
 
@@ -424,6 +514,111 @@ def test_two_split_rows_on_one_date_multiply():
     )
     actions = ca.actions_frame(frame)
     assert actions["Stock Splits"].iloc[0] == pytest.approx(10.0)
+
+
+# --------------------------------------------------------------------- structural events
+
+
+def test_structural_event_kinds_are_named_not_guessed():
+    """A demerger and an AGM notice are both Action="other"; only one of them is an event.
+
+    The counts are measured over the 43,788-row pull, and they are not equal: ``scheme`` is 142
+    rows but only 26 distinct subjects, while ``composit`` is 5 rows and 3 distinct subjects. All
+    five proposed keywords do occur.
+    """
+    assert ca.STRUCTURAL_ACTION_KINDS == ("demerger", "scheme", "amalgamation", "composite")
+    for subject, expected in [
+        ("Demerger", ("demerger",)),
+        ("De-Merger", ("demerger",)),                       # the hyphenated spelling is real
+        ("Capital Red./Demerger", ("demerger",)),
+        ("Scheme Of Arrangement", ("scheme",)),
+        ("Scheme Of Arrangement Cum Demerger", ("demerger", "scheme")),   # both, in that order
+        ("Scheme Of Amalgamation", ("scheme", "amalgamation")),
+        ("Amalgamation With Tewl . To Be Suspended.", ("amalgamation",)),
+        ("Composite Scheme Of Arrangement", ("scheme", "composite")),
+        ("Annual General Meeting", ()),
+        ("Agm", ()),
+        ("Dividend - Rs 6 Per Share", ()),
+        ("Buy Back", ()),
+        ("-", ()),
+        (None, ()),
+        ("", ()),
+    ]:
+        assert ca.structural_action_kinds(subject) == expected, subject
+
+
+def test_composite_as_a_company_name_is_not_a_structural_event():
+    """``composite`` is conditional, and the condition is measured, not stylistic.
+
+    One of only three distinct subjects containing "composit" in the pull is a *company* —
+    ``Allotment Of Shares Of Gujarat Composite Ltd & Digvijay Finlease Ltd ...`` — so matching
+    "composit" unconditionally reports an allotment as a structural event. The other two both
+    qualify a scheme, which is the discriminator.
+    """
+    assert ca.structural_action_kinds(
+        "Allotment Of Shares Of Gujarat Composite Ltd & Digvijay Finlease Ltd "
+        "To The Shareholders Of The Company"
+    ) == ()
+
+
+def test_a_demerger_is_named_dated_and_left_unconverted(reliance_events):
+    """The event is reported; the factor is not invented.
+
+    Naming the event is free. Deriving a split factor is not: it needs a curated entitlement ratio
+    that this feed does not publish (the subject is the bare string ``Demerger``), and 122 of the
+    123 such rows have no such ratio available at all. So ``Action`` stays ``other`` and
+    ``SplitRatio`` stays ``None`` — visible, dated, and not guessed at.
+    """
+    row = reliance_events.loc[pd.Timestamp("2023-07-20")]
+    assert row["Symbol"] == "RELIANCE"
+    assert row["Action"] == ca.OTHER_ACTION
+    assert pd.isna(row["Value"])
+    assert pd.isna(row["SplitRatio"])
+    # And it still reaches the yfinance-shaped frame as a dated zero, so it is not invisible.
+    actions = ca.actions_frame(reliance_events, symbol="RELIANCE", url="fixture")
+    day = pd.Timestamp("2023-07-20", tz="Asia/Kolkata")
+    assert day in actions.index
+    assert actions.loc[day, "Dividends"] == 0.0
+    assert actions.loc[day, "Stock Splits"] == 0.0
+
+
+def test_structural_actions_accessor_names_every_kind(curated_events):
+    """``structural_actions`` is a reader over a parsed frame, not a second parser.
+
+    Returns ``Symbol``, ``Kind``, ``Subject`` on a naive ``Date`` index — mirroring
+    ``parse_corporate_actions``, because the feed's ex-dates are IST calendar days and it is
+    ``actions_frame`` that adds the zone. The curated market-wide fixture holds 8 such rows.
+    """
+    structural = ca.structural_actions(curated_events)
+    assert list(structural.columns) == ["Symbol", "Kind", "Subject"]
+    assert str(structural.index.name) == "Date"
+    assert structural.index.is_monotonic_increasing
+    assert len(structural) == curated_events.attrs["bfinance_structural_action_rows"] == 8
+    assert set(structural["Kind"].str.split("+").explode()) <= set(ca.STRUCTURAL_ACTION_KINDS)
+
+    demergers = structural[structural["Kind"] == "demerger"]
+    assert demergers["Symbol"].tolist() == ["ASAHISONG", "SFCL", "RELIANCE"]
+    # A subject can declare more than one kind, and the composite qualification composes.
+    composite = structural[structural["Kind"].str.contains("composite")]
+    assert composite["Kind"].tolist() == ["scheme+amalgamation+composite"]
+    # A scheme row is still unconverted: a scheme does not itself change the share count.
+    scheme_row = curated_events.loc[pd.Timestamp("2015-03-20")]
+    assert scheme_row["Action"] == ca.OTHER_ACTION
+    assert pd.isna(scheme_row["SplitRatio"])
+
+
+def test_structural_actions_accessor_is_empty_in_empty_out(curated_events):
+    assert ca.structural_actions(pd.DataFrame()).empty
+    assert list(ca.structural_actions(pd.DataFrame()).columns) == ["Symbol", "Kind", "Subject"]
+    assert ca.structural_actions(curated_events[curated_events["Symbol"] == "ZZZ"]).empty
+    assert ca.structural_actions(None).empty
+
+
+def test_frames_record_how_many_structural_events_they_refused(curated_events, reliance_events):
+    assert curated_events.attrs["bfinance_structural_action_rows"] == 8
+    assert reliance_events.attrs["bfinance_structural_action_rows"] == 1
+    empty = ca.parse_corporate_actions(load("nse_empty_feed.json"))
+    assert empty.attrs["bfinance_structural_action_rows"] == 0
 
 
 # --------------------------------------------------------------------- no price blending
