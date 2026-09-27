@@ -675,10 +675,13 @@ async def test_single_day_over_the_real_transport_path(stub_httpx):
     client = bc.BhavcopyClient(min_request_interval_ms=0.0)
     frame = await client.bhavcopy_async("2026-09-25")
 
-    assert len(frame) == 4
+    # The recorded 2026-09-25 file is 7 rows: 4 EQ, 1 BE, 2 GB. The default keeps EQ+BE (5) and
+    # still drops both gold bonds. Gold bonds are the leak that matters; BE is an equity.
+    assert len(frame) == 5
     assert set(frame.index.get_level_values("Symbol")) == {
-        "IRCON", "RELIANCE", "SBIN", "ZYDUSWELL"
+        "3IINFOLTD", "IRCON", "RELIANCE", "SBIN", "ZYDUSWELL"
     }
+    assert frame.attrs[bc.SERIES_INCLUDED_ATTR] == ("BE", "EQ")
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
 
 
@@ -876,11 +879,14 @@ async def test_range_merges_days_into_one_ascending_frame(client):
     client._get_archive = fake
     frame = await client.bhavcopy_range_async("2026-09-21", "2026-09-25")
 
-    assert len(frame) == 5 * 4, "five days x four EQ instruments"
+    assert len(frame) == 5 * 5, "five days x four EQ instruments + one BE instrument"
     assert frame.index.is_monotonic_increasing
     assert not frame.index.duplicated().any()
     assert frame.attrs["bfinance_candidate_trading_days"] == 5
-    assert frame.attrs["bfinance_symbol_count"] == 4
+    assert frame.attrs["bfinance_symbol_count"] == 5
+    assert frame.attrs[bc.SERIES_INCLUDED_ATTR] == ("BE", "EQ"), (
+        "the range reports the series observed across the days that returned rows"
+    )
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
     assert len(frame.index.get_level_values("Date").unique()) == 5
 
@@ -915,7 +921,9 @@ async def test_range_merges_the_legacy_schema_too(client):
     client._get_archive = fake
     frame = await client.bhavcopy_range_async("2023-05-15", "2023-05-16")
 
-    assert len(frame) == 6
+    # The legacy fixture is 6 rows: 3 EQ (RELIANCE, TCS, ZYDUSWELL), 1 BE (4THDIM), 1 GS, 1 TB.
+    # Two days x the four equity instruments (EQ+BE) = 8.
+    assert len(frame) == 8
     series = frame.xs("TCS", level="Symbol")
     assert [str(d.date()) for d in series.index] == ["2023-05-15", "2023-05-16"]
     assert series["Close"].tolist() == [3255.05, 3255.05]
@@ -948,7 +956,7 @@ async def test_range_dedupes_a_repeated_upstream_row(client):
     frame = await client.bhavcopy_range_async("2026-09-22", "2026-09-22")
 
     assert not frame.index.duplicated().any()
-    assert len(frame) == 4
+    assert len(frame) == 5, "the four EQ instruments plus the one BE instrument"
 
 
 async def test_a_file_with_no_rows_for_the_series_is_distinct_from_a_missing_file(client):
@@ -968,15 +976,18 @@ async def test_a_file_with_no_rows_for_the_series_is_distinct_from_a_missing_fil
 
 async def test_range_does_not_report_a_series_less_day_as_a_missing_date(client):
     async def fake(url):
-        # Both files exist; only one holds EQ rows.
+        # Both files exist; only one holds rows for the default equity series. Both default
+        # series are blanked, not just EQ: stripping only EQ would leave the BE row and the
+        # second day would not be series-less at all.
+        stripped = csv_text(UDIFF).replace(",EQ,", ",ZZ,").replace(",BE,", ",ZZ,")
         return zipped(with_dates(csv_text(UDIFF), ["2026-09-22"])) if "20260922" in url \
-            else zipped(csv_text(UDIFF).replace(",EQ,", ",ZZ,"))
+            else zipped(stripped)
 
     client._get_archive = fake
     frame = await client.bhavcopy_range_async("2026-09-22", "2026-09-23")
 
     assert frame.attrs[bc.MISSING_DATES_ATTR] == []
-    assert len(frame) == 4
+    assert len(frame) == 5
     assert str(frame.index.get_level_values("Date")[0].date()) == "2026-09-22"
 
 
@@ -1013,7 +1024,7 @@ async def test_range_through_the_real_transport_layer(stub_httpx):
     client = bc.BhavcopyClient(min_request_interval_ms=0.0)
     frame = await client.bhavcopy_range_async("2026-09-22", "2026-09-23")
 
-    assert len(frame) == 4
+    assert len(frame) == 5
     assert frame.attrs[bc.MISSING_DATES_ATTR] == ["2026-09-23"]
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
 
@@ -1053,12 +1064,20 @@ def test_the_two_ticket_functions_exist_with_the_ticket_signatures():
 
     single = inspect.signature(bc.bhavcopy)
     assert list(single.parameters) == ["date", "series", "exchange", "raise_errors"]
-    assert single.parameters["series"].default == "EQ"
+    # EQ alone was the bug: a new listing debuts in BE, so an EQ-only default silently lost the
+    # first sessions of every recent listing. The default is the equity *pair* now, and
+    # series=None (no filter) exists but is never the default.
+    assert single.parameters["series"].default == ("EQ", "BE") == bc.EQUITY_SERIES
     assert single.parameters["exchange"].default == "CM"
     assert single.parameters["raise_errors"].default is False
 
     ranged = inspect.signature(bc.bhavcopy_range)
-    assert list(ranged.parameters) == ["start", "end", "exchange", "on_missing", "progress"]
+    assert list(ranged.parameters) == [
+        "start", "end", "series", "exchange", "on_missing", "progress"
+    ]
+    # bhavcopy_range previously exposed no series keyword at all, so a caller had no way to ask
+    # for BE from the module-level shortcut. The client's range took it; the shortcut now does too.
+    assert ranged.parameters["series"].default == bc.EQUITY_SERIES
     assert ranged.parameters["exchange"].default == "CM"
     assert ranged.parameters["on_missing"].default == "skip"
     assert ranged.parameters["progress"].default is False
@@ -1085,7 +1104,7 @@ def test_sync_shortcut_runs_without_a_running_loop(client, monkeypatch):
 
     monkeypatch.setattr(client, "_get_archive", fake)
     frame = client.bhavcopy("2026-09-25")
-    assert len(frame) == 4
+    assert len(frame) == 5
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
 
 

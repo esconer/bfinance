@@ -50,9 +50,16 @@ Upstream traps recorded here, because each one silently corrupts data if ignored
    pandas surfaces as a junk ``Unnamed: 34`` column. The same file also names its tail columns
    ``Rsvd01``..``Rsvd04`` where the 2026 file uses ``Rsvd1``..``Rsvd4``. Both schemas are handled
    by looking columns up **by name** (:data:`_SCHEMAS`), never by offset.
-2. **A bhavcopy is not equities.** ``SctySrs`` mixes series. The raw 2026-09-25 file holds 3654
-   rows of which only 2660 are ``EQ``; the rest include 40 gold bonds (``GB``, e.g. ``SGBJUN28``),
-   239 ``BE`` and 380 ``SM``. The default ``series="EQ"`` filter is mandatory, not cosmetic.
+2. **A bhavcopy is not equities, but ``EQ`` alone is not equities either.** ``SctySrs`` mixes many
+   series. The raw 2026-09-25 file holds 3654 rows of which only 2660 are ``EQ``; the rest include
+   40 gold bonds (``GB``, e.g. ``SGBJUN28``), 239 ``BE`` and 380 ``SM``. So a filter is
+   mandatory. But ``BE`` (trade-to-trade) is an **equity** series and belongs in the default,
+   because a new listing debuts in it: ITCHOTELS prints ``SctySrs="BE"`` from 2025-01-29
+   (``FinInstrmId`` 29253) and first prints ``"EQ"`` on 2025-02-11 (``FinInstrmId`` 29251), so an
+   ``EQ``-only read lost its first 9 sessions and mis-dated the listing by 13 days while returning
+   a well-formed, non-empty frame. :data:`EQUITY_SERIES` is therefore ``('EQ', 'BE')``. See
+   :data:`EQUITY_SERIES` for the full measurement, including why ``series=None`` is not the answer
+   (22.6% of those rows are gold bonds, T-bills, REITs, NCDs and SME).
 3. **A 404 is an expected outcome, not an error.** A weekend, an exchange holiday, or a date
    outside the route's coverage all yield 404. That is different from a network failure or a 5xx,
    which are real problems: those raise. The two conditions are never conflated.
@@ -64,6 +71,13 @@ Upstream traps recorded here, because each one silently corrupts data if ignored
    without issuing a request, which removes ~2/7 of the traffic; exchange holidays still cost one
    cheap 404 each. A real trading calendar would need to be maintained, and a stale one is worse
    than a 404, so this module does not have one.
+7. **A scrip keeps its ticker across an ``EQ``/``BE`` migration, and is never in both on one day.**
+   Measured over 15 archives (2025-01-27..2025-02-14): 43 distinct symbols changed series, in both
+   directions, and same-day ``EQ``-and-``BE`` overlap was **0** on every one of the 15 days. That
+   zero is what makes the ``EQ``+``BE`` union safe — it cannot manufacture a duplicate
+   ``(Date, Symbol)``, and a migrated listing stitches into one continuous price series. It also
+   explains why the migration is not a rare edge case: it is a routine, both-ways, monthly-scale
+   event on a ~2,300-symbol board.
 
 A note on the ``TickerNotFoundError`` reused for a missing date
 ---------------------------------------------------------------
@@ -88,7 +102,7 @@ import threading
 import time
 import zipfile
 from datetime import date as _date, datetime, timedelta
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple, Union
 
 import httpx
 import pandas as pd
@@ -111,6 +125,12 @@ SYNTHETIC_OHLC_ATTR = "bfinance_synthetic_ohlc"
 #: Attr listing requested dates for which NSE published no file (weekend, holiday, out of range).
 MISSING_DATES_ATTR = "bfinance_bhavcopy_missing_dates"
 
+#: Attr recording which series the returned rows *actually* came from, measured from the rows
+#: rather than echoed from the request. It differs from ``bfinance_series`` exactly when it is
+#: useful: ask for ``("EQ", "BE")`` on a file that has no ``BE`` line today and this reads
+#: ``("EQ",)``. A consumer that needs to know what it got reads this one key.
+SERIES_INCLUDED_ATTR = "bfinance_series_included"
+
 #: Exact output contract — must match what ``OHLCVEngine`` produces (minus the adjusted/action
 #: columns, which this feed does not carry).
 COLUMNS: Tuple[str, ...] = ("Open", "High", "Low", "Close", "Volume")
@@ -121,6 +141,26 @@ UDIFF_CUTOFF = _date(2024, 1, 1)
 
 #: Accepted ``exchange`` values.
 EXCHANGES: Tuple[str, ...] = ("CM", "FO")
+
+#: The series a **default** read covers: cash equities plus the trade-to-trade segment.
+#:
+#: ``BE`` is here because a newly listed scrip *debuts* in it. Measured on ITCHOTELS over
+#: 2025-01-26..2025-02-14 (15 archives, 44,044 rows): the raw files carry ``ITCHOTELS`` from
+#: **2025-01-29** as ``SctySrs="BE"`` (``FinInstrmId`` 29253) and first as ``"EQ"``
+#: (``FinInstrmId`` 29251) on **2025-02-11**. A ``series="EQ"``-only default therefore lost the
+#: first **9** sessions and mis-dated the listing by **13** calendar days — silently, because the
+#: frame it returned was non-empty and well-formed. The same set migration runs *backwards* too:
+#: 43 distinct symbols changed series inside that one 15-day window, including single-day flips
+#: (POWERMECH was ``BE`` on 2025-02-05 and ``EQ`` on every other day), so an ``EQ``-only filter
+#: punches single-session holes in the middle of an established history too, not just at the start.
+#:
+#: Only these two. ``EQ``+``BE`` is a strict superset of the old default and still excludes every
+#: non-equity: over the same 15 archives ``series=None`` would have added 9,964 rows (22.6%) of
+#: gold bonds (``GB``, e.g. ``SGBDE30III`` at 8223.30), G-sec loans (``GS``), T-bills (``TB``),
+#: REITs (``RR``, ``EMBASSY`` at 365.26), SME (``SM``), structured notes (``BZ``/``E1``), NCDs
+#: (``N2``) and invit funds (``IV``). Measured same-day ``EQ``/``BE`` symbol overlap: **0**, on all
+#: 15 archives, so this union never creates a duplicate ``(Date, Symbol)``.
+EQUITY_SERIES: Tuple[str, ...] = ("EQ", "BE")
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -188,10 +228,14 @@ def validate_exchange(exchange: str) -> str:
 
 
 def validate_series(series: str) -> str:
-    """Uppercase and validate a series code before any request.
+    """Uppercase and validate **one** series code before any request.
 
     A bhavcopy mixes many series in one file; an unmatched filter is the same failure mode as a
     bad symbol — a silent zero-row frame — so it is rejected locally instead.
+
+    Kept single-valued on purpose: it is the public one-code validator, and a caller that already
+    holds a ``str`` wants a ``str`` back. :func:`resolve_series` is the multi-code entry point and
+    calls this.
     """
     if not isinstance(series, str):
         raise ValueError(f"series must be a string, got {type(series).__name__}")
@@ -203,6 +247,73 @@ def validate_series(series: str) -> str:
             f"series={series!r} is not a series code. Expected 1-4 letters/digits, e.g. 'EQ'."
         )
     return clean
+
+
+#: What a caller may pass as ``series``. ``None`` means "no filter at all" (every series the file
+#: holds — gold bonds, T-bills, NCDs included, so it is opt-in and never a default).
+SeriesSpec = Union[None, str, Iterable[str]]
+
+
+def resolve_series(series: SeriesSpec) -> Optional[Tuple[str, ...]]:
+    """Normalise a ``series`` argument into the tuple of codes to keep, or ``None`` for "no filter".
+
+    Three accepted shapes, all unambiguous:
+
+    * a ``str`` — exactly as before, one code, via :func:`validate_series`. ``"eq"`` -> ``("EQ",)``.
+    * an iterable of ``str`` — normalised, de-duplicated, order-preserving, each code validated.
+    * ``None`` — **no series filter at all**, every row upstream sent is kept.
+
+    ``None`` is returned rather than an empty tuple on purpose: an empty tuple is what
+    ``series=[]`` would naturally mean, and "keep nothing" and "keep everything" are opposite
+    answers, so the distinction is carried by ``None`` and ``[]`` is rejected outright.
+
+    An unmatched code is *not* rejected — a series simply absent from one day's file is a valid
+    answer (zero rows for that series), and a bhavcopy's series mix changes day to day.
+    """
+    if series is None:
+        return None
+    if isinstance(series, str):
+        return (validate_series(series),)
+    if isinstance(series, (bytes, bytearray)):
+        raise ValueError(f"series must be a string or an iterable of strings, got {type(series).__name__}")
+    try:
+        codes = list(series)
+    except TypeError:
+        raise ValueError(
+            f"series must be None, a string, or an iterable of strings, got "
+            f"{type(series).__name__}"
+        ) from None
+    resolved: List[str] = []
+    for item in codes:
+        if not isinstance(item, str):
+            raise ValueError(
+                f"series={series!r} contains a non-string entry {item!r} of type "
+                f"{type(item).__name__}"
+            )
+        clean = validate_series(item)
+        if clean not in resolved:
+            resolved.append(clean)
+    if not resolved:
+        raise ValueError(
+            "series=[] keeps nothing, which is a silent zero-row frame. Pass series=None for "
+            "'every series in the file', or name at least one code."
+        )
+    return tuple(resolved)
+
+
+def series_request_attr(series: SeriesSpec) -> Union[None, str, Tuple[str, ...]]:
+    """The value recorded in ``attrs['bfinance_series']``: what the *caller asked for*.
+
+    A single string stays a string, because ``attrs['bfinance_series'] == 'GB'`` is an existing
+    contract that callers and tests read. A collection stays a normalised tuple and ``None`` stays
+    ``None`` ("no filter was applied"). What the rows actually carry is
+    :data:`SERIES_INCLUDED_ATTR`, which is measured, not echoed.
+    """
+    if isinstance(series, str):
+        return validate_series(series)
+    if series is None:
+        return None
+    return resolve_series(series)
 
 
 def to_date(value: Union[str, _date, datetime, pd.Timestamp]) -> _date:
@@ -342,7 +453,7 @@ def unzip_bhavcopy(payload: bytes, url: str = "") -> str:
 def parse_bhavcopy(
     csv_text: str,
     *,
-    series: str = "EQ",
+    series: SeriesSpec = EQUITY_SERIES,
     schema: Optional[str] = None,
     url: str = "",
 ) -> pd.DataFrame:
@@ -352,6 +463,17 @@ def parse_bhavcopy(
     ``Date`` (normalised to midnight, matching ``nse.marketlens``' daily convention —
     ``OHLCVEngine`` localises to IST itself). Columns are exactly :data:`COLUMNS`, sorted
     ascending, **one row per instrument**.
+
+    Args:
+        series: Which series to keep — a code (``'EQ'``), an iterable of codes, or ``None`` for no
+            filter. Defaults to :data:`EQUITY_SERIES` = ``('EQ', 'BE')``, **not** ``('EQ',)``: a
+            new listing debuts in ``BE`` and migrates to ``EQ`` weeks later, so an ``EQ``-only
+            read silently drops the first sessions of every recent listing and mis-dates it. The
+            price/volume are the same whether a scrip prints in ``EQ`` or ``BE``; only the series
+            label differs, and dropping ``BE`` drops *data*, not noise. ``None`` is accepted but
+            never a default — it pulls in gold bonds, T-bills, REITs, NCDs and SME rows, which
+            carry entirely plausible prices near 8,000 and would land in a portfolio as
+            instruments.
 
     .. warning::
        The ticket specified "a ``DatetimeIndex`` named ``Date``", but a bhavcopy is a
@@ -366,7 +488,8 @@ def parse_bhavcopy(
     malformed field becomes ``NaN`` and is counted in ``attrs["bfinance_missing_ohlcv"]``. It is
     never filled.
     """
-    clean_series = validate_series(series)
+    clean_series = series_request_attr(series)
+    wanted = resolve_series(series)
     frame = pd.read_csv(
         io.StringIO(csv_text), dtype=str, keep_default_na=False, na_values=[""]
     )
@@ -397,9 +520,17 @@ def parse_bhavcopy(
 
     # Series filter FIRST (trap 2): a bhavcopy is not equities, and its GB rows carry real-looking
     # gold-bond prices that would otherwise pass straight into a portfolio. Filtering before any
-    # other read is what keeps the row counts aligned.
-    kept = frame[frame[bound["series"]].astype(str).str.strip().str.upper() == clean_series]
+    # other read is what keeps the row counts aligned. The column is normalised ONCE and reused for
+    # both the mask and the "what did I actually get" attr — a second .str.upper() over ~3,600 rows
+    # per day would be waste for a value the frame must report anyway.
+    series_col = frame[bound["series"]].astype(str).str.strip().str.upper()
+    # isin, not ==, so the default can be a set. wanted is None only for an explicit series=None.
+    kept = frame if wanted is None else frame[series_col.isin(wanted)]
     dropped_by_series = int(len(frame) - len(kept))
+    # Measured from the rows, not echoed from the request: these are the series actually present.
+    series_included = tuple(
+        sorted(kept[bound["series"]].astype(str).str.strip().str.upper().unique())
+    )
 
     symbols = kept[bound["symbol"]].astype(str).str.strip().to_numpy()
     raw_dates = kept[bound["date"]].astype(str).str.strip()
@@ -449,6 +580,7 @@ def parse_bhavcopy(
     out.attrs["bfinance_provenance"] = PROVENANCE
     out.attrs["bfinance_schema"] = resolved
     out.attrs["bfinance_series"] = clean_series
+    out.attrs[SERIES_INCLUDED_ATTR] = series_included
     out.attrs["bfinance_source_row_count"] = int(len(frame))
     out.attrs["bfinance_rows_dropped_by_series_filter"] = dropped_by_series
     out.attrs["bfinance_missing_ohlcv"] = missing_ohlcv
@@ -604,7 +736,7 @@ class BhavcopyClient:
         self,
         day: Union[str, _date, datetime, pd.Timestamp],
         *,
-        series: str = "EQ",
+        series: SeriesSpec = EQUITY_SERIES,
         exchange: Literal["CM", "FO"] = "CM",
         raise_errors: bool = False,
     ) -> pd.DataFrame:
@@ -613,8 +745,11 @@ class BhavcopyClient:
         Args:
             day: ``'YYYY-MM-DD'``, ``'YYYYMMDD'``, ``date`` or ``datetime``. The route is chosen
                 by date, not by probing: >= :data:`UDIFF_CUTOFF` uses UDiFF, earlier uses legacy.
-            series: Series code to keep. ``'EQ'`` (cash equities) by default. A bhavcopy holds
-                many series, so this filter is mandatory — see trap 2 in the module docstring.
+            series: Series to keep — a code, an iterable of codes, or ``None`` for no filter.
+                Defaults to :data:`EQUITY_SERIES` = ``('EQ', 'BE')``. A bhavcopy holds many
+                series, so *some* filter is mandatory — see trap 2 in the module docstring — but
+                it must include ``BE``, or a scrip's first sessions vanish (see
+                :data:`EQUITY_SERIES` for the measured ITC Hotels case).
             exchange: ``'CM'`` (cash market) or ``'FO'`` (F&O). ``'FO'`` is UDiFF-only; a
                 pre-cutover FO date raises :class:`ValueError` before any request.
             raise_errors: When ``True``, a day with no archive raises
@@ -640,13 +775,13 @@ class BhavcopyClient:
             ParsingError: the body was not a single-CSV ZIP, or the columns are unrecognised.
         """
         clean_day = to_date(day)
-        clean_series = validate_series(series)
+        clean_series = series_request_attr(series)
         clean_exchange = validate_exchange(exchange)
         url = archive_url(clean_day, clean_exchange)
 
         # Request-level provenance only. Anything the parser discovers (the resolved schema, the
-        # missing-field counts) is left alone — a blind update() here would overwrite the parser's
-        # real schema with a placeholder and hide which branch actually ran.
+        # missing-field counts, the series actually present) is left alone — a blind update() here
+        # would overwrite the parser's real schema with a placeholder and hide which branch ran.
         base_attrs: Dict[str, Any] = {
             "bfinance_provenance": PROVENANCE,
             "bfinance_series": clean_series,
@@ -666,7 +801,13 @@ class BhavcopyClient:
                 raise TickerNotFoundError(message)
             logger.debug("%s", message)
             return empty_bhavcopy_frame(
-                {**base_attrs, MISSING_DATES_ATTR: [clean_day.isoformat()]}
+                {
+                    **base_attrs,
+                    MISSING_DATES_ATTR: [clean_day.isoformat()],
+                    # No file, so no series were included. Present on every return so a consumer
+                    # can read one key without branching.
+                    SERIES_INCLUDED_ATTR: (),
+                }
             )
 
         frame = parse_bhavcopy(
@@ -686,7 +827,7 @@ class BhavcopyClient:
         self,
         day: Union[str, _date, datetime, pd.Timestamp],
         *,
-        series: str = "EQ",
+        series: SeriesSpec = EQUITY_SERIES,
         exchange: Literal["CM", "FO"] = "CM",
         raise_errors: bool = False,
     ) -> pd.DataFrame:
@@ -702,7 +843,7 @@ class BhavcopyClient:
         start: Union[str, _date, datetime, pd.Timestamp],
         end: Union[str, _date, datetime, pd.Timestamp],
         *,
-        series: str = "EQ",
+        series: SeriesSpec = EQUITY_SERIES,
         exchange: Literal["CM", "FO"] = "CM",
         on_missing: Literal["skip", "raise"] = "skip",
         progress: bool = False,
@@ -715,6 +856,10 @@ class BhavcopyClient:
         clients.
 
         Args:
+            series: Series to keep, as in :meth:`bhavcopy_async`. Defaults to
+                :data:`EQUITY_SERIES` = ``('EQ', 'BE')``, so a scrip that debuts in ``BE`` and
+                migrates to ``EQ`` weeks later comes back as one continuous history instead of a
+                truncated one.
             on_missing: ``'skip'`` (default) records the date in
                 ``attrs['bfinance_bhavcopy_missing_dates']`` and moves on. ``'raise'`` aborts on
                 the first date with no archive — use it when a gap is a bug, not a holiday.
@@ -724,12 +869,13 @@ class BhavcopyClient:
             raise ValueError(
                 f"on_missing={on_missing!r} is not supported. Must be 'skip' or 'raise'."
             )
-        clean_series = validate_series(series)
+        clean_series = series_request_attr(series)
         clean_exchange = validate_exchange(exchange)
         candidates = iter_trading_days(start, end)
 
         frames: List[pd.DataFrame] = []
         missing: List[str] = []
+        observed_series: set = set()
         for candidate in candidates:
             url = archive_url(candidate, clean_exchange)
             if progress:
@@ -744,10 +890,14 @@ class BhavcopyClient:
                     )
                 continue
             day_frame = parse_bhavcopy(
-                unzip_bhavcopy(payload, url=url), series=clean_series, url=url
+                unzip_bhavcopy(payload, url=url), series=series, url=url
             )
             if day_frame.empty:
                 continue
+            # Accumulated before the attrs are dropped: the range answer to "which series did I
+            # actually get" is the union over the days that returned rows, which is a measurement
+            # no single day can make.
+            observed_series.update(day_frame.attrs.get(SERIES_INCLUDED_ATTR, ()))
             # Drop per-day attrs: after a merge they would be a lie (they'd describe one day, not
             # the whole span). Provenance is re-asserted on the combined frame below.
             day_frame.attrs.clear()
@@ -756,6 +906,7 @@ class BhavcopyClient:
         merged_attrs: Dict[str, Any] = {
             "bfinance_provenance": PROVENANCE,
             "bfinance_series": clean_series,
+            SERIES_INCLUDED_ATTR: tuple(sorted(observed_series)),
             "bfinance_exchange": clean_exchange,
             "bfinance_requested_start": to_date(start).isoformat(),
             "bfinance_requested_end": to_date(end).isoformat(),
@@ -788,7 +939,7 @@ class BhavcopyClient:
         start: Union[str, _date, datetime, pd.Timestamp],
         end: Union[str, _date, datetime, pd.Timestamp],
         *,
-        series: str = "EQ",
+        series: SeriesSpec = EQUITY_SERIES,
         exchange: Literal["CM", "FO"] = "CM",
         on_missing: Literal["skip", "raise"] = "skip",
         progress: bool = False,
@@ -822,7 +973,7 @@ def _default_client() -> BhavcopyClient:
 def bhavcopy(
     date: Union[str, _date, datetime, pd.Timestamp],
     *,
-    series: str = "EQ",
+    series: SeriesSpec = EQUITY_SERIES,
     exchange: Literal["CM", "FO"] = "CM",
     raise_errors: bool = False,
 ) -> pd.DataFrame:
@@ -831,6 +982,10 @@ def bhavcopy(
     Truthful EOD bars for the whole segment on one day. Sets
     ``attrs['bfinance_synthetic_ohlc'] = False`` — the fix for the fabricated
     ``Open=prev_close`` / ``High=+0.2%`` bars in :mod:`bfinance.market.ohlcv`.
+
+    ``series`` defaults to :data:`EQUITY_SERIES` = ``('EQ', 'BE')``, so a scrip that debuts in the
+    trade-to-trade segment is returned from its first session. Pass ``series='EQ'`` for the old
+    behaviour, or ``series=None`` for no filter at all.
 
     Import from the module, not the package: the package does not re-export this name, because
     ``bfinance.nse.bhavcopy`` is the module.
@@ -849,6 +1004,7 @@ def bhavcopy_range(
     start: Union[str, _date, datetime, pd.Timestamp],
     end: Union[str, _date, datetime, pd.Timestamp],
     *,
+    series: SeriesSpec = EQUITY_SERIES,
     exchange: Literal["CM", "FO"] = "CM",
     on_missing: Literal["skip", "raise"] = "skip",
     progress: bool = False,
@@ -856,11 +1012,17 @@ def bhavcopy_range(
     """Module-level shortcut for :meth:`BhavcopyClient.bhavcopy_range`.
 
     Walks the NSE trading calendar over ``[start, end]`` and stacks every day that has an
-    archive, skipping weekends without a request. Defaults to ``series='EQ'``.
+    archive, skipping weekends without a request. Defaults to :data:`EQUITY_SERIES`
+    (``'EQ'`` and ``'BE'``), so a listing's first session is not silently dropped.
 
     >>> from bfinance.nse import bhavcopy_range                # doctest: +SKIP
     >>> ytd = bhavcopy_range("2026-01-01", "2026-09-25")        # doctest: +SKIP
     """
     return _default_client().bhavcopy_range(
-        start, end, exchange=exchange, on_missing=on_missing, progress=progress
+        start,
+        end,
+        series=series,
+        exchange=exchange,
+        on_missing=on_missing,
+        progress=progress,
     )
