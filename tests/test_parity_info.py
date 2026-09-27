@@ -37,10 +37,74 @@ def test_exchange_mapping_ns_bo_bare():
     assert resolve_exchange("RELIANCE") == "NSE"
 
 
+@pytest.mark.parametrize(
+    "symbol,expected",
+    [
+        # suffixed forms
+        ("RELIANCE.NS", "NSE"),
+        ("RELIANCE.NSE", "NSE"),
+        ("RELIANCE.BO", "BSE"),
+        ("RELIANCE.BSE", "BSE"),
+        # bare NSE name -> NSE (the default)
+        ("RELIANCE", "NSE"),
+        ("TCS", "NSE"),
+        # bare numeric BSE scrip code -> BSE. This is the branch that has to exist, because
+        # screener.in addresses BSE companies by scrip code, and it is reached only when there
+        # is no exchange suffix to short-circuit on.
+        ("500112", "BSE"),
+        ("500325", "BSE"),
+        ("532540", "BSE"),
+        # NSE serials are numeric too, so bare-numeric->BSE is a heuristic with real false
+        # positives. Pinned so the tradeoff is visible rather than accidental.
+        ("RELIANCE-EQ", "NSE"),
+        ("RELIANCE-SM", "NSE"),
+        ("RELIANCE-ST", "NSE"),
+        # case and whitespace insensitivity
+        ("  reliance.ns  ", "NSE"),
+        ("reliance.bo", "BSE"),
+        ("lt", "NSE"),
+    ],
+)
+def test_resolve_exchange_covers_every_branch(symbol, expected):
+    """
+    Branch-complete coverage for :func:`resolve_exchange`.
+
+    Added because the previous tests covered only the three suffix cases. The
+    ``base.isdigit() -> "BSE"`` branch had **no** coverage at all: every prior test supplied an
+    explicit ``.BO``/``.NS`` suffix, which returns before that line is ever reached.
+    """
+    from bfinance.market.quotes import resolve_exchange
+
+    assert resolve_exchange(symbol) == expected
+
+
 def test_quote_engine_exchange_mapping():
-    assert QuoteEngine.build_info_dict(_profile("RELIANCE.NS"))["exchange"] == "NSE"
-    assert QuoteEngine.build_info_dict(_profile("500112.BO"))["exchange"] == "BSE"
-    assert QuoteEngine.build_info_dict(_profile("RELIANCE"))["exchange"] == "NSE"
+    """
+    ``QuoteEngine`` must agree with :func:`resolve_exchange` for the same inputs.
+
+    Previously this used ``_profile("500112.BO")``, which cannot occur in production --
+    ``profile.symbol`` is the *bare* screener symbol, because exchange suffixes are stripped
+    before the upstream call. So the test exercised the easy suffix branch and left the bare
+    scrip-code path -- the one that actually breaks, and the one issue 07 and issue 08 touch --
+    unverified.
+    """
+    for symbol, expected in [
+        ("RELIANCE.NS", "NSE"),
+        ("500112.BO", "BSE"),
+        ("RELIANCE", "NSE"),
+        ("500112", "BSE"),
+    ]:
+        assert QuoteEngine.build_info_dict(_profile(symbol))["exchange"] == expected, symbol
+
+
+def test_quote_engine_agrees_with_resolve_exchange_on_bare_scrip_code():
+    """The specific case the old fixture missed, pinned as its own test."""
+    from bfinance.market.quotes import resolve_exchange
+
+    bare = "500112"
+    assert resolve_exchange(bare) == "BSE"
+    assert QuoteEngine.build_info_dict(_profile(bare))["exchange"] == "BSE"
+    assert FastInfo(_profile(bare)).exchange == "BSE"
 
 
 def test_fast_info_exchange_mapping():

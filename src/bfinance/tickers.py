@@ -78,7 +78,7 @@ class Tickers:
         start: Optional[Union[str, datetime]] = None,
         end: Optional[Union[str, datetime]] = None,
         actions: bool = True,
-        auto_adjust: bool = True,
+        auto_adjust: bool = False,
         group_by: str = "column",
         threads: bool = True,
         **kwargs,

@@ -10,6 +10,7 @@ import pytest
 import bfinance as bf
 
 
+@pytest.mark.live
 def test_prebuilt_screens():
     """Verify built-in institutional screeners run and return structured DataFrames."""
     # 1. Coffee Can screen
@@ -33,6 +34,7 @@ def test_prebuilt_screens():
     assert isinstance(df_custom, pd.DataFrame)
 
 
+@pytest.mark.live
 def test_export_to_excel(tmp_path):
     """Verify t.to_excel() creates a valid multi-tab Excel financial model workbook."""
     t = bf.Ticker("RELIANCE")
@@ -49,6 +51,7 @@ def test_export_to_excel(tmp_path):
             assert sheet in excel_file.sheet_names, f"Missing sheet: {sheet}"
 
 
+@pytest.mark.live
 def test_document_download_url_resolution():
     """Verify document and concall transcript download URLs."""
     t = bf.Ticker("TCS", cache_ttl_hours=0.0)

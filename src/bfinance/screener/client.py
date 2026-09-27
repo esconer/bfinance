@@ -6,12 +6,32 @@ import asyncio
 import logging
 import os
 import random
+import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import httpx
 
 logger = logging.getLogger("bfinance")
+
+#: Every screener.in company page carries its numeric id in ``data-company-id``. This is how a
+#: symbol is resolved without touching the search route.
+_COMPANY_ID_RE = re.compile(r'data-company-id="(\d+)"')
+
+
+def extract_company_id(html: str) -> Optional[int]:
+    """Read the numeric company id off a screener.in company page, or ``None`` if absent.
+
+    screener.in's robots.txt contains ``Disallow: /*?q=``, and the search route is
+    ``/api/company/search/?q=...`` — so the previous resolver was calling a disallowed endpoint,
+    and the failure surfaced as a silently-empty profile that looked like missing data. The id
+    rides on the page the client was already fetching, so removing the search call also removes a
+    request rather than adding one.
+    """
+    if not html:
+        return None
+    m = _COMPANY_ID_RE.search(html)
+    return int(m.group(1)) if m else None
 
 # Global pacing state shared across all client instances so concurrent
 # Ticker clients respect one rate limit instead of bursting N×.
@@ -54,6 +74,25 @@ USER_AGENTS = [
 ]
 
 
+class _DefaultCache:
+    """Sentinel for the ``cache`` argument: the caller did not choose, so the
+    ``cache_ttl_hours`` default applies.
+
+    The parameter used to default to ``None``, which made two opposite intents
+    spell the same thing. ``cache=None`` is the obvious way to say "do not cache",
+    but ``cache or (SQLiteCache(...) if ...)`` collapsed it into "build the real
+    home-directory cache" — a caller who believed they had disabled caching was
+    silently reading and writing ``~/.bfinance/cache.db``. An omitted argument and
+    an explicit ``None`` are now distinct values with distinct meanings.
+    """
+
+    def __repr__(self) -> str:
+        return "<default cache>"
+
+
+USE_DEFAULT_CACHE = _DefaultCache()
+
+
 class ScreenerClient:
     """
     Production-hardened client with IP protection, rate-limit avoidance, proxy routing, and caching.
@@ -68,14 +107,19 @@ class ScreenerClient:
         max_retries: int = 3,
         proxy: Optional[str] = None,
         min_request_interval_ms: float = 150.0,
-        cache: Optional[SQLiteCache] = None,
+        cache: Union[SQLiteCache, None, _DefaultCache] = USE_DEFAULT_CACHE,
     ):
         self.timeout = timeout
         self.max_retries = max_retries
         self.proxy = proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.min_request_interval_ms = min_request_interval_ms
         self._last_request_time = 0.0
-        self.cache = cache or (SQLiteCache(default_ttl_hours=cache_ttl_hours) if cache_ttl_hours > 0 else None)
+        # Omitted -> honour cache_ttl_hours. Explicit None -> no caching at all.
+        # Explicit cache -> use that object. The three cases used to be two.
+        if isinstance(cache, _DefaultCache):
+            self.cache = SQLiteCache(default_ttl_hours=cache_ttl_hours) if cache_ttl_hours > 0 else None
+        else:
+            self.cache = cache
         self.parser = ScreenerHTMLParser()
 
     def _get_browser_headers(self) -> Dict[str, str]:
@@ -188,6 +232,22 @@ class ScreenerClient:
         """
         Search companies on Screener.in by name, symbol, or scrip code.
         Returns list of {'id': int, 'name': str, 'url': str}.
+
+        Raises:
+            UpstreamServiceError: the search endpoint did not answer 200. Screener.in
+                IP-blocks (HTTP 403), and returning an empty list for that made a block
+                indistinguishable from a genuine no-match, which callers then reported
+                to the user as a delisted ticker. An empty list now means only one
+                thing: the request succeeded and nothing matched.
+            RateLimitExceededError: HTTP 429 after the retries are exhausted.
+
+        ⚠ **This route is disallowed by screener.in's robots.txt** (``Disallow: /*?q=``), so there is
+        no compliant way to use it. **No internal code path calls it any more** —
+        :meth:`resolve_company_id` reads ``data-company-id`` off the company page instead, which is
+        both compliant and one request cheaper. It is kept only because it is public API and is the
+        sole way to search by company *name*. A caller who invokes it is knowingly stepping outside
+        the published policy. This is an interim state pending a name-search replacement, not a
+        recommendation.
         """
         clean_q = normalize_symbol(query)
         cache_key = f"screener_search_{clean_q}"
@@ -199,7 +259,15 @@ class ScreenerClient:
         url = f"{self.BASE_URL}/api/company/search/"
         resp = await self._send_with_retry(url, params={"q": clean_q})
         if resp.status_code != 200:
-            return []
+            # This URL is a fixed route, not symbol-keyed, so a non-200 here can never
+            # mean "no such ticker" — there is no ticker in it. _send_with_retry has
+            # already exhausted its retries on 429/5xx, so whatever lands here is a
+            # hard failure (403 block, 404 route change, 4xx). Classify, don't guess.
+            raise UpstreamServiceError(
+                f"Screener.in search returned HTTP {resp.status_code} for '{clean_q}'. "
+                f"This is an upstream failure, not an empty result set "
+                f"(a 403 means the request was blocked)."
+            )
 
         try:
             results = resp.json()
@@ -210,17 +278,37 @@ class ScreenerClient:
             return []
 
     async def resolve_company_id(self, symbol: str) -> Optional[int]:
-        """Resolve numeric company ID from symbol."""
+        """Resolve the numeric company id from a symbol.
+
+        Reads ``data-company-id`` off ``/company/{symbol}/``.
+
+        ⚠ This **used to** call ``/api/company/search/?q=...`` via :meth:`search`. screener.in's
+        robots.txt disallows ``/*?q=``, so the entire fundamentals path was riding on a disallowed
+        endpoint — and when it was blocked, ``search()`` returned an empty list, ``None`` was
+        returned here, and the caller carried on with ``company_id=0`` and produced a silently
+        empty profile. A block was indistinguishable from missing data.
+
+        The page carries the id, so the compliant route costs the same one request and the
+        ``data-company-id`` extraction is exact rather than a best-match guess against search
+        ordering.
+
+        Returns:
+            The company id, or ``None`` if the page has no id attribute (a page shape change, which
+            is now visible as a missing attribute rather than a swallowed HTTP error).
+        """
         clean = normalize_symbol(symbol)
-        results = await self.search(clean)
-        if results:
-            for item in results:
-                url = item.get("url", "")
-                if f"/company/{clean}/" in url or f"/company/{clean.upper()}/" in url:
-                    return item.get("id")
-            # If no exact match, return first item's ID
-            return results[0].get("id")
-        return None
+        resp = await self._send_with_retry(f"{self.BASE_URL}/company/{clean}/")
+        if resp.status_code != 200:
+            raise UpstreamServiceError(
+                f"Could not resolve company id for '{clean}': Screener.in returned "
+                f"HTTP {resp.status_code} for /company/{clean}/"
+            )
+        comp_id = extract_company_id(resp.text)
+        if comp_id is None:
+            logger.warning(
+                "No data-company-id on /company/%s/ - Screener.in markup may have changed.", clean
+            )
+        return comp_id
 
     async def get_company_profile(self, ticker: str, force_refresh: bool = False) -> CompanyProfile:
         """
@@ -239,10 +327,7 @@ class ScreenerClient:
                 except Exception:
                     pass
 
-        # 1. Resolve Company ID
-        comp_id = await self.resolve_company_id(symbol)
-
-        # 2. Fetch Main HTML (Consolidated first, fallback to Standalone)
+        # 1. Fetch Main HTML (Consolidated first, fallback to Standalone)
         is_consolidated = True
         url = f"{self.BASE_URL}/company/{symbol}/consolidated/"
         resp = await self._send_with_retry(url)
@@ -259,6 +344,16 @@ class ScreenerClient:
 
         main_html = resp.text
         final_url = str(resp.url)
+
+        # 2. Company id rides on the page we just fetched.
+        #    This used to be a separate resolve_company_id() call first, which hit the
+        #    robots-disallowed /api/company/search/?q= route. Reading it here costs no extra request
+        #    and cannot be silently blocked into a company_id=0 profile.
+        comp_id = extract_company_id(main_html)
+        if comp_id is None:
+            logger.warning(
+                "No data-company-id on %s - peers will be skipped and company_id will be 0.", final_url
+            )
 
         # 3. Fetch Dynamic Peers HTML if company ID is available
         peers_html = None
@@ -314,6 +409,9 @@ class ScreenerClient:
         days: 30 (1M), 180 (6M), 365 (1Y), 1095 (3Y), 1825 (5Y), 3652 (10Y), 10000 (Max).
         """
         symbol = normalize_symbol(ticker)
+        # Reachable only when search() actually succeeded and matched nothing, so
+        # TickerNotFoundError here is now a claim about the symbol, not about the
+        # upstream being unreachable.
         comp_id = await self.resolve_company_id(symbol)
         if not comp_id:
             raise TickerNotFoundError(f"Cannot resolve company ID for '{symbol}'")

@@ -82,15 +82,32 @@ def test_to_yfinance_does_not_mutate_native():
 
 @pytest.mark.live
 def test_live_annual_income_statement():
+    """
+    Live shape check only. Deliberately asserts nothing that issue 04 will change.
+
+    The previous version of this test asserted::
+
+        assert all(isinstance(c, str) for c in df.columns)
+        assert "Sales" in df.index
+        assert "Net Profit" in df.index
+
+    All three of those lock the *native* Indian Rs-Cr shape into a method whose docstring claims
+    yfinance parity. They are not a specification -- they are the defect, restated as a test.
+    Which makes them worse than no test at all, because they make the 0.2.0 break look like a
+    regression when it lands.
+
+    The real contract now lives in ``tests/test_stmt_accessor_contract.py``, offline and xfail-
+    strict, where it can fail today without reddening the suite.
+    """
     from bfinance.ticker import Ticker
 
     t = Ticker("RELIANCE.NS")
     df = t.get_income_stmt(freq="yearly")
     assert isinstance(df, pd.DataFrame)
     assert not df.empty
-    assert "Sales" in df.index
-    assert "Net Profit" in df.index
-    assert all(isinstance(c, str) for c in df.columns)
+    # At least two comparable periods, whatever their representation.
+    assert len(df.columns) >= 2
+    assert len(df.index) >= 3
 
 
 @pytest.mark.live

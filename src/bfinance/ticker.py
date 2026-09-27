@@ -15,12 +15,12 @@ from bfinance.market.corporate import CorporateActionsEngine
 from bfinance.market.derivatives import DerivativesEngine
 from bfinance.market.fast_info import FastInfo
 from bfinance.market.ohlcv import OHLCVEngine
-from bfinance.market.quotes import QuoteEngine
+from bfinance.market.quotes import QuoteEngine, build_history_metadata
 from bfinance.models.company import CompanyProfile, Concall
 from bfinance.models.options import OptionChain
 from bfinance.screener.client import ScreenerClient
 from bfinance.utils.exceptions import BFinanceError, TickerNotFoundError, UpstreamServiceError
-from bfinance.utils.symbols import normalize_symbol, resolve_exchange_and_symbol
+from bfinance.utils.symbols import resolve_exchange_and_symbol
 
 
 class Ticker:
@@ -52,6 +52,13 @@ class Ticker:
         self._profile: Optional[CompanyProfile] = None
         self._info: Optional[Dict[str, Any]] = None
         self._fast_info: Optional[FastInfo] = None
+        # Last 1y history frame `info` already fetched, reused by history_metadata so the
+        # previous close is a real bar instead of a fabricated constant -- and so metadata
+        # costs no extra round trip.
+        self._history_for_metadata: Optional[pd.DataFrame] = None
+        # True while the last profile load failed and produced only the empty fallback.
+        # Without it, one cached fallback latches _info/_fast_info shut for good.
+        self._profile_degraded: bool = False
 
     # ------------------------------------------------------------- Internal loader
     def _run_async(self, coro):
@@ -75,11 +82,17 @@ class Ticker:
                 self._profile = self._run_async(
                     self.screener_client.get_company_profile(self.symbol, force_refresh=force_refresh)
                 )
+                self._profile_degraded = False
             except (TickerNotFoundError, UpstreamServiceError, BFinanceError) as e:
                 if self.raise_errors:
                     raise
                 logger.warning("%s: No fundamentals found (%s). Returning empty profile fallback.", self.ticker, e)
-                self._profile = CompanyProfile(
+                # The fallback is RETURNED, never stored. `self._profile` is what suppresses
+                # the refetch below, so assigning it here turned a single transient block
+                # (a 403 lasts one request) into a permanently empty Ticker for the life of
+                # the object. Leaving it None means the next access retries.
+                self._profile_degraded = True
+                return CompanyProfile(
                     symbol=self.symbol,
                     company_id=0,
                     name=self.ticker,
@@ -93,11 +106,14 @@ class Ticker:
                 self._profile = await self.screener_client.get_company_profile(
                     self.symbol, force_refresh=force_refresh
                 )
+                self._profile_degraded = False
             except (TickerNotFoundError, UpstreamServiceError, BFinanceError) as e:
                 if self.raise_errors:
                     raise
                 logger.warning("%s: No fundamentals found (%s). Returning empty profile fallback.", self.ticker, e)
-                self._profile = CompanyProfile(
+                # Not cached — see the note in _ensure_profile().
+                self._profile_degraded = True
+                return CompanyProfile(
                     symbol=self.symbol,
                     company_id=0,
                     name=self.ticker,
@@ -111,7 +127,7 @@ class Ticker:
         FastInfo container matching yfinance 0.2+ `ticker.fast_info`.
         Provides quick scalar attributes (last_price, market_cap, 52w high/low).
         """
-        if self._fast_info is None:
+        if self._fast_info is None or self._profile_degraded:
             profile = self._ensure_profile()
             latest_p = profile.ratios.current_price
             hist = None
@@ -130,7 +146,7 @@ class Ticker:
         """
         Unified 180+ key metrics dictionary matching yfinance `ticker.info`.
         """
-        if self._info is None:
+        if self._info is None or self._profile_degraded:
             profile = self._ensure_profile()
             latest_p = profile.ratios.current_price
             hist = None
@@ -140,6 +156,7 @@ class Ticker:
                     latest_p = float(hist["Close"].iloc[-1])
             except Exception:
                 hist = None
+            self._history_for_metadata = hist
             self._info = QuoteEngine.build_info_dict(profile, latest_price=latest_p, history=hist)
         return self._info
 
@@ -151,18 +168,43 @@ class Ticker:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = True,
+        auto_adjust: bool = False,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,
         rounding: bool = False,
         timeout: int = 10,
         raise_errors: bool = False,
+        ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
+        adjust_corporate_actions: bool = True,
     ) -> pd.DataFrame:
         """
         Historical OHLCV DataFrame matching exact yfinance `ticker.history()` signature and schema.
         Columns: ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'] (+ ['Dividends', 'Stock Splits'] if actions=True)
         Index: pd.DatetimeIndex
+
+        Args:
+            ohlc: ``"bhavcopy"`` (default) returns real published OHLC from the NSE bhavcopy
+                and flags the frame ``attrs["bfinance_synthetic_ohlc"] = False``. Pass
+                ``"synthetic"`` to opt in to the legacy close-only path, whose Open/High/Low
+                are derived from Close (flagged ``True``).
+            adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
+                cumulative share-count factor over the instrument's whole corporate-action
+                history, so the default path matches yfinance's own ``auto_adjust=False`` series
+                bar-for-bar (the bhavcopy is as-traded; Yahoo's raw OHLC are not). ``False``
+                returns the as-traded series, which is what the exchange printed. Volume is never
+                scaled, and dividends never touch O/H/L/C -- they go on ``Adj Close``, which is
+                therefore not always equal to ``Close`` (it is, when no dividend ex-date falls in
+                the window). ``attrs["bfinance_corporate_actions_applied"]`` records which basis
+                came back.
+            auto_adjust: must be False. bfinance's default path already returns yfinance's
+                adjusted basis, and yfinance's ``auto_adjust=True`` differs only in the column
+                set (no ``Adj Close``), so True raises rather than silently changing which
+                columns come back.
+
+        Raises:
+            AdjustmentNotAvailableError: ``auto_adjust=True``.
+            RealOHLCUnavailableError: default source could not serve the window.
         """
         return self._run_async(
             self.ohlcv_engine.fetch_history(
@@ -180,6 +222,8 @@ class Ticker:
                 rounding=rounding,
                 timeout=timeout,
                 raise_errors=raise_errors,
+                ohlc=ohlc,
+                adjust_corporate_actions=adjust_corporate_actions,
             )
         )
 
@@ -191,13 +235,15 @@ class Ticker:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = True,
+        auto_adjust: bool = False,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,
         rounding: bool = False,
         timeout: int = 10,
         raise_errors: bool = False,
+        ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
+        adjust_corporate_actions: bool = True,
     ) -> pd.DataFrame:
         """Async variant of history()."""
         return await self.ohlcv_engine.fetch_history(
@@ -215,6 +261,8 @@ class Ticker:
             rounding=rounding,
             timeout=timeout,
             raise_errors=raise_errors,
+            ohlc=ohlc,
+            adjust_corporate_actions=adjust_corporate_actions,
         )
 
     # --------------------------------------------------- Financial Statements API
@@ -367,15 +415,19 @@ class Ticker:
     def option_chain(self, date: Optional[str] = None) -> OptionChain:
         """
         Calls & Puts OptionChain container with Strikes, IV, OI, Volume.
-        Empty chain when underlying not F&O-gated (deterministic, no random data).
+
+        Always returns an **empty** chain. The previous implementation, reached only when
+        ``self.options`` was non-empty, delegated to
+        ``DerivativesEngine.generate_option_chain`` — which had no network path, priced options
+        with a closed-form heuristic, and drew ``volume``/``openInterest`` from a seeded RNG. Those
+        are random numbers shaped like an exchange quote, so returning them is worse than returning
+        nothing. The generator has been deleted; see its docstring for what a real source would
+        need.
+
+        An empty chain is the truthful answer for a symbol with no verified F&O membership, and
+        matches yfinance's ``()`` for a non-F&O underlying.
         """
-        if not self.options:
-            return DerivativesEngine.empty_option_chain()
-        profile = self._ensure_profile()
-        cmp = profile.ratios.current_price
-        if not cmp or cmp <= 0:
-            raise UpstreamServiceError("current price unavailable for option chain")
-        return DerivativesEngine.generate_option_chain(self.symbol, cmp=cmp, expiry_date=date)
+        return DerivativesEngine.empty_option_chain()
 
     @property
     def major_holders(self) -> pd.DataFrame:
@@ -546,33 +598,14 @@ class Ticker:
     def history_metadata(self) -> Dict[str, Any]:
         """
         Metadata dictionary for historical data matching yfinance 1.7.0 `ticker.history_metadata`.
+
+        Previous closes come from real history (or ``None`` when there is none). This used to
+        report ``currentPrice * 0.995`` -- a fabricated constant that happens to land inside
+        the real adjustment factor, so it looked plausible while never being a traded price.
         """
-        cmp = self.info.get("currentPrice") or 0.0
-        return {
-            "currency": "INR",
-            "symbol": f"{self.symbol}.NS" if self.exchange == "NSE" else f"{self.symbol}.BO",
-            "exchangeName": self.exchange,
-            "instrumentType": "EQUITY",
-            "firstTradeDate": 1112328000, # 2005-04-01
-            "regularMarketTime": int(datetime.now().timestamp()),
-            "gmtoffset": 19800,
-            "timezone": "IST",
-            "exchangeTimezoneName": "Asia/Kolkata",
-            "regularMarketPrice": cmp,
-            "chartPreviousClose": cmp * 0.995,
-            "previousClose": cmp * 0.995,
-            "scale": 3,
-            "priceHint": 2,
-            "currentTradingPeriod": {
-                "pre": {"timezone": "Asia/Kolkata", "start": 32400, "end": 33300, "gmtoffset": 19800},
-                "regular": {"timezone": "Asia/Kolkata", "start": 33300, "end": 55800, "gmtoffset": 19800},
-                "post": {"timezone": "Asia/Kolkata", "start": 55800, "end": 57600, "gmtoffset": 19800},
-            },
-            "tradingPeriods": [],
-            "dataGranularity": "1d",
-            "range": "1y",
-            "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
-        }
+        # Read `info` first: it is what populates the reused 1y history frame below.
+        current_price = self.info.get("currentPrice")
+        return build_history_metadata(self.ticker, self._history_for_metadata, current_price)
 
     def get_history_metadata(self) -> Dict[str, Any]:
         """Alias for history_metadata matching yfinance."""

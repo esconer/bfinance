@@ -6,6 +6,7 @@ import pytest
 import bfinance as bf
 
 
+@pytest.mark.live
 def test_screener_ratio_search():
     """Verify searching ratio catalog returns official definitions and units from Screener."""
     results = bf.ratios.search("Piotroski")
@@ -16,6 +17,7 @@ def test_screener_ratio_search():
     assert "description" in first
 
 
+@pytest.mark.live
 def test_calculated_custom_ratios():
     """Verify calculation of advanced institutional ratios."""
     t = bf.Ticker("RELIANCE")

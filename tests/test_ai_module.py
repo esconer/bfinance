@@ -8,6 +8,7 @@ import bfinance as bf
 from bfinance.ai import AIContextBuilder, AIPromptFactory, BFinanceAITools
 
 
+@pytest.mark.live
 def test_ai_markdown_context():
     """Verify to_ai_context(format='markdown') produces comprehensive markdown dossier."""
     t = bf.Ticker("RELIANCE")
@@ -22,6 +23,7 @@ def test_ai_markdown_context():
     assert "Qualitative Analysis (Pros & Cons)" in md
 
 
+@pytest.mark.live
 def test_ai_json_context():
     """Verify to_ai_context(format='json') produces valid structured dictionary."""
     t = bf.Ticker("TCS")
@@ -37,6 +39,7 @@ def test_ai_json_context():
     assert "concalls" in data
 
 
+@pytest.mark.live
 def test_ai_prompt_factory():
     """Verify prompt builders generate actionable, context-rich prompts for LLMs."""
     t = bf.Ticker("RELIANCE")
@@ -57,6 +60,7 @@ def test_ai_prompt_factory():
     assert "Forward Revenue, Margin, and Capex Guidance" in concall_prompt
 
 
+@pytest.mark.live
 def test_ai_tool_schemas_and_execution():
     """Verify agent tool calling schemas and tool execution."""
     # 1. OpenAI function calling schemas

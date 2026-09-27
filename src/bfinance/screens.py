@@ -112,7 +112,11 @@ class Screen:
                         "PE": r.get("trailingPE"),
                         "ROCE_%": r.get("returnOnCapitalEmployed"),
                         "ROE_%": (r.get("returnOnEquity") * 100) if r.get("returnOnEquity") else None,
-                        "DivYield_%": (r.get("dividendYield") * 100) if r.get("dividendYield") else None,
+                        # dividendYield is already a PERCENT, matching yfinance (verified live:
+                        # RELIANCE.NS 0.49, TCS.NS 3.12, HDFCBANK.NS 1.77). The *100 that used to
+                        # be here inflated every yield 100x, so a 0.15% payer reported as 15.00.
+                        # Do not "fix" this by dividing - see the note in _UNITS below.
+                        "DivYield_%": r.get("dividendYield"),
                         "BookValue": r.get("bookValue"),
                     })
             except Exception as e:
@@ -211,11 +215,17 @@ class ScreenerRegistry:
     @property
     def high_dividend_yield(self) -> Screen:
         """Dividend champions: Yield > 2.5% and ROCE > 12%."""
+
         def _filter(t: Ticker) -> bool:
             r = t.info
+            # Both of these are PERCENTS, not decimal fractions. The 0.025 threshold that used to
+            # be here was a fraction compared against a percent, so it admitted anything yielding
+            # above 0.025% -- i.e. every dividend payer at all, and the advertised 2.5% cut was
+            # never actually applied. Measured before the fix: the screen returned 34 rows whose
+            # lowest "DivYield_%" was 15.00 (Trent, real yield 0.15%).
             dy = r.get("dividendYield") or 0.0
             roce = r.get("returnOnCapitalEmployed") or 0.0
-            return dy >= 0.025 and roce >= 12.0
+            return dy >= 2.5 and roce >= 12.0
 
         return Screen(
             name="High Dividend Champions",

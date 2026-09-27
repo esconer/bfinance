@@ -1,15 +1,161 @@
+import asyncio
 import logging
 from datetime import datetime
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 import numpy as np
 import pandas as pd
 
+try:  # real-OHLC source; the opt-in synthetic path must keep working without it
+    from bfinance.nse.bhavcopy import bhavcopy_range
+except ImportError:  # pragma: no cover - depends on whether that module is installed
+    bhavcopy_range = None
+
 logger = logging.getLogger("bfinance")
 
-from bfinance.market.corporate import CorporateActionsEngine
+from bfinance.market.corporate import (
+    ACTIONS_SOURCE_NONE,
+    ACTIONS_SOURCE_NSE,
+    ACTIONS_SOURCE_SCREENER,
+    CorporateActionsEngine,
+)
 from bfinance.screener.client import ScreenerClient
 from bfinance.utils.exceptions import BFinanceError, TickerNotFoundError
 from bfinance.utils.symbols import normalize_symbol
+
+IST = "Asia/Kolkata"
+
+# First date the cookie-free NSE archive publishes a full bhavcopy carrying real O/H/L
+# (verified live 2026-09-26). The real-OHLC path cannot serve anything older.
+BHAVCOPY_FIRST_DATE = "2024-01-01"
+
+OHLC_SOURCES = ("bhavcopy", "synthetic")
+
+#: The columns a corporate-action back-adjustment restates. ``Volume`` is deliberately absent.
+#:
+#: A back-adjustment puts a past price on today's share count; it says nothing about how many
+#: shares actually changed hands that day, and the share count NSE published for a day is a fact
+#: about that day. Multiplying volume by the same factor would report a traded share count that
+#: never traded (RELIANCE's 28-Oct-2024 bonus would make the prior fortnight's volume look halved
+#: on days when the full, doubled share count traded). "Scale everything by the factor" is the
+#: obvious wrong move, and this tuple is where that is written down.
+ADJUSTED_PRICE_COLUMNS = ("Open", "High", "Low", "Close")
+
+# Key names a whole-market bhavcopy frame may carry the scrip identity under. The daily
+# file lists every NSE symbol, so a range fetch is sliced down to one symbol by these.
+_SYMBOL_KEYS = ("SYMBOL", "TICKER", "SECURITY", "SCIP_CODE", "SCIP CODE")
+
+
+class RealOHLCUnavailableError(BFinanceError):
+    """The real-OHLC source could not serve the request, so no bars are returned.
+
+    Raised instead of falling back to fabricated Open/High/Low. An empty frame here would
+    be indistinguishable from "this instrument has no data" and a fabricated frame would be
+    indistinguishable from real data, so the default source fails loudly instead.
+    """
+
+
+class AdjustmentNotAvailableError(BFinanceError):
+    """auto_adjust=True was requested but no authoritative adjustment factors exist."""
+
+
+def _localize_ist(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` sorted by a tz-aware Asia/Kolkata DatetimeIndex (yfinance NSE convention)."""
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(IST)
+    else:
+        df.index = df.index.tz_convert(IST)
+    df.index.name = "Date"
+    df.sort_index(inplace=True)
+    return df
+
+
+def _select_symbol_rows(market: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Slice a whole-market bhavcopy frame down to one symbol.
+
+    A daily bhavcopy file is ~3,600 rows covering the entire exchange, so the range is fetched
+    once and filtered here rather than issuing one request per symbol. Tolerates a symbol
+    column (``SYMBOL``/``TICKER``/...) or a symbol level on a MultiIndex; a frame carrying no
+    symbol key at all is already scoped to a single instrument and is returned unchanged.
+    """
+    if isinstance(market.index, pd.MultiIndex):
+        for level in market.index.names:
+            if level is not None and str(level).strip().upper() in _SYMBOL_KEYS:
+                market = market.reset_index(level=level)
+                break
+    key = next((c for c in market.columns if str(c).strip().upper() in _SYMBOL_KEYS), None)
+    if key is None:
+        return market
+    return market.loc[market[key].astype(str).str.strip().str.upper().eq(symbol)]
+
+
+def _dividend_adjustment_factor(df: pd.DataFrame) -> pd.Series:
+    """Cumulative DIVIDEND factor per bar, from the actions already merged into ``df``.
+
+    factor(t) = product over dividends dated *after* t of (1 - D / prev_close).
+
+    Two properties are deliberate, both measured against yfinance 1.7.0 rather than assumed:
+
+    * **Only ex-dates inside the returned window can appear.** ``1 - D / prev_close`` needs the
+      close on the trading day before the ex-date, and a bhavcopy range fetch stops at the
+      requested ``end``. An ex-date past that boundary has no prev_close to divide by, and
+      substituting a stale close from the end of the window would fabricate a factor -- so those
+      dividends are left out and the omission is documented in the docstring of
+      :meth:`OHLCVEngine.fetch_history` rather than papered over.
+    * **It is read from the AS-TRADED ``Close``.** The step is a ratio of two rupee amounts in the
+      same basis, (prev_close - D) / prev_close, so it is scale-invariant: NSE's unadjusted rupee
+      dividend against an as-traded prev_close gives the same number as yfinance's adjusted
+      dividend against its split-adjusted prev_close. Feeding an already-adjusted close back in
+      would double-count instead.
+    """
+    factor = pd.Series(1.0, index=df.index)
+    dividends = df.get("Dividends")
+    if dividends is None or float(dividends.abs().sum()) == 0:
+        return factor
+    close = df["Close"].astype(float)
+    prev_close = close.shift(1)
+    prev_close = prev_close.where(prev_close > 0, close)
+    step = 1.0 - dividends.astype(float) / prev_close
+    return (factor * step.where(step > 0, 1.0))[::-1].cumprod()[::-1].shift(-1).fillna(1.0)
+
+
+def _split_adjustment_factor(index: pd.DatetimeIndex, splits) -> pd.Series:
+    """Cumulative SHARE-COUNT factor per bar, from the instrument's WHOLE action history.
+
+    factor(t) = product over splits/bonuses dated *after* t of 1/S.
+
+    This is the factor that belongs on the price columns, and it is the whole-history product
+    rather than only the events that land inside the bar window. That distinction is the entire
+    HDFCBANK case: its 1:1 bonus has an ex-date of 2025-08-26, so for a 2024-09..2024-11 request
+    no event ever appears in the frame, and a window-only product is 1.0 for every bar while
+    yfinance -- which serves split-adjusted prices for the whole series -- halves all 53 of them.
+    A share-count event restates every earlier bar, so it must be read from the full history,
+    which is exactly why :meth:`CorporateActionsEngine.resolve_actions_async` asks for the whole
+    history rather than the caller's window.
+
+    No price is needed to build it, so unlike the dividend factor this one is exact for ex-dates
+    outside the returned window.
+    """
+    factor = pd.Series(1.0, index=index)
+    if splits is None or getattr(splits, "empty", True) or not isinstance(index, pd.DatetimeIndex):
+        return factor
+    ratios = pd.to_numeric(splits, errors="coerce").dropna()
+    ratios = ratios[ratios > 0]
+    if ratios.empty:
+        return factor
+    dates = pd.DatetimeIndex(ratios.index)
+    dates = (
+        dates.tz_localize(index.tz) if dates.tz is None else dates.tz_convert(index.tz)
+    )
+    # side="left" -> first bar at or after the ex-date, so the prefix strictly BEFORE it (the
+    # bars the event restates) is the part that carries 1/S. The ex-date bar itself does not.
+    positions = np.searchsorted(index.asi8, dates.asi8, side="left")
+    multipliers = np.ones(len(index) + 1, dtype=float)
+    for position, ratio in zip(positions, ratios.to_numpy(dtype=float)):
+        if position > 0:
+            multipliers[:position] *= 1.0 / ratio
+    return pd.Series(multipliers[: len(index)], index=index)
 
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -48,9 +194,55 @@ class OHLCVEngine:
     """
     Historical OHLCV data builder converting deep price feeds into yfinance-identical DataFrames.
 
-    Provenance: Close + Volume are real values from the Screener chart API
-    (chart API is close-only); Open/High/Low are synthesized from Close;
-    Adj Close == Close (unadjusted).
+    Provenance is per-source and recorded in ``df.attrs["bfinance_synthetic_ohlc"]``:
+
+    - ``ohlc="bhavcopy"`` (default): Open/High/Low/Close/Volume are real, published daily
+      values from the NSE bhavcopy archive. Flag is ``False``.
+    - ``ohlc="synthetic"`` (explicit opt-in): Close + Volume are real values from the
+      close-only Screener chart API, but Open/High/Low are synthesized from Close
+      (previous close open, +/-0.2% envelope) and the flag is ``True``.
+
+    Adjusted vs as-traded
+    ---------------------
+    The NSE bhavcopy is *as traded*. yfinance's own ``auto_adjust=False`` series is not: Yahoo
+    serves OHLC already restated onto the current share count, so for RELIANCE over
+    2024-09-01..2024-11-15 the two disagreed by the full action factor (14/53 bars matched; the
+    39 before the 28-Oct-2024 1:1 bonus were off by exactly 2.0x) -- see
+    ``tests/test_bhavcopy_parity_adjust.py``. Trendlyne, an independent third source, agreed with
+    yfinance on 7 of 8 symbols, so yfinance's basis is the reference and a drop-in must reproduce
+    it. So the default path multiplies Open/High/Low/Close by the cumulative **share-count**
+    factor -- but NOT Volume, which is a share count, not a price (see
+    :data:`ADJUSTED_PRICE_COLUMNS`) -- and that factor is the product over the instrument's WHOLE
+    corporate-action history, not just the events that land inside the window. It has to be:
+    HDFCBANK's 1:1 bonus has a 2025-08-26 ex-date, so for a 2024-09..2024-11 request nothing in
+    the frame shows it, and a window-only product is 1.0 for every bar where yfinance halves all
+    53. ``adjust_corporate_actions=False`` returns the as-traded series, for anyone reconstructing
+    what actually traded.
+
+    ``Adj Close`` is the full back-adjusted series: the share-count factor *and* the dividend
+    factor. Dividends are deliberately NOT on the price columns, because yfinance's raw OHLC are
+    not -- TCS, with Rs 238 of dividends after the window, matches bhavcopy to 5e-8. yfinance's
+    own code says the same thing: ``utils.auto_adjust`` derives its scale factor from
+    ``Adj Close / Close``, so its raw OHLC carry splits and not dividends. The two-factor shape
+    is not a detail; folding the dividend factor into O/H/L/C puts TCS 7.6% from yfinance.
+
+    The factors come from NSE's own corporate-actions feed
+    (:mod:`bfinance.nse.corporate_actions`) -- true ex-dates, rupee amounts as actually payable,
+    and bonus / face-value-sub-division ratios. With no action at all the factors are 1.0
+    everywhere, so ``Adj Close == Close`` is then a fact about the instrument rather than an
+    unfinished calculation. ``df.attrs["bfinance_actions_source"]`` always names the feed that
+    produced the ``Dividends`` / ``Stock Splits`` columns, so a frame built on the legacy
+    fiscal-year-end approximation can never be mistaken for one carrying real ex-dates.
+
+    Degradation
+    -----------
+    If the actions feed is unreachable, errors, or does not index the instrument, the frame
+    cannot honestly claim yfinance parity, so it is returned **as-traded and flagged**
+    (``attrs["bfinance_corporate_actions_applied"] = False``) with a warning, rather than
+    silently unadjusted. This package's convention is lenient degradation -- an answer plus a
+    truthful label -- so the third option (unadjusted and unlabelled) is the one thing that is
+    never done. ``attrs["bfinance_corporate_actions_applied_detail"]`` says which of the four
+    cases applies: explicit opt-out, actions not requested, synthetic path, or no source.
     """
 
     PERIOD_DAYS_MAP = {
@@ -68,8 +260,27 @@ class OHLCVEngine:
         "max": 10000,
     }
 
-    def __init__(self, screener_client: ScreenerClient):
+    def __init__(self, screener_client: ScreenerClient, corporate_actions_client=None):
+        """Args:
+        screener_client: the Screener.in client, used by the legacy close-only path and by the
+            labelled fiscal-year-end fallback for corporate actions.
+        corporate_actions_client: optional
+            :class:`bfinance.nse.corporate_actions.CorporateActionsClient`. Injected by tests and by
+            a caller who wants one configured client (proxy, timeout, pacing) shared across a
+            batch. When ``None`` the real client is constructed per history call, so the default
+            behaviour is unchanged and no new dependency is introduced.
+        """
         self.screener = screener_client
+        self.corporate_actions = corporate_actions_client
+
+    @staticmethod
+    def _history_columns(auto_adjust: bool, back_adjust: bool, actions: bool) -> list:
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        if not auto_adjust and not back_adjust:
+            cols.insert(4, "Adj Close")
+        if actions:
+            cols.extend(["Dividends", "Stock Splits"])
+        return cols
 
     async def fetch_history(
         self,
@@ -80,27 +291,61 @@ class OHLCVEngine:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = True,
+        auto_adjust: bool = False,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,
         rounding: bool = False,
         timeout: int = 10,
         raise_errors: bool = False,
+        ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
+        adjust_corporate_actions: bool = True,
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV DataFrame matching exact yfinance schema:
         Columns: ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'] (+ ['Dividends', 'Stock Splits'] if actions=True)
         Index: pd.DatetimeIndex localized to Asia/Kolkata (yfinance NSE convention).
 
-        Provenance: Close + Volume are real values from the Screener chart API
-        (chart API is close-only); Open/High/Low are synthesized from Close;
-        Adj Close == Close (unadjusted).
+        Args:
+            ohlc: Bar source. ``"bhavcopy"`` (default) returns real published O/H/L from the
+                NSE bhavcopy archive and reports ``attrs["bfinance_synthetic_ohlc"] = False``.
+                ``"synthetic"`` is the explicit opt-in for the legacy close-only Screener path
+                that derives Open/High/Low from Close; it reports the flag as ``True``.
+            adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
+                cumulative SHARE-COUNT factor, which is what yfinance's own ``auto_adjust=False``
+                series carries -- bhavcopy is as-traded and Yahoo's raw OHLC are not, so without
+                this the two disagree by the full factor over entire date ranges (RELIANCE,
+                2024-09-01..2024-11-15: 14/53 bars matched, the other 39 off by 2.0x across the
+                28-Oct 1:1 bonus). The factor is the product over the instrument's whole
+                corporate-action history, so an ex-date outside the window still restates the
+                window (HDFCBANK's 2025-08-26 bonus halves all 53 bars of a 2024-09..2024-11
+                request). ``False`` returns the as-traded series, which is what the bhavcopy
+                natively is and what trade reconstruction needs. Volume is never scaled either
+                way, and dividends never touch O/H/L/C -- see the class docstring.
+                ``attrs["bfinance_corporate_actions_applied"]`` records which basis came back, in
+                every combination.
+            auto_adjust: Refused when True (:class:`AdjustmentNotAvailableError`) -- see below.
 
-        yfinance 1.7.0 parity notes (verified live vs RELIANCE.NS):
-        - auto_adjust=True (default) drops "Adj Close"; OHLC are the
-          adjusted values. Because this feed is unadjusted (Adj == Close),
-          adjustment is a no-op scale of 1.0 and only the column drop applies.
+        yfinance 1.7.0 parity notes (measured live, bhavcopy / yfinance over
+        2024-09-01..2024-11-15):
+        - auto_adjust defaults to False and True is refused -- but for a *column-set* reason now,
+          not a missing-input one. The default path already returns yfinance's adjusted basis, so
+          the only thing auto_adjust=True would change is dropping "Adj Close" and the action
+          columns, which bfinance keeps.
+        - The default path is back-adjusted and matches yfinance bar-for-bar: RELIANCE and
+          HDFCBANK were 14/53 and 0/53 before the fix and 53/53 (all four of O/H/L/C, to within
+          1e-4) after. With no dividend ex-date inside the window -- which is the case for both --
+          "Adj Close" equals "Close", as it must for a share-count-adjusted series.
+        - **``Adj Close`` is not always equal to ``Close``, and must not be.** A dividend ex-date
+          inside the window is what separates them, because yfinance's raw OHLC do not carry
+          dividends (TCS: factor 1.000000 despite Rs 238 paid after the window) while its
+          "Adj Close" does (TCS Adj Close / Close = 0.929060 on 2024-09-02).
+        - Known gap, measured and not papered over: a dividend with an ex-date AFTER the window
+          does not reach bfinance's ``Adj Close``, because 1 - D / prev_close needs the close on
+          the day before that ex-date and the bhavcopy fetch stops at ``end``. Substituting the
+          last close in the window would fabricate a factor, so those are left out. The measured
+          size: RELIANCE 0.86%, HDFCBANK 3.03% on 2024-09-02. O/H/L/C are unaffected (dividends
+          are not on them), and the share-count factor has no such gap because it needs no price.
         - back_adjust=True drops "Adj Close" (no-op scale, same reason).
         - end dates are exclusive (start inclusive), matching yfinance.
         - interval="1wk" resamples daily bars into Monday-labeled weekly
@@ -112,9 +357,39 @@ class OHLCVEngine:
           returning unrepaired data. Unsupported intraday intervals also raise.
         - prepost/keepna/back_adjust are honored as explicit no-ops for NSE
           daily bars (yfinance returns identical frames for them here).
+
+        Raises:
+            AdjustmentNotAvailableError: ``auto_adjust=True``.
+            RealOHLCUnavailableError: ``ohlc="bhavcopy"`` and the archive could not serve the
+                window. Never answered with fabricated bars.
+            TickerNotFoundError: the archive answered but holds no rows for this symbol and
+                ``raise_errors=True``.
+            ValueError: unknown ``ohlc`` source.
         """
         if repair:
             raise NotImplementedError("repair=True is not supported by bfinance")
+        if ohlc not in OHLC_SOURCES:
+            raise ValueError(f"ohlc must be one of {OHLC_SOURCES}, got {ohlc!r}")
+        if auto_adjust:
+            raise AdjustmentNotAvailableError(
+                "auto_adjust=True is still refused by bfinance, but the reason is now a "
+                "column-set difference rather than a missing input. Adjustment factors DO "
+                "exist and are real: bfinance reads dividends (true ex-date, rupees actually "
+                "payable) and bonus / face-value-sub-division ratios from NSE's own "
+                "corporate-actions feed (bfinance.nse.corporate_actions), and it already "
+                "applies them -- the default auto_adjust=False path returns a back-adjusted "
+                "series, with Open/High/Low/Close carrying the cumulative share-count factor "
+                "over the instrument's whole history and 'Adj Close' carrying that plus the "
+                "dividend factor, which is the yfinance basis. yfinance's "
+                "auto_adjust=True answers the same question with a DIFFERENT column set: it "
+                "drops 'Adj Close' and the corporate-action columns. bfinance keeps them, so "
+                "accepting True would silently change which columns come back -- a worse "
+                "surprise than a refusal. For the as-traded series (what actually printed on "
+                "the exchange) pass adjust_corporate_actions=False; either way "
+                "df.attrs['bfinance_corporate_actions_applied'] records the basis of the "
+                "prices you got, and df.attrs['bfinance_actions_source'] records where the "
+                "factor came from."
+            )
         norm_interval = (interval or "1d").lower()
         if norm_interval in ("1d", "1day", "daily"):
             resample = None
@@ -143,74 +418,147 @@ class OHLCVEngine:
             delta_days = (now_dt - start_dt).days + 10
             days = max(days, delta_days)
 
-        # Fetch from Screener Chart API (provides adjusted daily Close & Volume over 20+ years)
-        try:
-            chart_df = await self.screener.get_chart_timeseries(clean_symbol, metric="price", days=days)
-        except Exception as e:
-            if raise_errors:
-                raise
-            logger.warning("%s: No price data found (%s). Returning empty DataFrame.", symbol, e)
-            chart_df = pd.DataFrame()
+        synthetic = ohlc == "synthetic"
+        if synthetic:
+            bars = await self._fetch_synthetic_bars(clean_symbol, days, raise_errors)
+        else:
+            bars = await self._fetch_bhavcopy_bars(
+                symbol, clean_symbol, start, end, days, raise_errors
+            )
 
-        if chart_df.empty or "Price" not in chart_df.columns:
-            cols = ["Open", "High", "Low", "Close", "Volume"]
-            if not auto_adjust and not back_adjust:
-                cols.insert(4, "Adj Close")
-            if actions:
-                cols.extend(["Dividends", "Stock Splits"])
+        if bars.empty:
+            cols = self._history_columns(auto_adjust, back_adjust, actions)
             empty = pd.DataFrame(
                 columns=cols,
-                index=pd.DatetimeIndex([], name="Date", tz="Asia/Kolkata"),
+                index=pd.DatetimeIndex([], name="Date", tz=IST),
             )
-            empty.attrs["bfinance_synthetic_ohlc"] = True
+            empty.attrs["bfinance_synthetic_ohlc"] = synthetic
+            # No bars means no adjustment could be performed. Say so, rather than leaving the key
+            # absent and letting a consumer assume the default.
+            empty.attrs["bfinance_ohlc_source"] = ohlc
+            empty.attrs["bfinance_actions_source"] = ACTIONS_SOURCE_NONE
+            empty.attrs["bfinance_actions_source_detail"] = (
+                "no bars in the requested window, so no corporate actions were resolved"
+            )
+            empty.attrs["bfinance_corporate_actions_applied"] = False
+            empty.attrs["bfinance_corporate_actions_applied_detail"] = (
+                "no bars in the requested window, so there is nothing to adjust"
+            )
             return empty
 
-        # Localize to Asia/Kolkata (yfinance NSE convention)
-        chart_df = chart_df.copy()
-        chart_df.index = pd.to_datetime(chart_df.index)
-        if chart_df.index.tz is None:
-            chart_df.index = chart_df.index.tz_localize("Asia/Kolkata")
-        else:
-            chart_df.index = chart_df.index.tz_convert("Asia/Kolkata")
-        chart_df.sort_index(inplace=True)
+        df = bars.copy()
 
-        close_series = chart_df["Price"].astype(float)
-        volume_series = (
-            chart_df["Volume"].astype(float)
-            if "Volume" in chart_df.columns
-            else pd.Series(0.0, index=chart_df.index)
-        )
-
-        df = pd.DataFrame(index=chart_df.index)
-        df["Close"] = close_series
-        df["Adj Close"] = close_series
-
-        # Previous close for daily open reference
-        prev_close = close_series.shift(1).bfill()
-        df["Open"] = prev_close
-
-        # High and Low envelope
-        df["High"] = np.maximum(df["Open"], df["Close"]) * 1.002
-        df["Low"] = np.minimum(df["Open"], df["Close"]) * 0.998
-
-        df["Volume"] = volume_series.fillna(0).astype(np.int64)
-
+        actions_source = None
+        actions_detail = ""
+        splits_history = None
+        dividends_history = None
         if actions:
-            # Merge real dividends/splits; zeros only when genuinely unavailable
+            # Real dividends/splits with true ex-dates from NSE's own corporate-actions feed.
+            #
+            # The whole history is requested, not the bar window, and that is deliberate: the feed
+            # answers with an empty list both for "nothing happened in this window" and for "I do
+            # not index this instrument", and only a full-history answer tells the two apart. The
+            # window is applied on merge (merge_actions_into_history joins by date), so the wider
+            # request costs a few kilobytes and buys a meaningful empty answer.
+            #
+            # It is also what makes the share-count adjustment possible at all: a bonus restates
+            # every bar before its ex-date, so the product has to run over events the window never
+            # shows (HDFCBANK's 2025-08-26 1:1 bonus halves all 53 bars of a 2024-09..2024-11
+            # request). The full series is therefore kept here, not just the in-window merge.
+            #
+            # One request per symbol, and a range is always sent -- the per-symbol feed is capped
+            # at 20 rows without one, which would silently truncate the dividend history.
             try:
-                get_profile = getattr(self.screener, "get_company_profile", None)
-                if get_profile is None:
-                    raise AttributeError("screener has no get_company_profile")
-                profile = await get_profile(clean_symbol)
-                dividends = CorporateActionsEngine.extract_dividends(profile)
-                splits = CorporateActionsEngine.extract_splits(profile)
-                df = CorporateActionsEngine.merge_actions_into_history(
-                    df, dividends=dividends, splits=splits
+                resolved = await CorporateActionsEngine.resolve_actions_async(
+                    clean_symbol,
+                    client=self.corporate_actions,
+                    load_profile=self._load_profile,
                 )
-            except Exception as e:
-                logger.debug("%s: corporate actions unavailable (%s); using zeros.", symbol, e)
+                df = CorporateActionsEngine.merge_actions_into_history(
+                    df, dividends=resolved.dividends, splits=resolved.splits
+                )
+                # The full-history share-count series is what makes the price adjustment possible
+                # at all -- see the note where the factor is built.
+                splits_history = resolved.splits
+                dividends_history = resolved.dividends
+                actions_source = resolved.source
+                actions_detail = resolved.detail
+                df.attrs.update(resolved.extra)
+            except Exception as e:  # noqa: BLE001 - resolve_actions_async already degrades
+                logger.warning(
+                    "%s: corporate actions could not be merged (%s); using zeros, which mean "
+                    "'not known' rather than 'none happened'.",
+                    symbol, e,
+                )
                 df["Dividends"] = 0.0
                 df["Stock Splits"] = 0.0
+                actions_source = ACTIONS_SOURCE_NONE
+                actions_detail = f"merge failed: {e}"
+
+        # Two factors, because yfinance uses two, and using one for both is the defect this
+        # replaces. Measured live against yfinance 1.7.0 `auto_adjust=False` (bhavcopy / yfinance):
+        #
+        #   RELIANCE  2024-09..2024-11   2.000000   <- 1:1 bonus 2024-10-28
+        #   HDFCBANK  2024-09..2024-11   2.000000   <- 1:1 bonus 2025-08-26 (outside the window)
+        #   TCS       2024-09..2024-11   1.000000   <- Rs 238 of later dividends, factor 1.0
+        #
+        # TCS is the load-bearing row: its raw OHLC are NOT restated for dividends, which is
+        # exactly what yfinance's own code does (`utils.auto_adjust` scales by Adj Close / Close,
+        # and Yahoo's raw OHLC are already split-adjusted). So the SHARE-COUNT factor goes on the
+        # price columns and the DIVIDEND factor goes on Adj Close alone. Applying the dividend
+        # factor to O/H/L/C would put TCS 7.6% away from yfinance.
+        #
+        # The share-count factor is the product over the WHOLE history, not over the window, and
+        # that is the whole HDFCBANK case: its bonus ex-date is 2025-08-26, so for a
+        # 2024-09..2024-11 request no bar in the frame mentions it while yfinance halves all 53.
+        # The synthetic path keeps its legacy in-window factor instead, byte for byte, because
+        # that path is an explicit opt-in that this change does not touch.
+        #
+        # Order matters: the dividend step divides by the previous AS-TRADED close, so both
+        # factors are derived from the un-scaled frame before any column is multiplied.
+        split_source = df.get("Stock Splits") if synthetic else splits_history
+        split_factor = _split_adjustment_factor(df.index, split_source)
+        dividend_factor = _dividend_adjustment_factor(df)
+        adjusted_close = df["Close"].astype(float) * split_factor * dividend_factor
+
+        applied, applied_detail = self._resolve_adjustment(
+            synthetic=synthetic,
+            actions=actions,
+            adjust_corporate_actions=adjust_corporate_actions,
+            actions_source=actions_source,
+            actions_detail=actions_detail,
+        )
+        if adjust_corporate_actions and not synthetic and actions and not applied:
+            # The one degradation that is not the caller's own choice. attrs carries the label for
+            # whoever inspects the frame later; this is for whoever is watching the log now.
+            logger.warning(
+                "%s: yfinance parity NOT established. %s. The prices are as traded; "
+                "attrs['bfinance_corporate_actions_applied'] is False.",
+                symbol, applied_detail,
+            )
+        if applied:
+            for column in ADJUSTED_PRICE_COLUMNS:
+                df[column] = df[column].astype(float) * split_factor
+        # Adj Close always carries BOTH factors, on either path. That is what makes it usable: on
+        # the adjusted path it is Close x the dividend factor, and on the as-traded path it is the
+        # full adjusted series, recoverable from the published prices. The flag, not the column,
+        # tells the two apart.
+        df["Adj Close"] = adjusted_close
+
+        # The one part of the adjustment this call cannot make, named rather than buried in a
+        # docstring: a dividend with an ex-date after the last bar needs the close on the day
+        # before it, and that bar is outside the fetch. Recorded so a consumer measuring against
+        # yfinance can see the size of the gap instead of discovering it. (Measured: RELIANCE
+        # 0.86%, HDFCBANK 3.03% on Adj Close, uniform across the window, zero effect on O/H/L/C.)
+        if dividends_history is not None and not getattr(dividends_history, "empty", True):
+            pending = dividends_history[
+                (dividends_history.index > df.index[-1]) & (dividends_history > 0)
+            ]
+            if len(pending):
+                df.attrs["bfinance_actions_unapplied_dividends"] = [
+                    {"ex_date": str(stamp.date()), "amount": float(amount)}
+                    for stamp, amount in pending.items()
+                ]
 
         if rounding:
             df["Open"] = df["Open"].round(2)
@@ -219,13 +567,7 @@ class OHLCVEngine:
             df["Close"] = df["Close"].round(2)
             df["Adj Close"] = df["Adj Close"].round(2)
 
-        cols = ["Open", "High", "Low", "Close", "Volume"]
-        if not auto_adjust and not back_adjust:
-            cols.insert(4, "Adj Close")
-        if actions:
-            cols.extend(["Dividends", "Stock Splits"])
-
-        df = df[cols]
+        df = df[self._history_columns(auto_adjust, back_adjust, actions)]
         df.index.name = "Date"
 
         # Filter by start (inclusive) / end (exclusive) matching yfinance
@@ -246,5 +588,251 @@ class OHLCVEngine:
         if resample is not None and not df.empty:
             df = _resample_ohlcv(df, resample)
 
-        df.attrs["bfinance_synthetic_ohlc"] = True
+        if synthetic:
+            df.attrs["bfinance_synthetic_ohlc"] = True
+        else:
+            df.attrs["bfinance_synthetic_ohlc"] = False
+        # Two independent facts, both required, because either one alone lets a consumer believe
+        # the wrong thing: WHERE the bars came from, and WHETHER those bars are restated onto
+        # today's share count. A frame can be real-but-unadjusted (as-traded bhavcopy) and a
+        # frame can be synthetic; neither implies the other.
+        df.attrs["bfinance_ohlc_source"] = ohlc
+        df.attrs["bfinance_corporate_actions_applied"] = applied
+        df.attrs["bfinance_corporate_actions_applied_detail"] = applied_detail
+        # Which feed produced the Dividends / Stock Splits columns, so a frame built on the
+        # fiscal-year-end approximation is never mistaken for one carrying true ex-dates.
+        df.attrs["bfinance_actions_source"] = actions_source or ACTIONS_SOURCE_NONE
+        df.attrs["bfinance_actions_source_detail"] = actions_detail
+        if actions and actions_source == ACTIONS_SOURCE_NSE:
+            df.attrs["bfinance_adj_close_source"] = (
+                "back-adjusted Close by NSE ex-dated corporate actions: O/H/L/C carry the "
+                "share-count factor over the whole history, Adj Close carries that plus the "
+                "dividend factor for ex-dates inside the window"
+                if applied
+                else "back-adjusted Close by NSE ex-dated corporate actions (prices as traded; "
+                "only Adj Close is restated)"
+            )
+        if actions and actions_source == ACTIONS_SOURCE_SCREENER and applied:
+            df.attrs["bfinance_adj_close_source"] = (
+                "back-adjusted Close by the labelled Screener.in fiscal-year-end approximation, "
+                "whose ex-dates are ~4-5 months late; O/H/L/C carry the share-count factor and "
+                "Adj Close adds the in-window dividend factor"
+            )
         return df
+
+    @staticmethod
+    def _resolve_adjustment(
+        synthetic: bool,
+        actions: bool,
+        adjust_corporate_actions: bool,
+        actions_source: Optional[str],
+        actions_detail: str,
+    ) -> tuple:
+        """Decide whether the factor is applied to the price columns, and say why either way.
+
+        Returns ``(applied, detail)``. The detail string is not decoration: it is the only place a
+        consumer learns WHICH of the four not-adjusted cases they are in, and the rule is that
+        there is no fifth case. Every path out of here either applies the factor or names the
+        reason it did not.
+
+        A requested-but-unresolvable factor degrades to as-traded plus this label rather than
+        raising. bfinance's convention is lenient degradation -- an answer with a truthful label --
+        and the alternative (a raise) would take out a price feed that is otherwise perfectly
+        good, because a corporate-actions endpoint had a bad minute. What is never acceptable is
+        the third option, which is silently unadjusted.
+        """
+        if synthetic:
+            # The close-only Screener feed has no corporate-action series of its own, and this
+            # path is already flagged as fabricated OHLC. Touching it would be a second change
+            # to a frame whose contract is "unchanged legacy behaviour".
+            return False, (
+                "synthetic path: close-only Screener feed with derived Open/High/Low is never "
+                "back-adjusted"
+            )
+        if not adjust_corporate_actions:
+            return False, (
+                "as-traded bhavcopy prices, requested explicitly (adjust_corporate_actions=False)"
+            )
+        if not actions:
+            # The factor is derived from the actions, so asking for no actions means there is
+            # nothing to apply. Recorded rather than quietly assumed, because the caller did ask
+            # for the default basis and did not get it.
+            return False, (
+                "corporate actions were not requested (actions=False), so no factor exists to "
+                "apply; pass actions=True for the yfinance-parity adjusted basis"
+            )
+        if actions_source in (None, ACTIONS_SOURCE_NONE):
+            return False, (
+                "as-traded bhavcopy prices: no corporate-action source could be resolved, so "
+                f"yfinance parity is NOT established. {actions_detail}"
+            )
+        if actions_source == ACTIONS_SOURCE_SCREENER:
+            return True, (
+                "O/H/L/C back-adjusted by the labelled Screener.in fiscal-year-end approximation; "
+                "amounts track yfinance but ex-dates run ~4-5 months late, so this basis is "
+                "approximate. See bfinance_actions_source_detail"
+            )
+        return True, (
+            f"O/H/L/C back-adjusted by the cumulative share-count factor from {actions_source} "
+            f"(over the instrument's whole history); Adj Close adds the dividend factor for "
+            f"ex-dates inside the window"
+        )
+
+    async def _load_profile(self, symbol: str):
+        """Load a Screener.in company profile — the *approximation* fallback only.
+
+        Deliberately a thin delegation to the injected screener client. It is reached solely when the
+        NSE corporate-actions feed is unreachable, and the caller labels the result accordingly, so
+        the approximation can never quietly become the primary source.
+        """
+        loader = getattr(self.screener, "get_company_profile", None)
+        if loader is None:
+            return None
+        return await loader(symbol)
+
+    async def _fetch_synthetic_bars(
+        self, clean_symbol: str, days: int, raise_errors: bool
+    ) -> pd.DataFrame:
+        """
+        Opt-in legacy path: Close + Volume from the close-only Screener chart API, with
+        Open/High/Low *invented* from Close. Kept only behind ``ohlc="synthetic"``.
+        """
+        try:
+            chart_df = await self.screener.get_chart_timeseries(clean_symbol, metric="price", days=days)
+        except Exception as e:
+            if raise_errors:
+                raise
+            logger.warning("%s: No price data found (%s). Returning empty DataFrame.", clean_symbol, e)
+            return pd.DataFrame()
+
+        if chart_df.empty or "Price" not in chart_df.columns:
+            return pd.DataFrame()
+
+        chart_df = _localize_ist(chart_df)
+        close_series = chart_df["Price"].astype(float)
+        volume_series = (
+            chart_df["Volume"].astype(float)
+            if "Volume" in chart_df.columns
+            else pd.Series(0.0, index=chart_df.index)
+        )
+
+        df = pd.DataFrame(index=chart_df.index)
+        df["Close"] = close_series
+
+        # Previous close for daily open reference
+        prev_close = close_series.shift(1).bfill()
+        df["Open"] = prev_close
+
+        # High and Low envelope
+        df["High"] = np.maximum(df["Open"], df["Close"]) * 1.002
+        df["Low"] = np.minimum(df["Open"], df["Close"]) * 0.998
+
+        df["Volume"] = volume_series.fillna(0).astype(np.int64)
+        return df
+
+    async def _fetch_bhavcopy_bars(
+        self, symbol: str, clean_symbol: str,
+        start: Optional[Union[str, datetime]], end: Optional[Union[str, datetime]],
+        days: int, raise_errors: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Real published Open/High/Low/Close/Volume for one symbol from the NSE bhavcopy archive.
+
+        The whole-market range is fetched ONCE and sliced to ``clean_symbol`` here, because a
+        single daily file already covers every NSE scrip: one request per symbol would
+        multiply traffic for no extra data. A window older than the archive is clamped with a
+        warning (logged, not silent); an archive that cannot answer at all raises rather than
+        returning fabricated bars, since an empty frame would be indistinguishable from
+        "this instrument has no data".
+        """
+        if bhavcopy_range is None:
+            raise RealOHLCUnavailableError(
+                f"{symbol}: the NSE bhavcopy source (bfinance.nse.bhavcopy) is not available in "
+                f"this build, and ohlc='bhavcopy' will not substitute invented bars. Install that "
+                f"module, or pass ohlc='synthetic' to opt in to the legacy close-only path "
+                f"(whose Open/High/Low are derived from Close)."
+            )
+
+        start_ts = self._window_start(start, days)
+        end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
+        floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
+        if start_ts < floor:
+            logger.warning(
+                "%s: requested window starts %s, before the bhavcopy archive begins (%s). "
+                "Returning only the covered range; use ohlc='synthetic' for older history.",
+                symbol, start_ts.date(), BHAVCOPY_FIRST_DATE,
+            )
+            start_ts = floor
+
+        try:
+            # sync/blocking client -> off the event loop so concurrent fetches stay concurrent
+            market = await asyncio.to_thread(
+                bhavcopy_range,
+                start_ts.strftime("%Y-%m-%d"),
+                end_ts.strftime("%Y-%m-%d"),
+            )
+        except BFinanceError:
+            # Already a typed, specific answer (NotAnNseSymbolError for a BSE scrip code,
+            # ParsingError for a schema change, ...). Do not blur it into a generic one.
+            raise
+        except Exception as e:
+            raise RealOHLCUnavailableError(
+                f"{symbol}: NSE bhavcopy unavailable for {start_ts.date()}..{end_ts.date()} ({e}). "
+                f"No bars returned; bfinance does not invent them."
+            ) from e
+
+        if market is None or getattr(market, "empty", True):
+            raise RealOHLCUnavailableError(
+                f"{symbol}: NSE bhavcopy returned no data for {start_ts.date()}..{end_ts.date()}. "
+                f"The archive covers {BHAVCOPY_FIRST_DATE} onward; an earlier window cannot be "
+                f"served with real OHLC. No bars returned."
+            )
+
+        missing = [c for c in ("Open", "High", "Low", "Close", "Volume") if c not in market.columns]
+        if missing:
+            raise RealOHLCUnavailableError(
+                f"{symbol}: NSE bhavcopy frame is missing {missing}; expected real OHLCV columns. "
+                f"Refusing to synthesize them."
+            )
+
+        rows = _select_symbol_rows(market, clean_symbol)
+        if rows.empty:
+            # Lenient by default, matching the package convention for a genuinely absent
+            # instrument -- but empty, never filled with invented bars.
+            if raise_errors:
+                raise TickerNotFoundError(
+                    f"{symbol}: not present in the NSE bhavcopy for "
+                    f"{start_ts.date()}..{end_ts.date()}."
+                )
+            logger.warning(
+                "%s: no bhavcopy rows in %s..%s. Returning empty DataFrame.",
+                symbol, start_ts.date(), end_ts.date(),
+            )
+            return rows
+
+        rows = _localize_ist(rows)
+        # Carry the source's own provenance record (provenance string, schema, dates the NSE
+        # published no archive for) onto the per-symbol frame, so a gap in the returned bars
+        # is explainable rather than mysterious.
+        rows.attrs = {k: v for k, v in market.attrs.items() if k != "bfinance_synthetic_ohlc"}
+        for col in ("Open", "High", "Low", "Close"):
+            rows[col] = pd.to_numeric(rows[col], errors="coerce")
+        rows["Volume"] = pd.to_numeric(rows["Volume"], errors="coerce").fillna(0).astype(np.int64)
+        unpriced = int(rows["Close"].isna().sum())
+        if unpriced:
+            logger.warning("%s: dropped %d bhavcopy row(s) with no usable close.", symbol, unpriced)
+            rows = rows[rows["Close"].notna()]
+        return rows
+
+    @staticmethod
+    def _window_start(start: Optional[Union[str, datetime]], days: int) -> pd.Timestamp:
+        """Inclusive window start, tz-aware IST, derived from ``start`` or the period length."""
+        if start is not None:
+            start_ts = pd.to_datetime(start)
+        else:
+            start_ts = pd.Timestamp.now(tz=IST) - pd.Timedelta(days=days)
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize(IST)
+        else:
+            start_ts = start_ts.tz_convert(IST)
+        return start_ts

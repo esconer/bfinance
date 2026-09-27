@@ -1,22 +1,53 @@
 """
 Corporate actions extractor (dividends, stock splits, bonus issues).
 
-Conventions (yfinance parity notes):
-- yfinance `ticker.dividends` is indexed by **ex-date**; this engine derives
-  annual payouts from Screener.in P&L (`Dividend Payout %` x `EPS in Rs`) and
-  dates them at the **fiscal year-end** (`Mar-31`, Asia/Kolkata). Amounts track
-  yfinance within ~5%; dates do NOT (ex-dates fall ~4-5 months later).
-- yfinance represents NSE 1:1 **bonus issues as a 2.0 split** (e.g. RELIANCE
-  2017-09-07, 2024-10-28); this engine does the same (equity-capital ratio).
+Two sources, and the difference between them is the whole point
+-------------------------------------------------------------
+This engine has two ways to answer "what happened to this share count, and when".
+
+**Primary — the NSE corporate-actions feed**
+(:mod:`bfinance.nse.corporate_actions`). Real events on their **true ex-dates**: the amount in
+rupees actually payable on that date, and the split/bonus ratio as filed. Verified live
+2026-09-27 against yfinance 1.7.0: 27 of 27 ex-dates matched to the day across RELIANCE, LICI,
+SHRIRAMFIN, BAJAJ-AUTO and HDFCBANK, and all 8 bonus / face-value-sub-division ratios checked
+agreed exactly. This is the source that makes ``Adj Close`` correct.
+
+**Fallback — Screener.in P&L** (the historical path, retained behind an explicit
+``fallback="screener"``). Derives annual payouts from ``Dividend Payout % x EPS in Rs`` and dates
+them at the **fiscal year end**, which is 4-5 months before the actual ex-date. Amounts track
+yfinance within ~5%; dates do not. This is an *approximation of a date*, so it is never used
+silently: :func:`resolve_actions` stamps the degraded source into ``df.attrs`` and warns, and the
+OHLCV path only reaches for it when the NSE feed is **unreachable** — never when NSE answers
+"no action", which is a real answer and must not be overwritten by a guess.
+
+yfinance parity notes that still hold for both paths:
+- yfinance ``ticker.dividends`` is indexed by **ex-date**; only the NSE path matches that.
+- yfinance represents NSE 1:1 **bonus issues as a 2.0 split** (e.g. RELIANCE 2017-09-07,
+  2024-10-28). Both paths do the same.
+- yfinance normalises every past dividend by all *subsequent* splits; the NSE feed does not. NSE's
+  unadjusted figure is the correct input for ``1 - D / prev_close``, which is defined in pre-action
+  rupees. Do not "fix" this by rescaling.
 """
 
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from bfinance.models.company import CompanyProfile
 
+logger = logging.getLogger("bfinance")
+
 YF_TZ = "Asia/Kolkata"
 ACTIONS_COLUMNS = ["Dividends", "Stock Splits"]
+
+#: Provenance tags. Exactly one of these describes the events in a returned frame; the tag is
+#: recorded in ``df.attrs["bfinance_actions_source"]`` so a consumer can tell a real ex-dated series
+#: from the fiscal-year-end approximation without inspecting the values.
+ACTIONS_SOURCE_NSE = "nse_corporate_actions"
+ACTIONS_SOURCE_SCREENER = "screener_fy_end_approximation"
+ACTIONS_SOURCE_NONE = "none"
+
 YF_MAJOR_HOLDERS_INDEX = [
     "insidersPercentHeld",
     "institutionsPercentHeld",
@@ -33,6 +64,23 @@ YF_CALENDAR_KEYS = [
     "Revenue Low",
     "Revenue Average",
 ]
+
+
+@dataclass
+class ResolvedActions:
+    """The outcome of resolving one symbol's corporate actions, with its provenance attached.
+
+    ``source`` is the single tag from :data:`ACTIONS_SOURCE_NSE`, :data:`ACTIONS_SOURCE_SCREENER`
+    or :data:`ACTIONS_SOURCE_NONE`. There is deliberately no combined value: two series are never
+    merged, averaged or reconciled, because a blended dividend series is synthetic in exactly the
+    same way a blended price series is, and it would be indistinguishable from a real one.
+    """
+
+    dividends: pd.Series
+    splits: pd.Series
+    source: str = ACTIONS_SOURCE_NONE
+    detail: str = ""
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 class CorporateActionsEngine:
@@ -293,3 +341,203 @@ class CorporateActionsEngine:
             action_map = dict(zip(_date_keys(s.index), s.values))
             df[col] = [float(action_map.get(k, 0.0)) for k in df_keys]
         return df
+
+    # ------------------------------------------------------------ NSE-backed resolution
+    #
+    # Everything below supersedes the two extractors above for the Adj Close path. The extractors
+    # stay because ``bfinance.ticker`` calls them directly for ``Ticker.dividends`` /
+    # ``Ticker.splits``, which is outside this change.
+
+    @classmethod
+    def from_actions_frame(
+        cls, actions: Optional[pd.DataFrame]
+    ) -> tuple:
+        """Split an :func:`bfinance.nse.corporate_actions.actions_frame` into two Series.
+
+        Returns ``(dividends, splits)``, each a tz-aware ``Asia/Kolkata`` Series named exactly as
+        the matching column, or an empty Series when the feed had nothing. The two are read from
+        their own columns and never cross-contaminated, because a rupee amount and a share ratio
+        are different quantities.
+        """
+        empty_d = pd.Series(dtype=float, name="Dividends")
+        empty_s = pd.Series(dtype=float, name="Stock Splits")
+        if actions is None or getattr(actions, "empty", True):
+            return empty_d, empty_s
+        dividends = pd.to_numeric(actions.get("Dividends"), errors="coerce").fillna(0.0)
+        splits = pd.to_numeric(actions.get("Stock Splits"), errors="coerce").fillna(0.0)
+        dividends.name, splits.name = "Dividends", "Stock Splits"
+        return dividends.astype(float), splits.astype(float)
+
+    @classmethod
+    async def resolve_actions_async(
+        cls,
+        symbol: str,
+        start: Optional[pd.Timestamp] = None,
+        end: Optional[pd.Timestamp] = None,
+        *,
+        client: Optional[Any] = None,
+        profile: Optional[CompanyProfile] = None,
+        fallback: str = "screener",
+        load_profile: Optional[Any] = None,
+    ) -> ResolvedActions:
+        """Resolve one symbol's dividends and splits, preferring the NSE ex-dated feed.
+
+        Called with no range it asks for the feed's **whole** history for the symbol — one request,
+        a few kilobytes — rather than the caller's window. That is not an optimisation choice, it is
+        what makes the empty answer interpretable:
+
+        * **The feed returns rows for this symbol.** It indexes this instrument and has an opinion
+          about the window. An empty result *within the window* is then a real statement — nothing
+          happened — and it is honoured. ``Adj Close == Close`` is then a fact.
+        * **The feed returns nothing at all for this symbol.** It does not index this instrument
+          (the feed is demonstrably incomplete at the tail: AAKASH has one row in thirty years, and
+          a stubbed or delisted name has none). That is *not* a statement about the window, so the
+          legacy approximation is consulted — loudly.
+
+        Conflating those two cases is the bug this method exists to avoid. Both produce an empty
+        list, and treating the second as the first would silently report "no dividend ever" for an
+        instrument the source simply does not cover.
+
+        On top of that, ``fallback="screener"`` also engages when the feed *raised* (network,
+        schema, rate limit). Either way the result is labelled: ``source`` is one of
+        :data:`ACTIONS_SOURCE_NSE`, :data:`ACTIONS_SOURCE_SCREENER` or :data:`ACTIONS_SOURCE_NONE`,
+        a warning is logged, and the caller records it in ``df.attrs``. The two sources are never
+        merged — a combined dividend series would be synthetic in the same way a blended price
+        series is, and just as hard to detect.
+        """
+        if fallback not in ("screener", "none"):
+            raise ValueError(f"fallback must be 'screener' or 'none', got {fallback!r}")
+
+        covers_symbol = False
+        try:
+            if client is None:
+                from bfinance.nse import corporate_actions as nse_ca
+
+                client = nse_ca.CorporateActionsClient()
+            actions = await client.actions_async(symbol, start=start, end=end)
+            covers_symbol = not getattr(actions, "empty", True)
+            if covers_symbol:
+                dividends, splits = cls.from_actions_frame(actions)
+                if start is not None or end is not None:
+                    dividends, splits = cls._clip(dividends, splits, start, end)
+                counts = dict(actions.attrs.get("bfinance_action_counts") or {})
+                return ResolvedActions(
+                    dividends=dividends,
+                    splits=splits,
+                    source=ACTIONS_SOURCE_NSE,
+                    detail=(
+                        f"NSE corporate-actions feed, {len(actions)} event date(s) "
+                        f"{counts or 'none'} in [{start}, {end}]"
+                    ),
+                    extra={
+                        "bfinance_actions_source_url": actions.attrs.get("bfinance_source_url"),
+                        "bfinance_actions_event_counts": counts,
+                        # Events NSE recorded that this module refuses to turn into a factor (buy
+                        # backs, rights, demergers, AGM notices, REIT/SML "Per Unit"
+                        # distributions). Surfaced so a consumer knows the feed was read and what
+                        # it declined.
+                        "bfinance_actions_unconverted_rows": int(
+                            actions.attrs.get("bfinance_unconverted_action_rows", 0) or 0
+                        ),
+                        "bfinance_actions_dividend_basis": actions.attrs.get(
+                            "bfinance_dividend_basis"
+                        ),
+                    },
+                )
+            reason = (
+                f"the NSE corporate-actions feed returned no rows at all for {symbol!r}, so it "
+                f"does not index this instrument"
+            )
+        except Exception as exc:  # noqa: BLE001 - any failure degrades, none propagates silently
+            reason = f"the NSE corporate-actions feed was unreachable ({exc})"
+            logger.debug("%s: NSE corporate actions unavailable (%s).", symbol, exc)
+
+        if fallback == "screener":
+            profile = await cls._maybe_load_profile(symbol, profile, load_profile)
+            if profile is not None:
+                dividends = cls.extract_dividends(profile)
+                splits = cls.extract_splits(profile)
+                logger.warning(
+                    "%s: %s. Falling back to the Screener.in fiscal-year-end approximation, so "
+                    "dividend DATES are ~4-5 months off the true ex-date and 'Adj Close' is "
+                    "approximate. Provenance is recorded in df.attrs['bfinance_actions_source'].",
+                    symbol, reason,
+                )
+                return ResolvedActions(
+                    dividends=dividends,
+                    splits=splits,
+                    source=ACTIONS_SOURCE_SCREENER,
+                    detail=(
+                        "Screener.in P&L approximation, dividends dated at fiscal year end; "
+                        f"{reason}"
+                    ),
+                    extra={"bfinance_actions_fallback_reason": reason},
+                )
+
+        # Either the fallback is disabled, or there was no profile to approximate from. Both are
+        # honest absences, and saying so beats emitting a fabricated ex-date.
+        logger.warning(
+            "%s: no corporate actions available because %s. Dividends and Stock Splits will be "
+            "0.0, which means 'not known', not 'none happened'.",
+            symbol, reason,
+        )
+        return ResolvedActions(
+            dividends=pd.Series(dtype=float, name="Dividends"),
+            splits=pd.Series(dtype=float, name="Stock Splits"),
+            source=ACTIONS_SOURCE_NONE,
+            detail=f"no corporate-action source available because {reason}",
+            extra={"bfinance_actions_fallback_reason": reason},
+        )
+
+    @staticmethod
+    def _clip(dividends, splits, start, end):
+        """Restrict both series to ``[start, end)`` when a caller asked for a window.
+
+        The OHLCV path deliberately does **not** use this: it takes the whole history so the
+        "does the feed index this symbol" question stays answerable. ``merge_actions_into_history``
+        drops out-of-window dates by construction anyway, so clipping here is a convenience for
+        direct callers of this method, not a correctness requirement.
+
+        The action series is ``Asia/Kolkata``-aware, so a naive ``start``/``end`` is localised before
+        the comparison rather than allowed to raise — a tz-aware/naive comparison is a
+        ``TypeError`` in pandas, and a window argument should not be able to crash the call.
+        """
+        def _bound(value, end_of_day: bool) -> Optional[pd.Timestamp]:
+            if value is None:
+                return None
+            stamp = pd.Timestamp(value)
+            if stamp.tzinfo is None:
+                stamp = stamp.tz_localize(YF_TZ)
+            else:
+                stamp = stamp.tz_convert(YF_TZ)
+            return stamp + pd.Timedelta(days=1) if end_of_day else stamp
+
+        def _mask(series):
+            keep = pd.Series(True, index=series.index)
+            lower = _bound(start, end_of_day=False)
+            upper = _bound(end, end_of_day=True)
+            if lower is not None:
+                keep &= series.index >= lower
+            if upper is not None:
+                keep &= series.index < upper
+            return series[keep.to_numpy()]
+
+        return _mask(dividends), _mask(splits)
+
+    @staticmethod
+    async def _maybe_load_profile(
+        symbol: str, profile: Optional[CompanyProfile], load_profile: Optional[Any]
+    ) -> Optional[CompanyProfile]:
+        """Return a profile for the approximation path, or ``None``.
+
+        ``load_profile`` is awaited when supplied. It is the caller's own loader so this module
+        keeps no client of its own; when it is absent the approximation simply cannot run, which
+        is the correct outcome rather than a reason to invent one.
+        """
+        if profile is not None or load_profile is None:
+            return profile
+        try:
+            return await load_profile(symbol)
+        except Exception as exc:  # noqa: BLE001 - an approximation is never worth an exception
+            logger.debug("%s: profile unavailable for the approximation fallback (%s).", symbol, exc)
+            return None

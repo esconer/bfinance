@@ -9,6 +9,7 @@ from bfinance.ticker import Ticker
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_historical_price_timeseries(screener_client):
     """Verify historical daily price timeseries."""
     df = await screener_client.get_chart_timeseries("RELIANCE", metric="price", days=365)
@@ -21,6 +22,7 @@ async def test_historical_price_timeseries(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_historical_valuation_multiples(screener_client):
     """Verify historical P/E ratio and margins timeseries."""
     df_pe = await screener_client.get_chart_timeseries("RELIANCE", metric="pe", days=365)
@@ -34,6 +36,7 @@ async def test_historical_valuation_multiples(screener_client):
     assert "OPM" in df_margins.columns or "GPM" in df_margins.columns
 
 
+@pytest.mark.live
 def test_ticker_valuation_history():
     """Verify Ticker.valuation_history() synchronous wrapper."""
     t = Ticker("TCS")

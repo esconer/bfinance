@@ -9,6 +9,7 @@ from bfinance.ticker import Ticker
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_profile_extraction(screener_client):
     """Verify live Screener extraction returns complete profile with 10Y financials."""
     profile = await screener_client.get_company_profile("RELIANCE")
@@ -45,6 +46,7 @@ async def test_screener_profile_extraction(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_concalls_and_reports(screener_client):
     """Verify conference call transcripts, audio MP3s, and annual reports."""
     profile = await screener_client.get_company_profile("TCS")
@@ -58,6 +60,7 @@ async def test_screener_concalls_and_reports(screener_client):
     assert isinstance(profile.annual_reports, list)
 
 
+@pytest.mark.live
 def test_ticker_superpower_properties():
     """Verify high-level Ticker facade properties."""
     t = Ticker("RELIANCE")

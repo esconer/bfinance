@@ -3,12 +3,15 @@ High-throughput multi-ticker concurrent batch downloader matching yfinance downl
 """
 
 import asyncio
+import logging
 from typing import List, Optional, Union
 from datetime import datetime
 import pandas as pd
 
 from bfinance.ticker import Ticker
 from bfinance.utils.symbols import normalize_symbol
+
+logger = logging.getLogger(__name__)
 
 
 async def _download_single(
@@ -25,6 +28,7 @@ async def _download_single(
     repair: bool,
     rounding: bool,
     proxy: Optional[str] = None,
+    raise_errors: bool = False,
 ) -> pd.DataFrame:
     t = Ticker(symbol, proxy=proxy)
     try:
@@ -44,6 +48,8 @@ async def _download_single(
     except (NotImplementedError, ValueError):
         raise
     except Exception:
+        if raise_errors:
+            raise
         return pd.DataFrame()
 
 
@@ -54,7 +60,7 @@ async def _download_batch_async(
     start: Optional[Union[str, datetime]],
     end: Optional[Union[str, datetime]],
     actions: bool = False,
-    auto_adjust: bool = True,
+    auto_adjust: bool = False,
     back_adjust: bool = False,
     keepna: bool = False,
     prepost: bool = False,
@@ -64,6 +70,7 @@ async def _download_batch_async(
     multi_level_index: bool = True,
     max_concurrency: int = 5,
     proxy: Optional[str] = None,
+    raise_errors: bool = False,
 ) -> pd.DataFrame:
     sem = asyncio.Semaphore(max_concurrency)
 
@@ -83,6 +90,7 @@ async def _download_batch_async(
                 repair=repair,
                 rounding=rounding,
                 proxy=proxy,
+                raise_errors=raise_errors,
             )
             return sym, df
 
@@ -90,17 +98,37 @@ async def _download_batch_async(
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     data_frames = {}
+    first_upstream_error: Optional[BaseException] = None
+    empty_symbols: list = []
     for res in results:
         if isinstance(res, (NotImplementedError, ValueError)):
             raise res
         if isinstance(res, BaseException):
+            # An upstream failure for one symbol. Previously dropped on the floor with no
+            # record at all, so a fully-blocked run and a run of bad symbols were
+            # indistinguishable from each other.
+            logger.warning("download: symbol failed: %s: %s", type(res).__name__, res)
+            if first_upstream_error is None:
+                first_upstream_error = res
             continue
         if isinstance(res, tuple):
             sym, df = res
-            if not df.empty:
-                data_frames[sym.upper()] = df
+            if df is None or df.empty:
+                empty_symbols.append(sym)
+                continue
+            data_frames[sym.upper()] = df
+
+    if first_upstream_error is not None and raise_errors:
+        raise first_upstream_error
 
     if not data_frames:
+        if empty_symbols and logger.isEnabledFor(logging.WARNING):
+            logger.warning(
+                "download: no data for %d/%d symbol(s): %s",
+                len(empty_symbols),
+                len(tickers),
+                ", ".join(sorted(empty_symbols)[:10]),
+            )
         return pd.DataFrame()
 
     def _yf_naive(frame: pd.DataFrame) -> pd.DataFrame:
@@ -139,7 +167,7 @@ def download(
     threads: bool = True,
     ignore_tz: Optional[bool] = None,
     group_by: str = "column",
-    auto_adjust: bool = True,
+    auto_adjust: bool = False,
     back_adjust: bool = False,
     repair: bool = False,
     keepna: bool = False,
@@ -152,6 +180,7 @@ def download(
     proxy: Optional[str] = None,
     session: Optional[object] = None,
     multi_level_index: bool = True,
+    raise_errors: bool = False,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -166,14 +195,33 @@ def download(
         actions: Download dividend + stock splits data (default False).
         threads: How many threads/connections to use for mass downloading (default True).
         group_by: Group by 'column' (default) or 'ticker'.
-        auto_adjust: Adjust all OHLC automatically (default True).
+        auto_adjust: Adjust all OHLC automatically. Defaults to False and must stay False:
+            the bhavcopy carries no corporate-actions series, so True raises
+            AdjustmentNotAvailableError rather than silently returning unadjusted prices.
         rounding: Round values to 2 decimal places (default False).
         multi_level_index: Always return a MultiIndex DataFrame (default True).
         proxy: Optional HTTP/HTTPS/SOCKS5 proxy URL string.
+        raise_errors: Re-raise upstream failures instead of returning an empty frame
+            (default False, matching yfinance's lenient default).
 
     Returns:
         pd.DataFrame: MultiIndex (or single) DataFrame with OHLCV data.
+
+    Note:
+        ``raise_errors`` is an EXPLICIT parameter. It was previously reachable only through
+        ``**kwargs``, where it was silently discarded -- ``download("X", raise_errors=True)``
+        accepted the argument, did nothing, and returned an empty DataFrame. Any caller who
+        asked for strict behaviour got silent behaviour instead, which is the worst possible
+        outcome for a debugging flag.
     """
+    # Surface any other misspelled/unknown keyword rather than swallowing it. These used to be
+    # accepted and ignored, which is how raise_errors went missing for so long.
+    if kwargs:
+        logger.warning(
+            "download() ignoring unsupported keyword argument(s): %s",
+            ", ".join(sorted(kwargs)),
+        )
+
     if isinstance(tickers, str):
         ticker_list = [t.strip() for t in tickers.replace(",", " ").split() if t.strip()]
     else:
@@ -199,6 +247,7 @@ def download(
         multi_level_index=multi_level_index,
         max_concurrency=10 if threads else 1,
         proxy=proxy,
+        raise_errors=raise_errors,
     )
 
     try:
@@ -214,5 +263,10 @@ def download(
                 return future.result()
         else:
             return asyncio.run(coro)
+    except (NotImplementedError, ValueError):
+        # Programming/contract errors always propagate, regardless of raise_errors.
+        raise
     except Exception:
+        if raise_errors:
+            raise
         return pd.DataFrame()

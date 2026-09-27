@@ -17,6 +17,8 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 import pandas as pd
 
+from bfinance.utils.exceptions import ParsingError
+
 
 #: Indian (Screener.in) row label -> generic yfinance-style row label.
 INDIAN_TO_YFINANCE_LABELS: Dict[str, str] = {
@@ -65,9 +67,27 @@ class FinancialStatement(BaseModel):
         Convert financial statement to pandas DataFrame.
         orient='columns' (default, matches yfinance): rows are metrics, columns are period dates.
         orient='index': rows are periods, columns are metrics.
+
+        Raises:
+            ParsingError: a row's cell count does not match ``len(headers)``. pandas
+                would raise a bare ``ValueError("Length of values (2) does not match
+                length of index (3)")``, which is not a BFinanceError and therefore
+                escapes the typed handlers in ``Ticker`` — and which names neither the
+                metric nor the statement. The check is here, at the single point where
+                rows and headers are joined, because a ragged row can enter from the HTML
+                parser or from a cache round-trip alike.
         """
         if not self.headers or not self.rows:
             return pd.DataFrame()
+
+        periods = len(self.headers)
+        for metric, values in self.rows.items():
+            if len(values) != periods:
+                raise ParsingError(
+                    f"Malformed statement row {metric!r}: {len(values)} value(s) for "
+                    f"{periods} period(s) ({', '.join(self.headers)}). Refusing to build "
+                    f"a DataFrame from a ragged row."
+                )
 
         # Build raw table
         df = pd.DataFrame(self.rows, index=self.headers).T

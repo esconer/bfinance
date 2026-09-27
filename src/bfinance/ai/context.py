@@ -5,18 +5,76 @@ token-optimized, highly structured Markdown, JSON, and text representations for 
 
 from typing import Any, Dict, List, Literal, Optional, Set
 import json
+import math
 import pandas as pd
 
 from bfinance.models.company import CompanyProfile
 
+#: Label used for every missing cell. Screener values are deliberately optional
+#: (``parse_indian_number`` returns None for junk/blank source text), so "missing"
+#: is real information an LLM must be able to tell apart from a number.
+MISSING_CELL = "N/A"
+
+#: tabulate's default float format ("g") switches to scientific notation at 1e6, so
+#: a value like 1,123,060 Cr reaches the model as "1.12306e+06" — easy to misread by
+#: three orders of magnitude in a table headed "in Rs Cr". Columns reaching this
+#: magnitude are rendered fixed-point with thousands separators instead.
+LARGE_VALUE_FLOOR = 1000
+
+#: Decimals kept for the small values that share a column with a large one (EPS,
+#: OPM %, ROCE %). Anything above this only adds ".00" noise to Rs Cr figures.
+_MAX_SHARED_DECIMALS = 2
+
+
+def _display_frame(df: Any) -> pd.DataFrame:
+    """Return an object-dtype copy whose missing cells are real ``None``.
+
+    pandas stores a missing statement value as float ``NaN``. tabulate's
+    ``missingval`` only substitutes for ``None``: a float ``NaN`` is formatted with
+    the column's float format and prints the bare token ``nan`` inside a numeric
+    column, where an LLM can read it as a value. Coercing first is what makes the
+    ``missingval`` label take effect.
+    """
+    return df.astype(object).where(pd.notna(df), None)
+
+
+def _column_floatfmts(df: pd.DataFrame, show_index: bool) -> list[str]:
+    """Per-column float formats, positionally aligned with tabulate's columns.
+
+    A list is required (tabulate has one format per column, not per cell). Columns
+    with no large value keep tabulate's default "g" so ratios keep their native
+    precision; a column that also holds Rs Cr magnitudes is rendered fixed-point.
+    The first entry is the row-label column whenever the index is shown.
+    """
+    fmts = [""] if show_index else []
+    for pos in range(df.shape[1]):
+        values = [
+            v
+            for v in df.iloc[:, pos]
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        ]
+        if not any(abs(v) >= LARGE_VALUE_FLOOR for v in values):
+            fmts.append("g")
+            continue
+        small = [v for v in values if abs(v) < LARGE_VALUE_FLOOR]
+        decimals = 0 if all(float(v).is_integer() for v in small) else _MAX_SHARED_DECIMALS
+        fmts.append(f",.{decimals}f")
+    return fmts
+
 
 def _safe_markdown(df: Any, **kwargs: Any) -> str:
     """Render DataFrame as markdown, falling back to plain text if tabulate is missing."""
+    show_index = bool(kwargs.get("index", True))
     try:
-        return df.to_markdown(**kwargs)
+        display = _display_frame(df)
+        return display.to_markdown(
+            missingval=MISSING_CELL,
+            floatfmt=_column_floatfmts(display, show_index),
+            **kwargs,
+        )
     except ImportError:
         try:
-            text = df.to_string(index=kwargs.get("index", True))
+            text = _display_frame(df).fillna(MISSING_CELL).to_string(index=show_index)
         except Exception:
             text = str(df)
         return f"```\n{text}\n```"
@@ -132,7 +190,12 @@ class AIContextBuilder:
         if "cagrs" in active and profile.cagrs:
             lines.append("\n## Compounded Annual Growth Rates (CAGR %)")
             for k, v in profile.cagrs.items():
-                vals = " | ".join([f"{time_k}: {val}" for time_k, val in v.items()])
+                # Screener writes the period label with its own trailing colon
+                # ("10 Years:"), so appending the usual ": " separator produced
+                # "10 Years:: 15%". Trim the label's colon instead of the separator.
+                vals = " | ".join(
+                    f"{str(time_k).rstrip(':')}: {val}" for time_k, val in v.items()
+                )
                 lines.append(f"- **{k}**: {vals}")
 
         # 10. Qualitative Insights (Pros & Cons)
@@ -171,7 +234,7 @@ class AIContextBuilder:
         Generate structured nested JSON dictionary format for tool outputs and function calls.
         """
         r = profile.ratios
-        return {
+        data: Dict[str, Any] = {
             "symbol": profile.symbol,
             "company_name": profile.name,
             "bse_code": profile.bse_code,
@@ -200,12 +263,26 @@ class AIContextBuilder:
                 "pros": profile.analysis.pros,
                 "cons": profile.analysis.cons,
             },
-            "annual_pnl": profile.profit_loss.rows,
-            "quarterly_pnl": profile.quarters.rows,
-            "balance_sheet": profile.balance_sheet.rows,
-            "cash_flow": profile.cash_flow.rows,
-            "shareholding_quarterly": profile.shareholding.rows,
-            "shareholding_yearly": profile.shareholding_yearly.rows,
-            "concalls": [c.model_dump() for c in profile.concalls[:10]],
-            "peers": [p.model_dump() for p in profile.peers[:8]],
         }
+        # Each statement below ships positional value lists (``rows``) and nothing
+        # else: the period of a number, the number of periods, and their order are
+        # all unrecoverable, so a consumer cannot tell which year a figure belongs
+        # to (the markdown sibling does show column headers).
+        #
+        # ``<key>_periods`` is purely ADDITIVE: ``annual_pnl`` and friends keep
+        # their exact current names and shape (Dict[metric, List[Optional[float]]]),
+        # and ``<key>_periods[i]`` is the period of ``<key>[metric][i]``. Nothing is
+        # renamed, moved or restructured, so existing consumers keep working.
+        for key, statement in (
+            ("annual_pnl", profile.profit_loss),
+            ("quarterly_pnl", profile.quarters),
+            ("balance_sheet", profile.balance_sheet),
+            ("cash_flow", profile.cash_flow),
+            ("shareholding_quarterly", profile.shareholding),
+            ("shareholding_yearly", profile.shareholding_yearly),
+        ):
+            data[key] = statement.rows
+            data[f"{key}_periods"] = statement.headers
+        data["concalls"] = [c.model_dump() for c in profile.concalls[:10]]
+        data["peers"] = [p.model_dump() for p in profile.peers[:8]]
+        return data
