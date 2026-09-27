@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -883,39 +884,77 @@ class TestTableClassification:
 class TestSnapshotHonesty:
     """A snapshot must never be mistakable for a series."""
 
-    def test_snapshot_only_routes_are_declared_as_data(self):
-        assert tl.SNAPSHOT_ONLY_ENDPOINTS == frozenset({"share_holding"})
-        assert "mutual_fund_holdings" not in tl.SNAPSHOT_ONLY_ENDPOINTS, (
-            "verified live: the mf-holdings route filters by year and by month, so calling it "
-            "snapshot-only would be a false limitation"
+    def test_the_snapshot_only_policy_is_empty_and_says_why(self):
+        """``SNAPSHOT_ONLY_ENDPOINTS`` must be a subset of ``ENDPOINTS``, and it is empty.
+
+        It is empty because nothing in this package fetches a snapshot-only route: the 14
+        templates with no fetch method were deleted rather than left as promises, and
+        ``share_holding`` — the one route measured to 500 on any non-``latest`` period — went
+        with them. A non-empty set naming a route ``build_path`` would reject would be a policy
+        table that can never fire and a second false claim.
+        """
+        assert tl.SNAPSHOT_ONLY_ENDPOINTS == frozenset()
+        assert tl.SNAPSHOT_ONLY_ENDPOINTS <= frozenset(tl.ENDPOINTS), (
+            "a snapshot-only name that is not an addressable route can never be enforced"
+        )
+
+    def test_the_share_holding_500_is_recorded_where_the_route_can_be_wired(self):
+        """The measured fact must survive the deletion, or the next agent spends 2 requests
+        rediscovering a guaranteed HTTP 500."""
+        source = (PACKAGE_DIR / "client.py").read_text(encoding="utf-8")
+        assert "SNAPSHOT_ONLY_ENDPOINTS" in source
+        assert "HTTP 500" in source
+        assert "share-holding" in source, (
+            "the snapshot-only route and its verified failure belong in the docstring that tells "
+            "the next agent to add it to both sets"
         )
 
     @pytest.mark.parametrize("period", ["2024", "Jun-2024", "latest2", "24"])
-    def test_a_period_on_a_snapshot_only_route_raises_before_any_request(self, period):
+    def test_a_deleted_route_is_rejected_before_any_request(self, period):
+        """A route the site serves but this package does not is an error, not a minted URL."""
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
-        with pytest.raises(tle.TrendlyneSnapshotOnlyError, match="latest"):
+        with pytest.raises(ValueError) as excinfo:
             tl.build_path("share_holding", record, period=period)
+        assert "share_holding" in str(excinfo.value)
 
-    def test_the_snapshot_error_explains_what_to_use_instead(self):
+    def test_the_unknown_endpoint_message_names_what_this_package_does_address(self):
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
-        with pytest.raises(tle.TrendlyneSnapshotOnlyError) as excinfo:
-            tl.build_path("share_holding", record, period="Jun-2024")
-        assert "500" in str(excinfo.value), "the verified upstream behaviour belongs in the message"
-        assert "mutual_fund_holdings" in str(excinfo.value)
+        with pytest.raises(ValueError) as excinfo:
+            tl.build_path("bulk_deals", record)
+        message = str(excinfo.value)
+        for name in ("stock_page", "ohlc", "chart_metric"):
+            assert name in message, f"{name} is addressable and the message must say so"
 
-    def test_a_filterable_route_accepts_the_three_verified_period_forms(self):
+    @pytest.mark.parametrize("name", ["stock_page", "ohlc", "chart_metric"])
+    def test_every_addressable_route_builds(self, name):
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
-        for period in ("latest", "2024", "Jun-2024"):
-            path = tl.build_path("mutual_fund_holdings", record, period=period)
-            assert f"/{period}/" in path
+        kwargs = {"token": "T"} if name == "ohlc" else {"metric": tl.METRICS[0]} \
+            if name == "chart_metric" else {}
+        path = tl.build_path(name, record, **kwargs)
+        assert path.startswith("/") and path.endswith("/")
 
-    def test_an_unrecognised_period_is_rejected_locally(self):
+    def test_the_sitemap_only_fallback_is_not_mistaken_for_a_template(self):
+        """``_SYMBOL_SEARCH_PATH`` is a query-string route, deliberately outside ``ENDPOINTS``."""
+        assert "{query}" in tl._SYMBOL_SEARCH_PATH
+        assert tl._SYMBOL_SEARCH_PATH not in tl.ENDPOINTS.values()
+
+    def test_period_is_rejected_locally_on_every_addressable_route(self):
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["MOTHERSON"]
         for bad in ("20244", "Jun-24", "jun-2024", "JUN-2024", "", "Q1-2024", "24-06-2024"):
             with pytest.raises(ValueError, match="period"):
-                tl.build_path("mutual_fund_holdings", record, period=bad)
+                tl.build_path("stock_page", record, period=bad)
         with pytest.raises(ValueError):
             tl.validate_period(2024)
+
+    def test_the_three_verified_period_forms_are_still_accepted(self):
+        """``latest`` / a year / ``Mon-YYYY`` — the forms the site's period routes accept.
+
+        No addressable route takes a period today, so this exercises :func:`validate_period`
+        directly rather than through a deleted template. Wiring ``mutual_fund_holdings``, which
+        genuinely filters by all three, is the first caller that needs it again.
+        """
+        for period in ("latest", "2024", "Jun-2024"):
+            assert tl.validate_period(period) == period
 
     def test_every_frame_declares_the_snapshot_flag(self):
         """The key is always written — False included — so a consumer can rely on it existing."""
@@ -924,7 +963,7 @@ class TestSnapshotHonesty:
         table = tbt.find_table(text("corporate_actions_motherson.html"), "dividend")
         assert "bfinance_trendlyne_snapshot_only" not in table.attrs, (
             "a table frame has no period axis, so claiming False would be a claim, not a fact; "
-            "the owning sibling module sets it"
+            "a caller composing fetch_text with find_table sets it via build_attrs"
         )
 
     def test_build_attrs_writes_the_flag_and_a_note(self):
@@ -934,12 +973,6 @@ class TestSnapshotHonesty:
         assert attrs["bfinance_trendlyne_note"] == "one quarter only"
         assert attrs["bfinance_provenance"] == "trendlyne"
         assert attrs["bfinance_symbol"] == "RELIANCE"
-
-    def test_deep_history_routes_are_not_marked_as_snapshots(self):
-        """Bulk deals and insider trades carry 10-16 years in one page, so a sibling must not
-        inherit the snapshot caveat from share-holding."""
-        assert "bulk_deals" not in tl.SNAPSHOT_ONLY_ENDPOINTS
-        assert "insider_trading" not in tl.SNAPSHOT_ONLY_ENDPOINTS
 
 
 # =========================================================== provenance
@@ -952,15 +985,83 @@ class TestProvenance:
         assert frame.attrs["bfinance_symbol"] == "MOTHERSON"
         assert frame.attrs["bfinance_synthetic_ohlc"] is False
 
-    def test_price_basis_is_declared_so_bases_cannot_be_mixed_silently(self):
+    def test_price_basis_names_what_is_applied_not_whose_convention_it_resembles(self):
+        """The basis is a fact about this route, measured 2026-09-27 against bhavcopy.
+
+        It used to be ``"yfinance_back_adjusted"``, which described a *source* rather than this
+        route and was false for the whole demerger class. The label now says the two things that
+        are true — as-traded, split/bonus adjusted — and the demerger exclusion is a separate
+        boolean, because it is the part a consumer is most likely to get wrong.
+        """
         frame = tl.parse_ohlc(payload(), "MOTHERSON")
         assert frame.attrs["bfinance_trendlyne_price_basis"] == tl.PRICE_BASIS
-        assert tl.PRICE_BASIS == "yfinance_back_adjusted"
-        assert frame.attrs["bfinance_trendlyne_price_basis"] != "as_traded"
+        assert tl.PRICE_BASIS == "as_traded_split_bonus_adjusted"
+        assert frame.attrs["bfinance_trendlyne_demerger_applied"] is False
+        assert tl.DEMERGER_APPLIED is False
 
-    def test_the_note_says_the_window_is_not_listing_history(self):
+    def test_price_basis_is_not_the_false_claim_it_used_to_be(self):
+        """The regression guard for the actual bug: a false blanket claim, set unconditionally.
+
+        ``"yfinance_back_adjusted"`` was wrong for every symbol measured. On ITC, the demerger
+        name, trendlyne agrees with the exchange print (481.60 on 2025-01-03, same as bhavcopy)
+        while yfinance says 463.74 — the trendlyne/yfinance close ratio is 1.038513 at every
+        session of 2017, 2018, 2020, 2022 and 2024. So on a demerger it is the *exchange* that is
+        unrewritten here. Anyone re-deriving the label must not land back on this string.
+        """
+        frame = tl.parse_ohlc(payload(), "MOTHERSON")
+        basis = frame.attrs["bfinance_trendlyne_price_basis"]
+        assert basis != "yfinance_back_adjusted"
+        assert tl.PRICE_BASIS != "yfinance_back_adjusted"
+        assert basis != "as_traded", (
+            "bare 'as_traded' is also false: splits and bonuses ARE back-adjusted, which is why "
+            "HDFCBANK and MOTHERSON miss bhavcopy on 0 of 62 sessions"
+        )
+        # The label must be machine-readable: lowercase, underscore-separated, no spaces.
+        assert basis == basis.lower()
+        assert " " not in basis and "-" not in basis
+
+    def test_build_attrs_does_not_stamp_a_price_basis_it_never_measured(self):
+        """The inverse hazard: a deals list or holdings grid has no price basis at all.
+
+        ``build_attrs`` writes the snapshot flag unconditionally, but the basis keys belong to
+        :func:`parse_ohlc` alone. Stamping ``as_traded_split_bonus_adjusted`` onto a table frame
+        would be the same class of false claim as the value being corrected here.
+        """
+        attrs = tl.build_attrs("MOTHERSON", note="one quarter only")
+        assert attrs["bfinance_trendlyne_snapshot_only"] is False
+        assert tl.PRICE_BASIS_ATTR not in attrs
+        assert tl.DEMERGER_APPLIED_ATTR not in attrs
+        # ...and parse_ohlc, which does measure it, writes both.
+        frame = tl.parse_ohlc(payload(), "MOTHERSON")
+        assert frame.attrs[tl.PRICE_BASIS_ATTR] == tl.PRICE_BASIS
+        assert frame.attrs[tl.DEMERGER_APPLIED_ATTR] is False
+
+    def test_the_note_states_the_demerger_exclusion_and_which_joins_are_unsafe(self):
         note = tl.parse_ohlc(payload(), "MOTHERSON").attrs["bfinance_trendlyne_note"]
-        assert "not the listing history" in note
+        assert "AS-TRADED" in note
+        assert "DEMERGERS ARE NOT APPLIED" in note
+        assert "split or bonus" in note
+        assert "yfinance" in note, (
+            "the note must name the source whose series it is *not* interchangeable with on a "
+            "demerger, which is the case the old label got backwards"
+        )
+        assert "yfinance basis" not in note
+
+    def test_the_note_says_the_history_is_truncated_at_listing(self):
+        """The note must NOT claim a fixed vendor window.
+
+        This assertion used to be ``"not the listing history" in note`` — i.e. the test enforced a
+        statement that was itself false. The claim came from generalising a large-cap measurement
+        (5,107 bars from 2006-01-02) to every symbol, and the counter-examples are decisive: a 2023
+        IPO cannot have twenty years of bars, and IREDA returns 696 while delisted PAYTM returns
+        1,199. So the history **is** truncated at listing, 2006-01-02 is only the floor for old
+        listings, and any bar count is symbol-dependent.
+        """
+        note = tl.parse_ohlc(payload(), "MOTHERSON").attrs["bfinance_trendlyne_note"]
+        assert "truncated at the instrument's listing" in note
+        assert "symbol-dependent" in note
+        assert "vendor-fixed window" not in note, "the fixed-window claim is the one being retired"
+        assert "not the listing history" not in note
         assert "as-traded" in note
         assert "bhavcopy" in note, "the frame must name the source it may not be mixed with"
 
@@ -1002,16 +1103,26 @@ class TestProvenance:
 
 
 class TestPriceBasis:
-    """The reason this module is not interchangeable with bhavcopy, pinned by a fixture rather
-    than asserted in prose. Both tests read ``ohlc_reliance_excerpt.json``, recorded live."""
+    """Why these bars are not interchangeable with every other source, pinned from inside the
+    series rather than asserted in prose. All three read ``ohlc_reliance_excerpt.json``, recorded
+    live 2026-09-27.
+
+    The basis is **as-traded, back-adjusted for splits and bonuses only, demergers not applied**.
+    The test below demonstrates the *first* two halves from inside one series. The third half —
+    demergers — cannot be shown from a RELIANCE fixture, because RELIANCE is not a demerger name;
+    it was measured over ITC against bhavcopy and yfinance and is recorded in
+    ``docs/UPSTREAM_SOURCES.md`` and in the module docstring. :class:`TestProvenance` above pins
+    the label that encodes all three.
+    """
 
     def test_history_is_on_one_scale_across_the_2024_bonus(self):
-        """Back-adjustment, demonstrated from inside the series.
+        """Split/bonus back-adjustment, demonstrated from inside the series.
 
         RELIANCE went ex-bonus 1:1 on 2024-10-28. In an **as-traded** series the 2024-10-25 close
         sits near twice the 2024-10-29 close. In a **back-adjusted** one the older bars are scaled
         onto the newer level, so the ratio is ~1.0 and no discontinuity exists. Measured here:
-        0.991. This is why these bars must not be concatenated with bfinance.nse.bhavcopy bars.
+        0.991. This is the split/bonus half of the basis, and it is why these bars must not be
+        spliced with bfinance.nse.bhavcopy bars across the event.
         """
         frame = tl.parse_ohlc(payload("ohlc_reliance_excerpt.json"), "RELIANCE")
         pre_bonus = frame.loc["2024-10-25", "Close"]
@@ -1019,7 +1130,8 @@ class TestPriceBasis:
         assert 0.95 <= pre_bonus / post_bonus <= 1.05, (
             f"expected one continuous scale across the bonus, got {pre_bonus}/{post_bonus}"
         )
-        assert frame.attrs["bfinance_trendlyne_price_basis"] == "yfinance_back_adjusted"
+        assert frame.attrs["bfinance_trendlyne_price_basis"] == "as_traded_split_bonus_adjusted"
+        assert frame.attrs["bfinance_trendlyne_demerger_applied"] is False
 
     def test_the_latest_session_agrees_exactly_with_an_independent_source(self):
         """Cross-source corroboration, and the reason the basis claim above is credible.
@@ -1051,6 +1163,126 @@ class TestPriceBasis:
         gaps = frame.index.to_series().diff().dt.days
         assert gaps.max() > 300, "the two windows are not contiguous, and the frame says so"
         assert frame.attrs["bfinance_trendlyne_last_week_rows_added"] == 5
+
+
+# =========================================================== no promises about unwritten code
+
+
+class TestNoDeadScaffolding:
+    """A name in this package is a claim that bfinance can do that thing.
+
+    ``ENDPOINTS`` once held 17 templates, 14 of which no method ever built, and three module
+    docstrings named sibling modules (``ownership``, ``deals``, ``corporate``) that do not exist
+    on disk. Both are promises about unwritten code, and both were wrong in the same direction:
+    they made the package look bigger than the code that runs. The names are gone; these tests are
+    the guard that keeps them gone.
+    """
+
+    def _endpoint_names_referenced_in_the_module(self) -> set[str]:
+        """Endpoint names the module actually builds, found by AST rather than by substring.
+
+        ``ENDPOINTS`` is spelled out in a dict literal and read back by key, so a regex would have
+        to guess; walking the tree for ``build_path("x"...)`` and ``ENDPOINTS["x"]`` is exact.
+        """
+        tree = ast.parse((PACKAGE_DIR / "client.py").read_text(encoding="utf-8"))
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "build_path"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                names.add(node.args[0].value)
+            elif (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ENDPOINTS"
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)
+            ):
+                names.add(node.slice.value)
+        return names
+
+    def test_no_endpoint_template_is_a_dead_string(self):
+        """Every template is built somewhere, or it is a claim nobody backs."""
+        declared = set(tl.ENDPOINTS)
+        referenced = self._endpoint_names_referenced_in_the_module()
+        assert declared == referenced, (
+            f"unreferenced templates are promises about unwritten code: {declared - referenced}. "
+            f"Either give the route a fetch method in the same change, or delete the template."
+        )
+
+    def test_the_three_addressed_routes_are_the_ones_with_fetch_methods(self):
+        """The whole package, stated as a set: 3 templates, 3 methods, no more."""
+        assert set(tl.ENDPOINTS) == {"stock_page", "ohlc", "chart_metric"}
+        for method in ("ohlc", "ohlc_token", "chart_metric"):
+            assert callable(getattr(tl.TrendlyneClient, method))
+
+    async def test_each_template_is_the_url_the_client_actually_requests(self):
+        """The strongest available form of the same claim: drive the public API offline and check
+        that the request matched the template, rather than trusting that a string is used."""
+        calls = []
+
+        def handler(request):
+            url = str(request.url)
+            calls.append(url)
+            if "equity-sitemap" in url:
+                return httpx.Response(200, text=text("sitemap_excerpt.xml"))
+            if "/equity/878/" in url:
+                return httpx.Response(200, text=text("stock_page_motherson.html"))
+            if "chart-data" in url:
+                return httpx.Response(200, json=payload("chart_data_eps_ttm.json"))
+            return httpx.Response(200, json=payload())
+
+        client = mock_client(handler)
+        record = await client.resolve_async("MOTHERSON")
+        await client.chart_metric_async("MOTHERSON", "EPS_TTM")
+        await client.ohlc_async("MOTHERSON")
+        requested = {url.replace("https://trendlyne.com", "") for url in calls}
+        for name, kwargs in (
+            ("stock_page", {}),
+            ("ohlc", {"token": "TQZITAIRHO5FCC7SYAKGO6M7QA======"}),
+            ("chart_metric", {"metric": "EPS_TTM"}),
+        ):
+            assert tl.build_path(name, record, **kwargs) in requested, (
+                f"{name} builds a path the client never requests"
+            )
+
+    def test_the_snapshot_policy_only_names_routes_that_can_be_addressed(self):
+        assert tl.SNAPSHOT_ONLY_ENDPOINTS <= frozenset(tl.ENDPOINTS)
+
+    def test_no_docstring_names_a_module_that_does_not_exist(self):
+        """``__init__.py`` and ``client.py`` used to point at ``ownership``, ``deals`` and
+        ``corporate`` — modules that were never written. A cross-reference to unwritten code is a
+        promise; the audit that found this one will not run again on its own."""
+        pattern = re.compile(r"bfinance\.trendlyne\.([a-z_]+)")
+        referenced: dict[str, set[str]] = {}
+        for path in sorted(PACKAGE_DIR.glob("*.py")):
+            text_body = path.read_text(encoding="utf-8")
+            for target in set(pattern.findall(text_body)):
+                referenced.setdefault(path.name, set()).add(target)
+        for source, targets in referenced.items():
+            for target in targets:
+                assert (PACKAGE_DIR / f"{target}.py").exists(), (
+                    f"{source} refers to bfinance.trendlyne.{target}, which does not exist"
+                )
+
+    def test_the_package_docstring_lists_exactly_the_modules_on_disk(self):
+        """A 'what is here' section is a manifest; a manifest that overstates is a false claim."""
+        on_disk = {p.stem for p in PACKAGE_DIR.glob("*.py")} - {"__init__"}
+        init_text = (PACKAGE_DIR / "__init__.py").read_text(encoding="utf-8")
+        for stem in on_disk:
+            assert f":mod:`~bfinance.trendlyne.{stem}`" in init_text, (
+                f"{stem}.py is on disk but the package docstring does not list it"
+            )
+        listed = set(re.findall(r":mod:`~bfinance\.trendlyne\.([a-z_]+)`", init_text))
+        assert listed == on_disk, (
+            f"the manifest lists {listed - on_disk}, which is not a module in this package. It "
+            f"used to list ownership/deals/corporate this way -- modules that were never written."
+        )
 
 
 # =========================================================== fixtures themselves

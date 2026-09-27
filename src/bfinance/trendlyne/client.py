@@ -25,34 +25,84 @@ why the isolation is a hard rule rather than a preference:
 
 The price-basis warning — read this before concatenating anything
 ----------------------------------------------------------------
-The OHLC route is **yfinance-basis**: back-adjusted for corporate actions. It is *not* as-traded.
-Verified against RELIANCE on 2026-09-27: bars before the 2024-10-28 bonus are exactly 0.5x the
-NSE bhavcopy as-traded close, and match yfinance to the paisa.
+**This route is not on a yfinance basis, and claiming it was is the bug this section exists to
+prevent.** The measured basis is:
 
-A positive control for that same capture, because "adjusted" is a claim that should be testable
-from both sides: the 2026-09-24 RELIANCE bar here is ``Close 1219.2, Volume 13923795``, which is
+    as-traded  ·  back-adjusted for SPLITS and BONUSES only  ·  DEMERGERS NOT APPLIED
+
+It is *not* ``yfinance_back_adjusted``, and it never was on any symbol measured. An earlier
+version of this docstring and of :data:`PRICE_BASIS` asserted a blanket yfinance basis; that was
+false, and :data:`PRICE_BASIS` was corrected rather than the claim being softened.
+
+Measured live 2026-09-27 against :mod:`bfinance.nse.bhavcopy` (as-traded, freshly downloaded
+archives), 8 symbols over two windows. The discriminating window is 2024-12-16..2025-03-13: it
+sits **before** HDFCBANK's 1:1 bonus (2025-08-26) and MOTHERSON's 1:2 bonus (2025-07-18) and
+**straddles** ITC's demerger (2025-01-06)::
+
+    ITC 62/62 · RELIANCE 62/62 · TCS 62/62 · INFY 62/62 · SBIN 62/62 · AXISBANK 62/62  (all 5
+    fields byte-identical, max|diff| 0.00)
+    HDFCBANK 0/62 (max|price diff| 934.98) · MOTHERSON 0/62 (max|price diff| 56.47)
+
+    2026-09-01..2026-09-25, all 8 symbols: 18/18 byte-identical
+
+The two failures are **exactly** the two names with a share-count event after the window, and the
+same two match bhavcopy 18/18 once the window is past their event. That is back-adjustment for
+splits and bonuses, and nothing else. The 6 that match everywhere have no event, so "matches
+bhavcopy" is what as-traded looks like, and "stops matching" is what an applied split factor looks
+like — the two are distinguishable on the same data.
+
+**Demergers are not applied at all, and this is the part that matters.** ITC 2025-01-03 is
+trendlyne **481.60** and bhavcopy **481.60**, while yfinance says **463.74**. Across 2017 (246
+sessions), 2018 (244), 2020 (250), 2022 (248) and 2024 (245) the trendlyne ÷ yfinance close ratio
+is **1.038513 at every session of every year** — the exact reciprocal of Yahoo's 0.962915
+constant. So on a demerger it is **the exchange and yfinance that rewrote history**, not this
+source. The basis is uniform: one rule on all 8 symbols across both windows, so the label is a
+constant, not a per-symbol derivation.
+
+Practical consequence, and it is the opposite of what the old label implied:
+
+* **May be blended with** :mod:`bfinance.nse.bhavcopy` **on demerger names** — they agree to the
+  paisa, because neither rewrites them.
+* **Must not be blended on a name with a split or bonus inside the joined span** — the older bars
+  are scaled and the join carries a corporate-action-sized discontinuity.
+
+``attrs`` tells you the *rule*, never whether *this* symbol has an event inside your window.
+Measure it, or check the symbol's corporate actions; do not infer it from the basis attr.
+
+A positive control on the as-traded half, because "as-traded" is a claim that should be testable
+from the other side too: the 2026-09-24 RELIANCE bar is ``Close 1219.2, Volume 13923795`` here,
 byte-for-byte what :mod:`bfinance.nse.marketlens` returns for the same session (see the recorded
 ``tests/fixtures/marketlens/reliance_1y.json``). Two independent sources agreeing exactly on a
-recent bar, and disagreeing by exactly the corporate-action factor on an old one, is what a
-back-adjusted series should look like — and it is why the two must not be concatenated.
+recent bar is what an unadjusted series looks like; combined with the 62/62 bhavcopy agreement
+above and the 0.991 ratio across RELIANCE's own 2024-10-28 bonus, it pins both halves of the label
+from separate angles.
 
-:mod:`bfinance.nse.bhavcopy` is as-traded. Concatenating the two produces a series with a
-corporate-action-sized discontinuity in it — precisely the class of defect this package exists to
-prevent. Every OHLC frame therefore carries::
+:mod:`bfinance.nse.bhavcopy` is as-traded and carries no split or bonus factor. Every OHLC frame
+therefore carries::
 
-    df.attrs["bfinance_trendlyne_price_basis"] = "yfinance_back_adjusted"
+    df.attrs["bfinance_trendlyne_price_basis"] = "as_traded_split_bonus_adjusted"
+    df.attrs["bfinance_trendlyne_demerger_applied"] = False
     df.attrs["bfinance_synthetic_ohlc"] = False
 
 ``synthetic_ohlc = False`` says the O/H/L are real (they are: the invariant
 ``High >= max(Open, Close)`` and ``Low <= min(Open, Close)`` held on **51,070 of 51,070** rows
-across 10 symbols, and on all 5,107 rows of this module's own recorded capture). The basis attr is
-what you need to decide whether the frame may be joined to another source's bars.
+across 10 symbols, and on all 5,107 rows of this module's own recorded capture).
 
-Endpoints — verified live 2026-09-27, one request at a time
-----------------------------------------------------------
+Endpoints — 3 of them, all with a fetch method
+----------------------------------------------
 Base ``https://trendlyne.com``. No login, no API key, no cookie: a browser ``User-Agent`` is the
-whole requirement. Templates live in :data:`ENDPOINTS`; build one with :func:`build_path` rather
-than by string-formatting, so the snapshot-only and token rules are enforced locally.
+whole requirement. :data:`ENDPOINTS` holds **only the routes this package can address today**,
+and :func:`build_path` is the supported way to build one, so the token rule is enforced locally.
+
+That is a deliberately small dict, and it used to be a dishonest one. It listed 17 templates, of
+which **14 no method ever built** — the section tables (deals, insider trades, share and
+mutual-fund holdings, financials, research reports, board meetings, buy-sell-zone), the four
+``latest-news`` routes, and ``rights``. None had a fetch method, and five of the 14 were never even
+confirmed to answer 200. A template with no method behind it is a promise about unwritten code, and
+``build_path`` would return a well-formed URL for a route nobody had ever requested. The 14 were
+deleted; ``docs/UPSTREAM_SOURCES.md`` keeps the full scraping study — row counts, depths, and the
+two pages the header-signature model cannot yet discriminate — so nothing measured is lost. **A
+test now fails if a template is added without a method behind it.**
 
 Symbol resolution is a sitemap, because there is no search API
 --------------------------------------------------------------
@@ -101,8 +151,12 @@ Two consequences, and they need different types:
 ``/mapp/v1/`` requests carry a ``Referer``; the HTML page routes do not need one (verified 200
 without). HTML pages work with a bare browser ``User-Agent``.
 
-Snapshots and series are different things — and the two holding routes disagree
------------------------------------------------------------------------------
+Snapshots and series are different things — measured, and kept as prose because the routes are not wired
+-----------------------------------------------------------------------------------------------------
+Recorded here rather than in :data:`SNAPSHOT_ONLY_ENDPOINTS`, because the two holding routes are
+**not** in :data:`ENDPOINTS` — nothing fetches them yet. This is the note to read before wiring
+either one.
+
 ``share-holding`` serves **only** the literal path segment ``latest``. Verified 2026-09-27:
 ``.../Jun-2024/...`` and ``.../2024/...`` both return **HTTP 500**, not 404 and not an empty
 table. So the share-holding route cannot address a period at all. The single ``latest`` page is
@@ -114,16 +168,26 @@ suggests for share-holding. Verified on MOTHERSON: ``latest`` -> 200 (355 rows, 
 Aug-2026), ``2024`` -> 200 (313 rows, top period Sep-2024), ``Jun-2024`` -> 200 (260 rows, top
 period Jun-2024), ``2023`` -> 200 (179 rows). The segment genuinely filters.
 
-The distinction is per-route, so it is data, not prose: :data:`SNAPSHOT_ONLY_ENDPOINTS` plus
-:func:`build_path`, which raises :class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError`
-locally rather than spending a request to collect a 500. Deals and insider trades are the
-opposite extreme — 10-16 years in one page.
+**Wiring either route means adding its name to :data:`ENDPOINTS` *and* — for ``share_holding`` only
+— to :data:`SNAPSHOT_ONLY_ENDPOINTS`,** which is how :func:`build_path` turns the 500 into a local
+:class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` before a request is spent on it.
+That set is empty right now, so the guard cannot fire: an honest empty policy table, not a
+feature. Deals and insider trades are the opposite extreme when they are wired — 10-16 years in
+one page — so they must **not** be added to it.
 
 ``eodData`` is newest-first, and the freshest week is in a different key
 -----------------------------------------------------------------------
-The daily body is 5,107 bars spanning 2006-01-02 to 2026-09-18 **for every symbol measured** —
-MOTHERSON, RELIANCE, TCS, INFY alike. It is a fixed vendor window, *not* listing history, and this
-module never claims otherwise. The payload also carries ``eodDataLastWeek``, which on the same
+**The history is truncated at listing — it is *not* a fixed vendor window.** This docstring used to
+claim the opposite ("5,107 bars for every symbol measured … a fixed vendor window, *not* listing
+history"), and that was wrong: it generalised a large-cap measurement to every symbol. Measured
+counter-examples — **IREDA (2023 IPO) returns 696 bars**, and **PAYTM (delisted) 1,199**. A 2023
+listing cannot have twenty years of history, so the floor is the listing date, not a window edge.
+
+What *is* uniform is the **start** for old listings: 2006-01-02. So a mature large cap reaches
+5,107 bars in ``eodData`` and 5,112 after the last-week merge, and a recent listing reaches far
+fewer. Treat any bar count as symbol-dependent, and do not use a constant to reason about coverage.
+
+The payload also carries ``eodDataLastWeek``, which on the same
 capture holds 2026-09-21 to 2026-09-25 — i.e. the five most recent sessions that ``eodData`` does
 **not** contain. A frame built from ``eodData`` alone is therefore a week behind the vendor's own
 latest bar; ``ohlc(include_last_week=True)`` (the default) merges those five in, keeping
@@ -147,8 +211,9 @@ A trap for whoever parses ``chart-data`` next
 ``[epoch_ms, value]`` pairs. The epochs are **midnight IST on quarter-end dates**
 (2026-06-30, 2026-03-31, 2025-12-31, 2025-09-30 … all at 00:00 +05:30), so they must be converted
 to ``Asia/Kolkata`` before the date is taken. Reading them as UTC dates lands every point one day
-early. :meth:`TrendlyneClient.chart_metric` returns the raw payload; the parsing is deliberately
-left to the sibling module that owns it.
+early. :meth:`TrendlyneClient.chart_metric` returns the raw payload and does **not** parse it, and
+no module here does: the timestamp handling above is the whole reason, and a consumer that needs
+quarterly points must do it explicitly rather than inherit a guess.
 
 Pacing, retries and caching
 ---------------------------
@@ -217,38 +282,38 @@ SITEMAP_PATH = "/equity-sitemap-stocks.xml"
 #: A miss answers ``[{"headline": "No matches found"}]``, which is a result, not an error.
 _SYMBOL_SEARCH_PATH = "/member/api/ac_snames/?term={query}"
 
-#: Every route this package knows, as ``str.format`` templates over
+#: Every route this package can address **today**, as ``str.format`` templates over
 #: ``stock_id``, ``symbol``, ``slug``, ``period``, ``metric`` and ``token``. Use
 #: :func:`build_path` instead of formatting these directly.
+#:
+#: This held 17 templates once and 14 of them were dead strings: no method built them, so
+#: ``build_path`` would mint a plausible URL for a route nobody had requested and five of them
+#: (``rights`` and the four ``latest-news`` routes) had never been seen to answer 200 at all. The
+#: 14 were deleted rather than wired — building a fetch method is separate work, and a
+#: header-signature model that cannot yet tell Buy Sell Zone's two tables apart, or that validated
+#: ``board_meeting`` on the wrong page, would return confident nonsense if wired today. The full
+#: scraping study survives in ``docs/UPSTREAM_SOURCES.md``. When a route *is* wired, add its name
+#: here and a fetch method in the same commit; a test enforces that pairing.
 ENDPOINTS: Dict[str, str] = {
     "stock_page": "/equity/{stock_id}/{symbol}/{slug}/",
     "ohlc": "/mapp/v1/stock/web/ohlc/{stock_id}/{token}/",
     "chart_metric": "/mapp/v1/stock/chart-data/{stock_id}/{metric}/",
-    "share_holding": "/equity/share-holding/{stock_id}/{symbol}/{period}/{slug}/",
-    "mutual_fund_holdings":
-        "/equity/monthly-mutual-fund-share-holding/{stock_id}/{symbol}/{period}/{slug}/",
-    "bulk_deals": "/equity/bulk-block-deals/{symbol}/{stock_id}/{slug}/",
-    "insider_trading": "/equity/insider-trading-sast/all/{symbol}/{stock_id}/{slug}/",
-    "financials": "/fundamentals/financials/{stock_id}/{symbol}/{slug}/",
-    "research_reports": "/research-reports/stock/{stock_id}/{symbol}/{slug}/",
-    "rights": "/equity/rights/{symbol}/{stock_id}/{slug}-rights/",
-    "board_meetings": "/equity/board-meeting/{symbol}/{stock_id}/{slug}-board_meeting/",
-    "buy_sell_zone": "/tools/buy-sell-zone/{stock_id}/{symbol}/{slug}/",
-    "news": "/latest-news/{stock_id}/{symbol}/{slug}/",
-    "news_only": "/latest-news/only-news/{stock_id}/{symbol}/{slug}/",
-    "news_analyst_calls": "/latest-news/analyst-calls/{stock_id}/{symbol}/{slug}/",
-    "news_bse_announcements": "/latest-news/BSE-Announcements/{stock_id}/{symbol}/{slug}/",
-    "corporate_actions": "/equity/corporate-actions/{symbol}/{stock_id}/{slug}/",
 }
 
-#: The only period segment the snapshot-only routes accept.
+#: The only period segment a snapshot-only route accepts.
 SNAPSHOT_PERIOD = "latest"
 
-#: Routes that serve the latest snapshot and **cannot** address a period. Verified 2026-09-27:
-#: ``share-holding`` answers HTTP 500 for ``Jun-2024`` and for ``2024``. Note that
-#: ``mutual_fund_holdings`` is deliberately absent — it accepts ``latest``, a year and a
-#: ``Mon-YYYY`` month, and each genuinely filters.
-SNAPSHOT_ONLY_ENDPOINTS: frozenset = frozenset({"share_holding"})
+#: Routes that serve the latest snapshot and **cannot** address a period — a subset of
+#: :data:`ENDPOINTS`, enforced by :func:`build_path`, which raises
+#: :class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` locally instead of spending a
+#: request to collect a 500. Verified 2026-09-27: ``share-holding`` answers HTTP 500 for
+#: ``Jun-2024`` and for ``2024``.
+#:
+#: **Empty, and that is the honest state.** ``share_holding`` is not in :data:`ENDPOINTS` because
+#: nothing fetches it, so the guard cannot fire. Wiring that route means adding it to *both* sets
+#: (``mutual_fund_holdings``, which genuinely filters by year and by ``Mon-YYYY`` month, goes in
+#: :data:`ENDPOINTS` alone). See the "Snapshots and series" section of the module docstring.
+SNAPSHOT_ONLY_ENDPOINTS: frozenset = frozenset()
 
 #: Metrics the ``chart-data`` route accepts. Any other value returns 200 with a failed envelope,
 #: so the set is enforced locally.
@@ -259,8 +324,27 @@ METRICS: Tuple[str, ...] = (
     "DIVIDEND_YIELD_TTM_Q",
 )
 
-#: Price basis of the OHLC route. Recorded on every frame; see the module docstring.
-PRICE_BASIS = "yfinance_back_adjusted"
+#: Price basis of the OHLC route, recorded on every frame. Read the "price-basis warning" section
+#: of the module docstring for the measurement behind it; the short form is
+#: **as-traded, back-adjusted for splits and bonuses only, demergers NOT applied.**
+#:
+#: This constant used to say ``"yfinance_back_adjusted"``, a false blanket claim -- it named a
+#: source's convention rather than this route's behaviour, and on the whole demerger class (ITC,
+#: where the trendlyne/yfinance close ratio is 1.038513 at every session of 2017, 2018, 2020, 2022
+#: and 2024) it described the exact opposite of what this route does. Measured 2026-09-27 against
+#: bhavcopy over 2024-12-16..2025-03-13: 6 of 8 symbols byte-identical on all 5 fields for 62/62
+#: sessions, and the 2 that diverge (HDFCBANK, MOTHERSON) are exactly the 2 with a split or bonus
+#: after the window. It is a constant, not a per-symbol derivation: one rule on 8 symbols across 2
+#: windows. :data:`DEMERGER_APPLIED` carries the same fact as a boolean so a consumer can branch on
+#: it without parsing the label.
+PRICE_BASIS = "as_traded_split_bonus_adjusted"
+
+#: Whether this route applies demerger (demutualisation) adjustment. **False**, and it is stated
+#: separately because it is the part of the basis a consumer is most likely to get wrong: the
+#: demerger names are the ones where yfinance and this source disagree, and the direction of that
+#: disagreement is the opposite of what the old label implied -- here it is the *exchange* print
+#: that survives. See the module docstring.
+DEMERGER_APPLIED = False
 
 #: Output contract, identical to ``bfinance.nse.bhavcopy.COLUMNS`` so a frame from here drops
 #: into the same consumers as a bhavcopy frame.
@@ -268,6 +352,10 @@ COLUMNS: Tuple[str, ...] = ("Open", "High", "Low", "Close", "Volume")
 
 SNAPSHOT_ONLY_ATTR = "bfinance_trendlyne_snapshot_only"
 PRICE_BASIS_ATTR = "bfinance_trendlyne_price_basis"
+#: Machine-readable companion to :data:`PRICE_BASIS`: this route does **not** apply demerger
+#: adjustment. Present so a consumer can branch on the fact instead of parsing the label string,
+#: and present on every frame whether it is True or False.
+DEMERGER_APPLIED_ATTR = "bfinance_trendlyne_demerger_applied"
 SOURCE_ATTR = "bfinance_trendlyne_source"
 NOTE_ATTR = "bfinance_trendlyne_note"
 #: Written by ``build_attrs(window=...)``, which prefixes its keyword arguments. A one-line
@@ -425,7 +513,7 @@ def build_path(
     produce a confusing server error.
 
     Args:
-        name: A key of :data:`ENDPOINTS`.
+        name: A key of :data:`ENDPOINTS` — that is, a route this package has a fetch method for.
         record: The resolved symbol.
         period: Period segment, for the routes that take one. See :func:`validate_period`.
         metric: Metric name, required by ``chart_metric``. See :data:`METRICS`.
@@ -435,18 +523,26 @@ def build_path(
         A path beginning with ``/``.
 
     Raises:
-        ValueError: Unknown ``name``, an unrecognised ``metric``, or a missing ``token``.
+        ValueError: Unknown ``name`` — including a route that exists on trendlyne but is not
+            implemented here, which is an explicit error rather than a minted URL — an
+            unrecognised ``metric``, or a missing ``token``.
         TrendlyneSnapshotOnlyError: ``name`` is in :data:`SNAPSHOT_ONLY_ENDPOINTS` and ``period``
-            is not ``latest``. Raised locally, before a request is spent on a guaranteed 500.
+            is not ``latest``. Raised locally, before a request is spent on a guaranteed 500. The
+            set is currently empty, so this cannot fire; see :data:`SNAPSHOT_ONLY_ENDPOINTS`.
     """
     if name not in ENDPOINTS:
-        raise ValueError(f"unknown endpoint {name!r}. Known: {', '.join(sorted(ENDPOINTS))}.")
+        raise ValueError(
+            f"unknown endpoint {name!r}. This package addresses only "
+            f"{', '.join(sorted(ENDPOINTS))} — one per method that fetches it. Routes that exist on "
+            f"the site but have no fetch method here are not listed; see the 'Endpoints' section "
+            f"of the module docstring and docs/UPSTREAM_SOURCES.md before adding one."
+        )
     if name in SNAPSHOT_ONLY_ENDPOINTS and period != SNAPSHOT_PERIOD:
         raise TrendlyneSnapshotOnlyError(
             f"endpoint {name!r} serves only the latest snapshot: period must be "
             f"{SNAPSHOT_PERIOD!r}, got {period!r}. Verified 2026-09-27 — the share-holding "
             f"route answers HTTP 500 for any other segment. Use the single 'latest' page and "
-            f"read its multi-period grid, or use 'mutual_fund_holdings', which does filter."
+            f"read its multi-period grid."
         )
     if name == "chart_metric":
         if metric not in METRICS:
@@ -549,6 +645,14 @@ def build_attrs(
 
     Returns:
         A dict suitable for ``frame.attrs.update(...)``.
+
+    Note:
+        The price-basis keys are deliberately **not** written here. They are set by
+        :func:`parse_ohlc`, which is the only function in this package that has measured a price
+        basis, and :data:`PRICE_BASIS_ATTR` / :data:`DEMERGER_APPLIED_ATTR` describe *OHLC*. A
+        table frame — a deals list, a holdings grid — has no price basis at all, and stamping one
+        onto it would be the same kind of false claim this package was corrected for. A caller
+        that really does have bars must set both keys itself.
     """
     attrs: Dict[str, Any] = {
         "bfinance_provenance": PROVENANCE,
@@ -786,10 +890,16 @@ def parse_ohlc(
     first_date = frame.index[0].date().isoformat()
     last_date = frame.index[-1].date().isoformat()
     note = (
-        f"Daily EOD series from trendlyne.com, vendor-fixed window {first_date}..{last_date} "
-        f"({len(frame)} bars) — this is the vendor's window, not the listing history. Prices are "
-        f"back-adjusted (yfinance basis), NOT as-traded: do not concatenate or splice these bars "
-        f"with bfinance.nse.bhavcopy bars, which are as-traded."
+        f"Daily EOD series from trendlyne.com, spanning {first_date}..{last_date} "
+        f"({len(frame)} bars) — truncated at the instrument's listing, so the bar count is "
+        f"symbol-dependent (2006-01-02 is the floor for old listings; a 2023 IPO returns a few "
+        f"hundred). Basis: "
+        f"AS-TRADED, back-adjusted for splits and bonuses only; DEMERGERS ARE NOT APPLIED, so "
+        f"these bars equal the NSE as-traded print wherever no split or bonus falls inside the "
+        f"joined span. Do not splice them with bfinance.nse.bhavcopy bars across a split or bonus "
+        f"date — the older bars are scaled there and the join carries a corporate-action-sized "
+        f"step. Do not splice them with yfinance bars on a demerger name: yfinance rewrites that "
+        f"history and this source does not."
     )
     frame.attrs.update(
         build_attrs(
@@ -816,6 +926,7 @@ def parse_ohlc(
     )
     frame.attrs["bfinance_synthetic_ohlc"] = False
     frame.attrs[PRICE_BASIS_ATTR] = PRICE_BASIS
+    frame.attrs[DEMERGER_APPLIED_ATTR] = DEMERGER_APPLIED
     return frame[list(COLUMNS)]
 
 
@@ -1440,7 +1551,7 @@ class TrendlyneClient:
         *,
         include_last_week: bool = True,
     ) -> pd.DataFrame:
-        """Daily OHLCV, yfinance basis. Two requests the first time, one thereafter.
+        """Daily OHLCV, as-traded and split/bonus-adjusted. Two requests the first time, one after.
 
         Args:
             symbol: Anything :meth:`resolve_async` accepts.

@@ -9,9 +9,10 @@ an explicit import::
     from bfinance.trendlyne import TrendlyneClient
 
 Why a separate top-level package: trendlyne.com is a **third-party analytics site**, not an
-exchange source. Its numbers are derived and republished, its prices are on a **yfinance
-(back-adjusted) basis rather than as-traded**, and its routes are undocumented. Folding that into
-``bfinance.nse/`` would imply a provenance it does not have. Read
+exchange source. Its numbers are derived and republished and its routes are undocumented, so
+folding it into ``bfinance/nse/`` would imply a provenance it does not have. Its price basis is
+**as-traded, back-adjusted for splits and bonuses only, demergers NOT applied**, which is neither
+bhavcopy's basis nor yfinance's, and the module docstring carries the measurement. Read
 :mod:`bfinance.trendlyne.client`'s module docstring before trusting a number from here — in
 particular the price-basis warning and the fact that trendlyne's per-symbol OHLC token is the
 only route to its chart data.
@@ -19,13 +20,19 @@ only route to its chart data.
 What is here
 ------------
 - :mod:`~bfinance.trendlyne.client` — HTTP client, symbol index, token resolution, pacing, and
-  the daily OHLCV frame.
+  the daily OHLCV frame. This is the working part.
 - :mod:`~bfinance.trendlyne.tables` — server-rendered table extraction classified by **header
-  signature**, not by heading text. Sibling modules (``ownership``, ``deals``, ``corporate``)
-  build on this rather than re-implementing it.
+  signature**, not by heading text. Usable against any saved page, and currently the only way to
+  reach the section tables: no route in this package fetches one yet.
 - :mod:`~bfinance.trendlyne.errors` — the typed failures. Every one is a
   :class:`~bfinance.trendlyne.errors.TrendlyneError`, and also a member of the closest shared
   ``BFinanceError`` hierarchy, so ``except UpstreamServiceError`` still catches them.
+
+**That is the whole package.** There is no ``ownership``, ``deals`` or ``corporate`` module: the
+section tables trendlyne serves are written up in ``docs/UPSTREAM_SOURCES.md`` and not yet
+extracted, and nothing in this package refers to code that does not exist. A caller who wants one
+today composes :meth:`~bfinance.trendlyne.client.TrendlyneClient.fetch_text` with
+:func:`~bfinance.trendlyne.tables.find_table` directly.
 
 Nothing is fabricated. A table that is absent raises, a value that is missing stays missing, and
 every returned frame carries its provenance and a note on what it does not contain.
@@ -35,6 +42,8 @@ from .client import (
     BASE_URL,
     COLUMNS,
     DEFAULT_MIN_REQUEST_INTERVAL_MS,
+    DEMERGER_APPLIED,
+    DEMERGER_APPLIED_ATTR,
     ENDPOINTS,
     METRICS,
     NOTE_ATTR,
@@ -96,6 +105,8 @@ __all__ = [
     "BASE_URL",
     "COLUMNS",
     "DEFAULT_MIN_REQUEST_INTERVAL_MS",
+    "DEMERGER_APPLIED",
+    "DEMERGER_APPLIED_ATTR",
     "ENDPOINTS",
     "METRICS",
     "NOTE_ATTR",
