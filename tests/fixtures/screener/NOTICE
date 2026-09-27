@@ -7,7 +7,8 @@ are not a redistributable dataset, and nothing in the `bfinance` package reads t
 
 WHAT IS HERE
 ------------
-Six recordings of screener.in's own responses, made on 2026-09-27 (UTC) for two companies:
+Nine recordings of screener.in's own responses, made on 2026-09-27 (UTC) for two companies and
+for the market's industry tree:
 
   * `company_itc.html`, `company_tcs.html`
         from `https://www.screener.in/company/{SYMBOL}/consolidated/`
@@ -16,12 +17,27 @@ Six recordings of screener.in's own responses, made on 2026-09-27 (UTC) for two 
         (`peers_tcs.html` is an HTTP 404 body - see `META.json`)
   * `chart_itc.json`, `chart_tcs.json`
         from `https://www.screener.in/api/company/{id}/chart/?companyId=…&q=…&days=…`
+  * `market.html`
+        from `https://www.screener.in/market/` - the "Industries Overview": all 188 leaf
+        industries with their four-level code path and eight aggregates, in one 177 KB response
+  * `industry_in040107001.html`, `industry_in060101001.html`
+        from `https://www.screener.in/market/IN04/…/IN040107001/` (a *complete* leaf) and
+        `…/IN060101001/` (a *truncated* one, 25 of 218)
   * `META.json`
         the source URL, HTTP status, byte count, SHA-256 prefix, capture time and the exact trim
         rule for each file.
 
-The numbers in them are real, published market data for ITC Ltd and Tata Consultancy Services Ltd
-as screener.in presented them on that date. They may be revised by screener.in at any time.
+The numbers in them are real, published market data for ITC Ltd, Tata Consultancy Services Ltd and
+the Indian market's industry aggregates as screener.in presented them on that date. They may be
+revised by screener.in at any time.
+
+A WARNING ABOUT `peers_itc.html`
+--------------------------------
+That payload is a **verbatim recording of a defect**, and the tests around it assert its *shape*
+only. `/api/company/{id}/peers/` returns a mis-scoped set: for ITC it returns companies from
+*Other Industrial Products*, and the payload's own `Median: N Co.` row contradicts its 8 rows.
+Nothing in this directory supports the claim that its contents are ITC's peers. See
+`ScreenerHTMLParser._parse_peers`.
 
 WHY THEY EXIST
 --------------
@@ -48,6 +64,14 @@ ROBOTS
 ------
 screener.in's `robots.txt` disallows `/user/*`, `/*?q=`, `/*?sort=`, `/*?limit=`, `/*?page=` and
 `/company/source/quarter/*`. The recording honoured that: the search route
-`/api/company/search/?q=` was never called, and the chart API was recorded with `companyId=`
-**first** so that the query string does not begin with `q=`. Requests were paced at >= 1.2 s
-(screener.in publishes no `Crawl-delay`).
+`/api/company/search/?q=` was never called, the chart API was recorded with `companyId=`
+**first** so that the query string does not begin with `q=`, and **no `?page=` or `?limit=` URL was
+ever requested** — the two leaf-industry pages here carry exactly such links, and they were left
+alone. `robots.txt` was re-read live immediately before the `/market/` fetches; `/market/` itself
+takes no query string at all, so no rule (every one of which requires a `?`) can match it. Requests
+were paced at >= 1.2 s (screener.in publishes no `Crawl-delay`).
+
+The consequence is recorded rather than worked around: because the pager is off-limits, the
+constituent list for a large industry is **permanently partial**, and the tests assert that the
+partiality is visible instead of hiding it.
+

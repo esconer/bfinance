@@ -3,8 +3,8 @@
   "recorded_by": "one-off recorder, not shipped in the package",
   "captured_at_utc": "2026-09-27T16:28:12.806420+00:00",
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 (rotated by ScreenerClient.USER_AGENTS)",
-  "purpose": "Offline fixtures for bfinance.screener, the package's backbone fundamentals source. Every file is a verbatim recording of a live screener.in response on the date above, except where trim_rule says otherwise. Trimmed regions are listed per file.",
-  "robots": "screener.in/robots.txt disallows /user/*, /*?q=, /*?sort=, /*?limit=, /*?page= and /company/source/quarter/*. The robots-disallowed search route /api/company/search/?q= was never called, and the chart API was recorded with companyId= first so the query string does not begin with q=. Requests were paced at >= 1.2 s.",
+  "purpose": "Offline fixtures for bfinance.screener, the package's backbone fundamentals source. Every file is a verbatim recording of a live screener.in response, except where trim_rule says otherwise. Trimmed regions are listed per file. Captured in two sessions on 2026-09-27 UTC: the six company/peers/chart files at ~16:28, the three /market/ files at ~18:21-18:23; each file's own captured_at_utc is authoritative.",
+  "robots": "screener.in/robots.txt disallows /user/*, /*?q=, /*?sort=, /*?limit=, /*?page= and /company/source/quarter/*. The robots-disallowed search route /api/company/search/?q= was never called, the chart API was recorded with companyId= first so the query string does not begin with q=, and robots.txt itself was re-read live before the /market/ fetches. No ?page= or ?limit= URL was ever requested - the leaf pages carry such links and they were deliberately left alone, which is why the constituent list is partial by construction. Requests were paced at >= 1.2 s.",
   "files": {
     "company_itc.html": {
       "url": "https://www.screener.in/company/ITC/consolidated/",
@@ -76,6 +76,42 @@
       "trim_rule": "each dataset's `values` cut to the first 2 and the last 6 points; the true per-dataset point count is preserved in `_fixture_full_point_count`. Re-serialised with indent=1, so key order and whitespace differ from the wire bytes while every retained value is verbatim.",
       "notes": "q= is deliberately not the first query parameter: robots.txt has `Disallow: /*?q=`, which matches a query string starting with `q=`.",
       "stored_sha256": "837e6cf1686441b1fee10a3cd84223a8cfd061a303a8532c9a4e70945129870c",
+      "stored_line_endings": "lf"
+    },
+    "market.html": {
+      "url": "https://www.screener.in/market/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T18:20:57.107753+00:00",
+      "original_bytes": 177020,
+      "original_sha256_16": "8821e7e9a6e8470e",
+      "stored_bytes": 99474,
+      "trim_rule": "the single table.striped.data-table kept verbatim, re-wrapped in a bare <html><body>. Nothing inside it was touched: all 201 <tr>, all 188 leaf hrefs, all ten <td> per industry row and all 752 percent <span class=\"sub\"> survive. Dropped: <head>, nav, footer, and every <script>. This is the whole of what parse_market_industries reads - it selects nothing outside this table - and the trim was proved behaviour-neutral by parsing the raw 177,020-byte response and this fixture and comparing the full frame (values, index, dtypes) and frame.attrs with pandas.testing.assert_frame_equal.",
+      "notes": "An unadvertised entry point: linked from no company page and from no top-nav item; only the typed URL reaches it. The request carries NO query string, so none of the six robots.txt rules (every one of which needs a `?`) can match it. Measured shape: 201 <tr> = 13 repeated header rows + 188 leaf industries; there is no <thead>, and the single <tbody> contains the header rows AND the data rows together, so it separates nothing - which is why the parser requires BOTH a /market/ leaf link and exactly ten <td> on a row. The 188 leaves' own `No. of Companies` column sums to 3,319 - the most conservative of the three company-count universes screener.in publishes for the same nodes (the leaf pages' own `results found` sums to 5,468, the browse dropdown's child count to 7,068; the filters behind each are undetermined and the three disagree for individual nodes - Pharmaceuticals reports 159 here and 218 on its own leaf page).",
+      "stored_sha256": "bd89b17b414ad8030db2361fa2c7c29e4d128b8f9ee42ce403bb8289c0089528",
+      "stored_line_endings": "lf"
+    },
+    "industry_in040107001.html": {
+      "url": "https://www.screener.in/market/IN04/IN0401/IN040107/IN040107001/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T18:22:52.691934+00:00",
+      "original_bytes": 22880,
+      "original_sha256_16": "7604ebe2962fc0e4",
+      "stored_bytes": 4403,
+      "trim_rule": "two sub-trees kept verbatim, re-wrapped in a bare <html><body>: table.data-table (all 6 <tr> - header + 5 companies) and div[data-page-info]. Dropped: <head>, nav, the breadcrumb, the page-size and pager controls, the export form, <footer> and every <script>. Proved behaviour-neutral by parsing the raw response and this fixture and comparing the full 5-row result and the page_info dict.",
+      "notes": "The COMPLETE case: `5 results found: Showing page 1 of 1`, so `partial` is False and the 5 rows are genuinely the whole industry (ITC's own leaf - Diversified FMCG). The `?page=`/`?limit=` links this page carries were never requested; robots.txt disallows both. The breadcrumb and the export form were dropped because parse_industry_constituents reads neither - it selects exactly the table and the data-page-info div.",
+      "stored_sha256": "9c1e092657ee87c2006e8716bad92677d25dae45b2552196dcff4a912e6b0b3b",
+      "stored_line_endings": "lf"
+    },
+    "industry_in060101001.html": {
+      "url": "https://www.screener.in/market/IN06/IN0601/IN060101/IN060101001/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T18:22:53.675530+00:00",
+      "original_bytes": 36415,
+      "original_sha256_16": "fd2270aad14af276",
+      "stored_bytes": 13059,
+      "trim_rule": "two sub-trees kept verbatim, re-wrapped in a bare <html><body>: table.data-table (all 27 <tr> - two header rows + 25 companies, and the second header row at index 16 is deliberately kept because it is what a naive `rows[1:]` slice would emit as a company called 'Company') and div[data-page-info]. Dropped: <head>, nav, the breadcrumb, the pager, the page-size control, the export form, <footer> and every <script>. Proved behaviour-neutral by parsing the raw response and this fixture and comparing the full 25-row result and the page_info dict.",
+      "notes": "The TRUNCATED case: `218 results found: Showing page 1 of 9`, 25 rows returned. This is the fixture that makes partiality visible - a complete list is not robots-obtainable, because the page's own pager emits ?page=2..9 and its page-size control emits ?limit=10/25/50&page=1, all disallowed, and POST /api/export/screen/?url_name=browse_industry&mes_code=IN06 answers 403 unauthenticated. Note the page's own arithmetic does not close: 9 pages x 25 = 225, against 218 claimed. And market.html's `No. of Companies` for this same leaf is 159, not 218 - the count universes disagree for one node on one day.",
+      "stored_sha256": "b43919730f885b40032b114b61b7a33ce1ba6ace07d6321bbaa086e406edf24d",
       "stored_line_endings": "lf"
     }
   }

@@ -26,47 +26,56 @@ screener.in renames any of them, the matching test here fails and the fixtures m
 
 ======================================  ==================================================  =============
 #   selector / attribute                what it drives                                     method
-======================================  ==================================================  =============
-1    ``h1`` (first)                      company name                                        _parse_header_meta
-2    ``.company-profile .about p``       about text (``.about p`` is the fallback)            _parse_header_meta
-3    ``.company-links a .links a         website / BSE code / NSE symbol, by href host        _parse_header_meta
+1    ``h1`` (first)                       company name                                        _parse_header_meta
+2    ``.company-profile .about p``        about text (``.about p`` is the fallback)           _parse_header_meta
+3    ``.company-links a .links a          website / BSE code / NSE symbol, by href host       _parse_header_meta
      .company-info a .company-profile a``
-4    ``data-company-id="N"`` regex       the company id — the only compliant id resolver     client.extract_company_id
-5    ``section#peers a[href*=/market/]`` sector, industry group, industry, sub-industry      _parse_sector_hierarchy
-6    ``section#peers a`` text ~ bse|     index membership tags                              _parse_sector_hierarchy
-     nifty|sensex``
-7    ``#top-ratios li`` > ``.name``      the 9 headline ratios; "High / Low" splits on "/"   _parse_top_ratios
+4    ``data-company-id="N"`` regex        the company id — the only compliant id resolver     client.extract_company_id
+5    ``section#peers a[href*=/market/]``  sector, industry group, industry, sub-industry      _parse_sector_hierarchy
+6    ``section#peers a`` text ~           index membership tags                               _parse_sector_hierarchy
+     bse|nifty|sensex``
+7    ``#top-ratios li`` > ``.name``       the 9 headline ratios; "High / Low" splits on "/"   _parse_top_ratios
      + ``.value``
-8    ``.pros ul li`` / ``.cons ul li``   pros and cons                                       _parse_analysis
-9    ``.ranges-table`` > ``th`` + ``td`` the four CAGR tables                                _parse_cagrs
-10   ``section#{quarters,profit-loss,    the five statement tables, ``table.data-table``      _parse_table_section
+8    ``.pros ul li`` / ``.cons ul li``    pros and cons                                       _parse_analysis
+9    ``.ranges-table`` > ``th`` + ``td``  the four CAGR tables                                _parse_cagrs
+10   ``section#{quarters,profit-loss,     the five statement tables, ``table.data-table``     _parse_table_section
      balance-sheet,cash-flow,ratios}``
-11   ``section#shareholding              two tables: [0] quarterly, [1] yearly              _parse_shareholding_sections
+11   ``section#shareholding               two tables: [0] quarterly, [1] yearly               _parse_shareholding_sections
      table.data-table``
-12   ``section#documents .concalls       concalls: date regex + per-link role matchers        _parse_documents
+12   ``section#documents .concalls        concalls: date regex + per-link role matchers       _parse_documents
      ul li``
-13   ``section#documents                 annual reports                                       _parse_documents
+13   ``section#documents                  annual reports                                      _parse_documents
      .annual-reports a``
-14   ``section#documents                 credit ratings                                       _parse_documents
+14   ``section#documents                  credit ratings                                      _parse_documents
      .credit-ratings a``
-15   ``section#documents                 announcements — matches NOTHING in the current       _parse_documents
-     .announcements a``                 markup (see TestKnownParserGaps)
-16   ``table.data-table`` in the peers   the 11 peer columns + symbol from ``/company/SYM/``  _parse_peers
-     payload + ``a[href]``
-17   ``datasets[].metric`` /             the chart time series columns                        charts.py
+15   ``section#documents                  announcements — the container is the *unmarked*     _parse_documents
+     div.documents > h3``                 ``div.documents``: no id, no class, so it is
+     + structural inverse``               found by its ``<h3>Announcements</h3>`` heading
+16   ``table.data-table`` in the peers    the 11 cell columns, and symbol from the href.      _parse_peers
+     payload + ``a[href]``                **Shape only — never values**, see TestPeers
+17   ``datasets[].metric`` /              the chart time series columns                       charts.py
      ``datasets[].values[]``
-======================================  ==================================================  =============
+18   ``table.striped.data-table`` on      188 leaf industries: a 4-level code path and 8      parse_market_
+     ``/market/`` + ``a[href^=/market/]`` aggregates each. 13 repeated header rows must       industries
+                                          be skipped, not emitted
+19   ``div[data-page-info]`` on a leaf    "N results found: Showing page X of Y"              parse_industry_
+     industry page``                                                                          constituents
 
 The page's own nav anchors are ``#top #chart #analysis #peers #quarters #profit-loss
 #balance-sheet #cash-flow #ratios #shareholding #documents``; the parser reads none of ``#top``,
 ``#chart`` or ``#insights``, and the ratio card is a ``ul#top-ratios`` rather than a section, so
 the fixtures keep ``ul#top-ratios`` and every ``section#*`` the parser reads.
+
+Rows 1-17 are checked against the two **company** recordings below. Rows 18-19 read the
+``/market/`` overview and the leaf-industry pages, which are separate recordings with their own
+module: :mod:`tests.test_screener_market_offline`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -78,11 +87,19 @@ from bfinance.models.statements import INDIAN_TO_YFINANCE_LABELS
 from bfinance.screener.charts import ScreenerChartEngine
 from bfinance.screener.client import ScreenerClient, extract_company_id
 from bfinance.screener.parser import ScreenerHTMLParser
+from bfinance.utils.formatting import parse_indian_number
 
 FIXTURES = Path(__file__).parent / "fixtures" / "screener"
 
 #: symbol -> (company id, ticker used on screener.in, the two values that must differ per symbol)
 SYMBOLS = {"itc": 1552, "tcs": 3365}
+
+#: The 11 cells of a screener.in company table, in the order ``_parse_peers`` reads them. ``symbol``
+#: is deliberately absent: it is the 12th field and the only one with no column, being the
+#: ``/company/SYM/`` segment of the name cell's href. See :class:`TestPeers` for why this list is
+#: about *shape* only.
+PEER_FIELDS_FROM_CELLS = ("rank", "name", "cmp", "pe", "market_cap_cr", "dividend_yield",
+                          "net_profit_qtr", "qtr_profit_var", "sales_qtr", "qtr_sales_var", "roce")
 
 
 def text(name: str) -> str:
@@ -108,6 +125,33 @@ def parse(sym: str, *, with_peers: bool = True):
         is_consolidated=True,
         page_url=f"https://www.screener.in/company/{sym.upper()}/consolidated/",
     )
+
+
+def _peer_cells() -> list[list[str]]:
+    """The ``<td>`` texts of every data row of the recorded peers payload, header excluded.
+
+    Read straight from the fixture with BeautifulSoup and *not* through ``_parse_peers``, so a test
+    can state the parser's contract without restating a single expected value. Rows narrower than
+    four cells are filtered out here, exactly as the parser filters them, so the two cannot drift
+    into disagreeing about which rows exist.
+    """
+    table = BeautifulSoup(text("peers_itc.html"), "html.parser").find("table", class_="data-table")
+    return [
+        [td.get_text(strip=True) for td in tr.find_all("td")]
+        for tr in table.find_all("tr")[1:]
+        if len(tr.find_all("td")) >= 4
+    ]
+
+
+def parse_industry(slug: str) -> list:
+    """Parse a recorded leaf-industry page into ``PeerStock`` rows.
+
+    The same 11-column table shape as the peers payload, read from a page where the membership is
+    actually correct — which is what makes the two comparable in :class:`TestPeers`.
+    """
+    peers, page_info = ScreenerHTMLParser().parse_industry_constituents(text(f"industry_{slug}.html"))
+    assert page_info, f"industry_{slug}.html carries no div[data-page-info]; the fixture lost it"
+    return peers
 
 
 class Recordings:
@@ -599,29 +643,89 @@ class TestDocuments:
 
 
 class TestKnownParserGaps:
-    """Three defects the recordings make visible. They are *documented*, not fixed here.
+    """Two defects the recordings make visible, and one that has been **fixed**.
 
-    Each one is asserted as it behaves today so that a change is a deliberate act rather than an
-    accident — and so a reviewer can see the defect instead of discovering it in production.
+    The two remaining are *documented*, not fixed: each is asserted as it behaves today so that a
+    change is a deliberate act rather than an accident — and so a reviewer can see the defect
+    instead of discovering it in production. The third was a defect in this suite's own subject and
+    is now pinned as working behaviour.
     """
 
-    def test_announcements_never_parse_because_the_container_has_no_matching_class(self):
-        """``_parse_documents`` selects ``.announcements a, #announcements a``. The announcements
-        list on the live page is ``div.documents.flex-column`` - it carries the bare ``documents``
-        class and **no id at all** - while its three siblings are ``documents annual-reports``,
-        ``documents credit-ratings`` and ``documents concalls``. So the announcements list is
-        silently always empty. Fixing the selector is a product decision, not a test fix."""
-        soup = BeautifulSoup(company_html("itc"), "lxml")
-        containers = soup.select("section#documents div.documents")
-        assert [c.get("class") for c in containers] == [
-            ["documents", "flex-column"],
-            ["documents", "annual-reports", "flex-column"],
-            ["documents", "credit-ratings", "flex-column"],
-            ["documents", "concalls", "flex-column"],
-        ]
-        assert all(c.get("id") is None for c in containers)
-        assert not soup.select("section#documents .announcements a"), "markup changed; re-check"
-        assert parse("itc").announcements == []
+    def test_announcements_parse_from_the_unmarked_container(self):
+        """``CompanyProfile.announcements`` used to be **always empty**, and it was not missing data.
+
+        ``_parse_documents`` selected ``.announcements a, #announcements a``. The live
+        announcements list is the one ``div.documents`` block that carries **no distinguishing class
+        and no id at all** — its three siblings are ``documents annual-reports``,
+        ``documents credit-ratings`` and ``documents concalls`` — so the selector matched nothing on
+        every company, and a field that looked implemented never was.
+
+        The fix anchors on the container's ``<h3>Announcements</h3>`` heading, with the structural
+        inverse (the unmarked ``div.documents``) as a second selector, so a rename of *either* one
+        is caught rather than silently reverting to empty. This test pins the **result**; the two
+        tests after it pin the two selectors independently, which is what makes a silent regression
+        to "always empty" impossible to merge.
+        """
+        announcements = parse("itc").announcements
+        assert len(announcements) == 5, "announcements are empty again; the selector regressed"
+        first = announcements[0]
+        assert first["title"].startswith("Closure of Trading Window")
+        assert first["url"].startswith("https://www.bseindia.com/stockinfo/AnnPdfOpen.aspx?Pname=")
+        # every entry is a real filing, and every URL is a document
+        assert all(a["title"] for a in announcements)
+        assert all(a["url"].startswith("http") for a in announcements)
+        assert len({a["url"] for a in announcements}) == 5, "duplicate announcement URLs"
+        # the container's other anchor is the "All" link to BSE's announcement index - navigation,
+        # not an announcement, and it must not appear here
+        assert not any(a["url"].endswith("/corp-announcements/") for a in announcements)
+        assert not any(a["title"] == "All" for a in announcements)
+
+    def test_announcements_carry_the_publication_date_the_page_publishes(self):
+        """Each entry nests a ``<time datetime="2026-09-25T19:07:17+05:30">``; the title
+        concatenates it without a separator, so the date is in the string.
+
+        Pinned as a *behaviour* (which is what the parser does), not as a proposal to add a ``date``
+        key — the model declares ``List[Dict[str, str]]``, and splitting that date out is a
+        separate, deliberate change.
+        """
+        titles = [a["title"] for a in parse("itc").announcements]
+        assert any("25 Sep" in t for t in titles), "the nested <time> text vanished from the title"
+        assert any(t.startswith("Announcement under Regulation 30 (LODR)-") for t in titles)
+
+    def test_tcs_has_no_announcements_container_and_returns_none_of_them(self):
+        """The TCS recording dropped the announcements block (see META.json's trim rule), so it
+        yields ``[]`` — which is how an *absent* container must look, and is what distinguishes it
+        from the ITC recording's five real entries. If this ever returns entries, the trim changed.
+        """
+        assert parse("tcs").announcements == []
+        soup = BeautifulSoup(company_html("tcs"), "lxml")
+        assert not soup.select("section#documents div.documents:not([class*=annual])"
+                               ":not([class*=credit]):not([class*=concall])")
+
+    def test_the_announcements_selector_survives_renaming_either_half_of_it(self):
+        """Both selectors, each exercised on its own, so a rename of one is not a silent empty.
+
+        The heading selector is tried first, the structural inverse second. Killing the heading in
+        the recorded markup must leave the second one working; killing the marker classes must leave
+        the first one working. Losing *both* would restore the old bug, and
+        :meth:`test_announcements_parse_from_the_unmarked_container` is what catches that.
+        """
+        parser = ScreenerHTMLParser()
+        original = company_html("itc")
+        reworded = original.replace(
+            '<h3 class="margin-bottom-8">Announcements</h3>',
+            '<h3 class="margin-bottom-8">Latest News</h3>',
+        )
+        assert reworded != original
+        assert len(parser._parse_documents(BeautifulSoup(reworded, "lxml"))[3]) == 5, (
+            "the structural fallback selector no longer finds the container"
+        )
+
+        unclassed = original.replace("documents annual-reports", "documents yrly-reports")
+        assert unclassed != original
+        assert len(parser._parse_documents(BeautifulSoup(unclassed, "lxml"))[3]) == 5, (
+            "the heading selector no longer finds the container"
+        )
 
     def test_the_concall_ppt_link_is_filed_as_the_transcript(self):
         """The 'Transcript' control is a ``div.button-chip``, not an anchor, so the only ``<a>`` in
@@ -644,26 +748,91 @@ class TestKnownParserGaps:
 
 
 class TestPeers:
+    """``_parse_peers`` is tested for its **contract only** — never for the *values*.
+
+    ⚠ **Why no test here asserts that the parsed rows are ITC's peers: because they are not.**
+    ``/api/company/{id}/peers/`` returns a mis-scoped set. Measured 5/5 and byte-stable across
+    repeat fetches (``META.json`` records identical bytes for two consecutive requests), so this is
+    a real upstream defect, not a transient or a stale cache:
+
+    ==================  =============================  ==============================================
+    company             its actual industry            what the API returns
+    ==================  =============================  ==============================================
+    ITC 1552            Fast Moving Consumer Goods     HBL Engineering, Inox India, KRN, Esab, Ador
+                                                        — all *Other Industrial Products*
+    HDFCBANK 1298       Private Sector Bank            GNG Electronics, Rashi Peripheral, Moschip,
+                                                        D-Link India
+    SUNPHARMA 3245      Pharmaceuticals                JK Paper, West Coast Paper, N R Agarwal
+    TATASTEEL 3373      Iron & Steel                   Redington, MMTC, MSTC
+    TCS 3365            IT Software                    **HTTP 404**, reproducibly
+    ==================  =============================  ==============================================
+
+    Two of the three tests below carry that evidence, so the decision is re-derivable from this
+    file rather than from a changelog. ``test_the_payload_is_disjoint_from_the_company_s_own_industry``
+    proves the mis-scoping offline, using two *other* fixtures;
+    ``test_the_payload_contradicts_itself`` records the internal inconsistency.
+
+    **If you are here to "restore" assertions like ``peers[0].name == "HBL Engineering"``, do not.**
+    They used to be in :meth:`test_every_peer_row_is_parsed` and they certified a wrong answer as
+    correct: they pinned HBL Engineering as ITC's top-ranked peer while the same suite also pinned
+    ITC's industry as *Diversified FMCG*. The parser has one contract — *shape* — and that is what
+    is asserted. ``peers_itc.html`` is a verbatim recording and is still the right input for
+    proving shape; it is not evidence of anything about peers.
+    """
+
     def test_the_recording_is_a_real_peers_payload(self):
         soup = BeautifulSoup(text("peers_itc.html"), "html.parser")
         rows = soup.find("table", class_="data-table").find_all("tr")
         assert len(rows) == 10, "header + 8 peers + a median row"
 
-    def test_every_peer_row_is_parsed(self):
-        peers = parse("itc").peers
-        assert len(peers) == 9
-        assert [p.rank for p in peers] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
-        first = peers[0]
-        assert (first.name, first.symbol) == ("HBL Engineering", "HBLENGINE")
-        assert first.cmp == pytest.approx(806.0)
-        assert first.pe == pytest.approx(27.87)
-        assert first.market_cap_cr == pytest.approx(22341.91)
-        assert first.dividend_yield == pytest.approx(0.37)
-        assert first.net_profit_qtr == pytest.approx(109.14)
-        assert first.qtr_profit_var == pytest.approx(-25.07)
-        assert first.sales_qtr == pytest.approx(638.03)
-        assert first.qtr_sales_var == pytest.approx(6.03)
-        assert first.roce == pytest.approx(59.3)
+    def test_every_data_row_becomes_exactly_one_peer(self):
+        """Row count, from the recording rather than from memory.
+
+        9 = 8 company rows + the trailing ``Median: N Co.`` row. The point is one-to-one, not the
+        number 9: a row that is dropped, or a header that is emitted, moves this count.
+        """
+        assert len(parse("itc").peers) == len(_peer_cells()) == 9
+
+    def test_the_eleven_columns_map_onto_the_fields_in_order(self):
+        """field <- cell position, checked against the recording instead of a memo.
+
+        This is the contract in full: the 11 cells map to 11 fields in order, the 12th field
+        (``symbol``) is not a cell at all but the ``/company/SYM/`` href, and every numeric cell
+        goes through the Indian-format parser. Nothing here says *which* companies those are — the
+        endpoint is mis-scoped upstream, so a value assertion would be a wrong assertion.
+
+        Reading the expected value out of the fixture on every run is what makes this a shape test
+        rather than a transcription: change a number upstream and this test follows it, whereas the
+        old test failed and invited someone to "fix" the expectation to the new wrong answer.
+        """
+        cells, peers = _peer_cells(), parse("itc").peers
+        assert len(cells) == len(peers)
+        for row, peer in zip(cells, peers):
+            assert len(row) == 11, f"recording row is no longer 11 columns: {row}"
+            for field, cell in zip(PEER_FIELDS_FROM_CELLS, row):
+                if field == "name":
+                    assert peer.name == cell
+                elif field == "rank":
+                    continue  # the median row has no S.No.; see the fallback test
+                else:
+                    assert getattr(peer, field) == pytest.approx(
+                        parse_indian_number(cell)
+                    ), f"{field} is not column {PEER_FIELDS_FROM_CELLS.index(field)}"
+
+    def test_the_symbol_comes_from_the_href_and_not_from_a_cell(self):
+        """``symbol`` is the one field with no column: it is the ``/company/SYM/`` segment.
+
+        Checked per row against the recording's own href, including the case where the segment is
+        a six-digit BSE scrip code rather than a ticker — a real row in this payload has one, and a
+        regex that only accepted letters would silently drop that row's identity.
+        """
+        table = BeautifulSoup(text("peers_itc.html"), "html.parser").find("table", class_="data-table")
+        linked = [re.search(r"/company/([A-Z0-9\-]+)/", tr.find("a")["href"]).group(1)
+                  for tr in table.find_all("tr")[1:] if tr.find("a") and tr.find("a").get("href")]
+        parsed = [p.symbol for p in parse("itc").peers if p.symbol is not None]
+        assert parsed == linked
+        assert any(s.isdigit() for s in linked), "the recording's BSE-scrip-code row is gone; re-check"
+        assert all(re.fullmatch(r"[A-Z0-9\-]+", s) for s in linked)
 
     def test_no_peer_is_the_header_row(self):
         """The header is a single ``<tr>`` of ``<th>``, so it carries no ``<td>`` and the parser
@@ -677,25 +846,101 @@ class TestPeers:
         assert header.find("td") is None, "the recording's header row now has td cells; re-check"
 
     def test_the_first_data_row_is_not_skipped(self):
-        """``rows[1:]`` must drop the header, not the first company."""
-        assert parse("itc").peers[0].name == "HBL Engineering"
-        assert parse("itc").peers[-2].name == "Divine Multi."
+        """``rows[1:]`` must drop the header, not the first company.
+
+        Compared positionally: the first emitted peer must be the recording's first *data* row. The
+        old version asserted ``peers[0].name == "HBL Engineering"``, which additionally claimed
+        that HBL Engineering is ITC's top peer. It is not — see the class docstring.
+        """
+        peers = parse("itc").peers
+        assert peers[0].name == _peer_cells()[0][1]
+        assert peers[0].symbol is not None
+        assert peers[-2].name == _peer_cells()[-2][1], "the row before the median row was skipped"
 
     def test_the_trailing_median_row_keeps_its_values_and_loses_its_symbol(self):
         """The last row has an empty S.No. cell, so rank falls back to position and there is no
         ``/company/SYM/`` href to read a symbol from."""
-        median = parse("itc").peers[-1]
-        assert median.name == "Median: 33 Co."
-        assert median.rank == 9
+        peers = parse("itc").peers
+        median = peers[-1]
+        assert median.name.startswith("Median:")
+        assert median.rank == 9, "rank must fall back to position when the S.No. cell is empty"
         assert median.symbol is None
-        assert median.market_cap_cr == pytest.approx(561.65)
+        # its numbers still parse - the row is a company-less summary, not a skipped row
+        assert median.market_cap_cr == pytest.approx(parse_indian_number(_peer_cells()[-1][4]))
 
-    def test_a_peer_with_no_usable_numbers_keeps_none_and_does_not_become_zero(self):
-        """'Divine Multi.' is listed with an empty P/E; the BSE scrip code is what the href yields."""
-        divine = next(p for p in parse("itc").peers if p.name == "Divine Multi.")
-        assert divine.pe is None
-        assert divine.qtr_sales_var is None
-        assert divine.symbol == "523810"
+    def test_a_row_with_no_usable_numbers_keeps_none_and_does_not_become_zero(self):
+        """An empty cell is ``None``. A zero would be a fabricated number that sorts as a real one.
+
+        Located from the recording, not by company name — this payload has a row with an empty P/E
+        and an empty Qtr Sales Var%. Asserted in **both** directions, because a parser that
+        returned ``None`` for everything would otherwise pass the first half of this test:
+
+        * a blank cell -> the field is ``None``;
+        * a cell that parses -> the field is not ``None``.
+        """
+        cells, peers = _peer_cells(), parse("itc").peers
+        assert any(parse_indian_number(c[3]) is None for c in cells), (
+            "the recording has no row with an empty P/E any more; re-check"
+        )
+        blanks = 0
+        for row, peer in zip(cells, peers):
+            for field, cell in zip(PEER_FIELDS_FROM_CELLS, row):
+                if field in ("name", "rank"):
+                    continue  # not numeric cells; covered by the fallback and mapping tests
+                if not cell:
+                    blanks += 1
+                    assert getattr(peer, field) is None, (
+                        f"blank {field} became {getattr(peer, field)!r} instead of None"
+                    )
+                else:
+                    assert getattr(peer, field) is not None, f"{field} was dropped for a real cell"
+        assert blanks == 2, "the recording's blank-cell count changed; re-check"
+
+    def test_the_payload_is_disjoint_from_the_company_s_own_industry(self):
+        """The evidence for refusing to assert values — and it needs no network.
+
+        Three recordings, three independent screener.in routes, all agreeing that the two sets do
+        not overlap even once:
+
+        * ``company_itc.html``'s breadcrumb puts ITC in *Diversified FMCG* (pinned by
+          :class:`TestSectorHierarchy`);
+        * ``market.html`` says that leaf, ``IN040107001``, holds **5** companies;
+        * ``industry_in040107001.html`` lists those 5 — Hind. Unilever, ITC, Hindustan Foods,
+          Godavari Biorefineries, Davangere Sugar;
+        * ``peers_itc.html`` returns 8 companies, **none of which is any of them**.
+
+        A "peer set" with zero members in common with the peer's own industry is not a peer set. If
+        this test ever fails, screener.in fixed the endpoint and value assertions can come back —
+        deliberately, in a change that says so.
+        """
+        itc_industry = parse("itc").sub_industry
+        assert itc_industry == "Diversified FMCG"
+        market = ScreenerHTMLParser().parse_market_industries(text("market.html"))
+        assert market.loc["IN040107001", "industry"] == itc_industry
+        assert market.loc["IN040107001", "no_of_companies"] == 5.0
+
+        real = {p.name for p in parse_industry("in040107001")}
+        claimed = {p.name for p in parse("itc").peers if not p.name.startswith("Median:")}
+        assert len(real) == 5 and len(claimed) == 8
+        assert not (real & claimed), (
+            f"the peers payload now overlaps ITC's real industry on {real & claimed} — screener.in "
+            f"may have fixed the endpoint; value assertions could be revisited deliberately"
+        )
+
+    def test_the_payload_contradicts_itself(self):
+        """8 company rows shipped; the payload's own median row says ``Median: 33 Co.``.
+
+        Recorded because it is the cheapest signal that the endpoint is not deriving these rows
+        from a consistent query — and because a future reader who sees 8 rows here should not
+        assume 8 is what screener.in believes the peer count to be.
+        """
+        cells = _peer_cells()
+        companies = [c for c in cells if not c[1].startswith("Median:")]
+        median = next(c for c in cells if c[1].startswith("Median:"))
+        claimed = int(re.match(r"Median:\s*(\d+)", median[1]).group(1))
+        assert len(companies) == 8
+        assert claimed == 33
+        assert claimed != len(companies)
 
     def test_the_tcs_peers_endpoint_404s_and_the_profile_survives_it(self):
         """screener.in answers 404 for /api/company/3365/peers/ (checked three ways, see META.json).
