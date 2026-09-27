@@ -1,0 +1,53 @@
+THIRD-PARTY RECORDINGS — screener.in
+====================================
+
+The files in this directory are **verbatim recordings of responses from screener.in**, a
+commercial, third-party service. They are **test fixtures only**. They are not source code, they
+are not a redistributable dataset, and nothing in the `bfinance` package reads them at runtime.
+
+WHAT IS HERE
+------------
+Six recordings of screener.in's own responses, made on 2026-09-27 (UTC) for two companies:
+
+  * `company_itc.html`, `company_tcs.html`
+        from `https://www.screener.in/company/{SYMBOL}/consolidated/`
+  * `peers_itc.html`, `peers_tcs.html`
+        from `https://www.screener.in/api/company/{id}/peers/`
+        (`peers_tcs.html` is an HTTP 404 body - see `META.json`)
+  * `chart_itc.json`, `chart_tcs.json`
+        from `https://www.screener.in/api/company/{id}/chart/?companyId=…&q=…&days=…`
+  * `META.json`
+        the source URL, HTTP status, byte count, SHA-256 prefix, capture time and the exact trim
+        rule for each file.
+
+The numbers in them are real, published market data for ITC Ltd and Tata Consultancy Services Ltd
+as screener.in presented them on that date. They may be revised by screener.in at any time.
+
+WHY THEY EXIST
+--------------
+screener.in is the backbone for profiles, financial statements, ratios, screens, peers and concall
+transcripts. There is no second source for those, and the site can change its markup without
+notice. Before these recordings existed, every test for `bfinance.screener` was marked `live`, and
+the required CI job runs `-m "not live"` — so **the offline suite proved nothing at all** about the
+parser. A silent markup break reached users undetected.
+
+These recordings turn that surface into something the required CI job can check. A selector rename,
+a dropped `data-company-id`, a re-ordered peers table or a renamed ratio now fails a test on every
+commit instead of surfacing as an empty profile in production.
+
+The full selector inventory the fixtures must preserve is documented in the test module
+`tests/test_screener_offline.py`; each file's trim rule is in `META.json`.
+
+EDITING
+-------
+Do not hand-edit these files. If screener.in's markup changes, re-record the fixtures from a live
+capture and update `META.json` in the same change. A hand-edited fixture is worse than no fixture,
+because it can be made to agree with a broken parser.
+
+ROBOTS
+------
+screener.in's `robots.txt` disallows `/user/*`, `/*?q=`, `/*?sort=`, `/*?limit=`, `/*?page=` and
+`/company/source/quarter/*`. The recording honoured that: the search route
+`/api/company/search/?q=` was never called, and the chart API was recorded with `companyId=`
+**first** so that the query string does not begin with `q=`. Requests were paced at >= 1.2 s
+(screener.in publishes no `Crawl-delay`).

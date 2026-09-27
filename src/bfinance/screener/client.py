@@ -424,7 +424,17 @@ class ScreenerClient:
             raw_json = self.cache.get(cache_key)
 
         if raw_json is None:
-            url = f"{self.BASE_URL}/api/company/{comp_id}/chart/?q={q_param}&days={days}"
+            # `companyId` first, deliberately. screener.in's robots.txt carries
+            # `Disallow: /*?q=`, where `*` is the only wildcard and `?` is literal - so it forbids
+            # a query string whose FIRST parameter is `q`, and permits the same parameter later.
+            # This URL used to be `?q={q_param}&days={days}`, which matches that rule on every
+            # call. Putting `companyId` first does not change the response (both chart recordings
+            # in tests/fixtures/screener/ were taken from exactly this shape) - it only stops the
+            # request from being a disallowed one.
+            url = (
+                f"{self.BASE_URL}/api/company/{comp_id}/chart/"
+                f"?companyId={comp_id}&q={q_param}&days={days}"
+            )
             resp = await self._send_with_retry(url)
             if resp.status_code != 200:
                 raise UpstreamServiceError(f"Chart API error for '{symbol}' ({q_param}): {resp.status_code}")

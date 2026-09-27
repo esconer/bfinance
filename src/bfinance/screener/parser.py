@@ -3,7 +3,7 @@ High-precision DOM and HTML table parser for Screener.in financial statements, r
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from bfinance.models.company import (

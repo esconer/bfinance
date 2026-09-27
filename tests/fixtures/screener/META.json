@@ -1,0 +1,70 @@
+{
+  "source": "https://www.screener.in",
+  "recorded_by": "one-off recorder, not shipped in the package",
+  "captured_at_utc": "2026-09-27T16:28:12.806420+00:00",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 (rotated by ScreenerClient.USER_AGENTS)",
+  "purpose": "Offline fixtures for bfinance.screener, the package's backbone fundamentals source. Every file is a verbatim recording of a live screener.in response on the date above, except where trim_rule says otherwise. Trimmed regions are listed per file.",
+  "robots": "screener.in/robots.txt disallows /user/*, /*?q=, /*?sort=, /*?limit=, /*?page= and /company/source/quarter/*. The robots-disallowed search route /api/company/search/?q= was never called, and the chart API was recorded with companyId= first so the query string does not begin with q=. Requests were paced at >= 1.2 s.",
+  "files": {
+    "company_itc.html": {
+      "url": "https://www.screener.in/company/ITC/consolidated/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T16:28:12.806420+00:00",
+      "original_bytes": 210834,
+      "original_sha256_16": "73e979861da8eeb5",
+      "stored_bytes": 42258,
+      "trim_rule": "verbatim sub-trees re-wrapped in a bare <html><body>, with the inter-tag indentation stripped from every kept text node (no text content altered; the parser reads every value through get_text(strip=True), so this is behaviour-neutral): div[data-company-id] verbatim (id resolver); h1 verbatim (company name); div.company-info verbatim (about + links + ul#top-ratios); section#peers verbatim minus 52 a.tag.hidden and 3 of the visible #benchmarks chips (2 kept); the four /market/ crumbs kept in full; div.pros verbatim; div.cons verbatim; all 4 table.ranges-table elements kept verbatim; section#quarters: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#profit-loss: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#balance-sheet: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#cash-flow: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#ratios: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#shareholding verbatim (quarterly + yearly tables); columns cut to the trailing 2 of the quarterly table and the trailing 4 of the yearly table - different windows on purpose, so a parser that reads both from the same table cannot pass; all rows kept; section#documents: .concalls ul li cut to the newest 1, .annual-reports a cut to 1, .credit-ratings a cut to 1; section#documents (attributes + the kept sub-lists). Dropped: <head>, top nav, sidebar, footer, section#chart, section#insights, hidden duplicate statement tables, and all <script>/modal markup.",
+      "notes": "The consolidated page is NOT byte-stable between fetches (per-request CSRF tokens, ids and ad markup move); only the parsed values are stable. Its section id sequence is identical to the TCS recording - that is what the genericity test asserts."
+    },
+    "peers_itc.html": {
+      "url": "https://www.screener.in/api/company/1552/peers/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T16:28:15.264090+00:00",
+      "original_bytes": 6444,
+      "original_sha256_16": "dfb10cb7f6079b18",
+      "stored_bytes": 6444,
+      "trim_rule": "none (stored verbatim - 6 KB, the parser's only input)",
+      "notes": "The peers endpoint answered 200 and returned byte-identical bytes on two consecutive fetches (sha256_16 dfb10cb7f6079b18 both times)."
+    },
+    "chart_itc.json": {
+      "url": "https://www.screener.in/api/company/1552/chart/?companyId=1552&q=Price-DMA50-DMA200-Volume&days=365",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T16:28:17.737772+00:00",
+      "original_bytes": 30268,
+      "original_sha256_16": "209c0e87af228ca2",
+      "stored_bytes": 2543,
+      "trim_rule": "each dataset's `values` cut to the first 2 and the last 6 points; the true per-dataset point count is preserved in `_fixture_full_point_count`. Re-serialised with indent=1, so key order and whitespace differ from the wire bytes while every retained value is verbatim.",
+      "notes": "q= is deliberately not the first query parameter: robots.txt has `Disallow: /*?q=`, which matches a query string starting with `q=`."
+    },
+    "company_tcs.html": {
+      "url": "https://www.screener.in/company/TCS/consolidated/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T16:28:21.587895+00:00",
+      "original_bytes": 242313,
+      "original_sha256_16": "d0412f8ff01f4902",
+      "stored_bytes": 40595,
+      "trim_rule": "verbatim sub-trees re-wrapped in a bare <html><body>, with the inter-tag indentation stripped from every kept text node (no text content altered; the parser reads every value through get_text(strip=True), so this is behaviour-neutral): div[data-company-id] verbatim (id resolver); h1 verbatim (company name); div.company-info verbatim (about + links + ul#top-ratios); section#peers verbatim minus 59 a.tag.hidden and 3 of the visible #benchmarks chips (2 kept); the four /market/ crumbs kept in full; div.pros verbatim; div.cons verbatim; all 4 table.ranges-table elements kept verbatim; section#quarters: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#profit-loss: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#balance-sheet: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#cash-flow: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#ratios: header + visible table verbatim, columns cut to the trailing 2 period columns, all data rows kept; section#shareholding verbatim (quarterly + yearly tables); columns cut to the trailing 2 of the quarterly table and the trailing 4 of the yearly table - different windows on purpose, so a parser that reads both from the same table cannot pass; all rows kept; section#documents: .concalls ul li cut to the newest 1, .annual-reports a cut to 1, .credit-ratings a cut to 1; the announcements container (div.documents.flex-column, which carries no .announcements class) dropped for this symbol; section#documents (attributes + the kept sub-lists). Dropped: <head>, top nav, sidebar, footer, section#chart, section#insights, hidden duplicate statement tables, and all <script>/modal markup.",
+      "notes": "See the ITC note: the consolidated page is not byte-stable between fetches."
+    },
+    "peers_tcs.html": {
+      "url": "https://www.screener.in/api/company/3365/peers/",
+      "http_status": 404,
+      "captured_at_utc": "2026-09-27T16:28:24.918247+00:00",
+      "original_bytes": 11399,
+      "original_sha256_16": "7705135e339ce4db",
+      "stored_bytes": 128,
+      "trim_rule": "HTTP 404 error page: <title> kept verbatim, body dropped",
+      "notes": "HTTP 404. /api/company/3365/peers/ returns 404 reproducibly - checked twice by numeric id and once by symbol (/api/company/TCS/peers/). ITC answers 200 on the same route. The client already tolerates this (peers_html stays None, so profile.peers is []), and the offline suite now pins that behaviour."
+    },
+    "chart_tcs.json": {
+      "url": "https://www.screener.in/api/company/3365/chart/?companyId=3365&q=Price-DMA50-DMA200-Volume&days=365",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-27T16:28:26.942617+00:00",
+      "original_bytes": 30812,
+      "original_sha256_16": "7187fedb6003180f",
+      "stored_bytes": 2564,
+      "trim_rule": "each dataset's `values` cut to the first 2 and the last 6 points; the true per-dataset point count is preserved in `_fixture_full_point_count`. Re-serialised with indent=1, so key order and whitespace differ from the wire bytes while every retained value is verbatim.",
+      "notes": "q= is deliberately not the first query parameter: robots.txt has `Disallow: /*?q=`, which matches a query string starting with `q=`."
+    }
+  }
+}

@@ -2,7 +2,7 @@
 Historical valuation multiples and price time series engine from Screener.in.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 import pandas as pd
 from bfinance.utils.formatting import parse_indian_number
 
