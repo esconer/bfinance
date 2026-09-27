@@ -65,6 +65,7 @@ the fixtures keep ``ul#top-ratios`` and every ``section#*`` the parser reads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -1050,7 +1051,20 @@ class TestFixtureProvenance:
             assert entry["original_bytes"] > 0, name
             assert len(entry["original_sha256_16"]) == 16, name
             assert entry["trim_rule"], name
-            assert (FIXTURES / name).stat().st_size == entry["stored_bytes"], name
+            # Assert the sha of the *normalised* content, not `stat().st_size`. Git checks these
+            # out with CRLF on Windows and LF elsewhere, so a raw size or sha assertion passes in
+            # the working tree where Python wrote the file and then fails on any fresh clone —
+            # the exact "green locally, red in CI" failure this suite exists to prevent.
+            # `.gitattributes` pins `eol=lf` for the fixture tree; normalising here keeps the test
+            # correct even where that is not honoured. The sha is the real assertion: it detects
+            # any edit to a recording, which a size check alone would not.
+            raw = (FIXTURES / name).read_bytes().replace(b"\r\n", b"\n")
+            assert hashlib.sha256(raw).hexdigest() == entry["stored_sha256"], (
+                f"{name} does not match the content META.json describes — the fixture was edited, "
+                "truncated, or line-ending translated since it was recorded"
+            )
+            assert len(raw) == entry["stored_bytes"], name
+            assert entry["stored_line_endings"] == "lf", name
 
     def test_the_recordings_are_much_larger_than_the_fixtures(self):
         """A trim that did not trim would make ``stored_bytes == original_bytes`` everywhere."""

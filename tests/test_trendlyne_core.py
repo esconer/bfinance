@@ -1,5 +1,5 @@
 """
-trendlyne core tests — fully offline, driven by recorded fixtures.
+trendlyne core tests â€” fully offline, driven by recorded fixtures.
 
 Every fixture under ``tests/fixtures/trendlyne/`` is a real recording of trendlyne.com taken on
 2026-09-27; ``META.json`` in that directory records the source URL, HTTP status, byte count and
@@ -18,6 +18,7 @@ The tests are organised around the claims the module makes, not around its funct
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -62,7 +63,7 @@ def indexed_client(client: tl.TrendlyneClient) -> tl.TrendlyneClient:
 
 
 def mock_client(handler, **kwargs) -> tl.TrendlyneClient:
-    """A client whose every request is served by ``handler`` — no network, no sockets."""
+    """A client whose every request is served by ``handler`` â€” no network, no sockets."""
     kwargs.setdefault("min_request_interval_ms", 0.0)
     kwargs.setdefault("max_retries", 2)
     return tl.TrendlyneClient(transport=httpx.MockTransport(handler), **kwargs)
@@ -212,7 +213,7 @@ class TestSymbolIndex:
             indexed_client.resolve("")
 
     def test_non_ticker_symbol_segments_are_indexed_verbatim(self):
-        """The live sitemap tail holds /equity/3622447/1216/bse-midsmall-private-banks/ — the
+        """The live sitemap tail holds /equity/3622447/1216/bse-midsmall-private-banks/ â€” the
         symbol segment is a number, not a ticker. Guessing a ticker shape would lose these."""
         record = tl.parse_sitemap(text("sitemap_excerpt.xml"))["1216"]
         assert record.stock_id == 3622447
@@ -230,7 +231,7 @@ class TestSymbolIndex:
             indexed_client.search("  ")
 
     def test_sitemap_without_entries_raises_instead_of_returning_empty(self):
-        """An empty index would make every symbol look unresolvable — the silent failure this
+        """An empty index would make every symbol look unresolvable â€” the silent failure this
         package exists to prevent."""
         with pytest.raises(tle.TrendlyneSchemaError, match="no /equity/"):
             tl.parse_sitemap("<urlset><url><loc>https://example.com/</loc></url></urlset>")
@@ -335,7 +336,7 @@ class TestHttpStatusMapping:
 
     async def test_444_is_not_retried(self, indexed_client):
         """Only the /mapp/v1/ route is gated, so the page must succeed for the 444 to be reached
-        at all — and then the api call must not be repeated."""
+        at all â€” and then the api call must not be repeated."""
         calls = []
 
         def handler(request):
@@ -367,7 +368,7 @@ class TestHttpStatusMapping:
         assert excinfo.value.status_code == 200, "the HTTP status is 200; the envelope failed"
 
     async def test_a_rotated_token_is_re_scraped_once(self, indexed_client):
-        """If re-scraping yields a different token, retry once with it — and only once.
+        """If re-scraping yields a different token, retry once with it â€” and only once.
 
         The substitute tokens stay inside the real charset: uppercase alphanumerics plus ``=``
         padding. An underscore would not match the token pattern, which is itself worth knowing.
@@ -889,7 +890,7 @@ class TestSnapshotHonesty:
 
         It is empty because nothing in this package fetches a snapshot-only route: the 14
         templates with no fetch method were deleted rather than left as promises, and
-        ``share_holding`` — the one route measured to 500 on any non-``latest`` period — went
+        ``share_holding`` â€” the one route measured to 500 on any non-``latest`` period â€” went
         with them. A non-empty set naming a route ``build_path`` would reject would be a policy
         table that can never fire and a second false claim.
         """
@@ -947,7 +948,7 @@ class TestSnapshotHonesty:
             tl.validate_period(2024)
 
     def test_the_three_verified_period_forms_are_still_accepted(self):
-        """``latest`` / a year / ``Mon-YYYY`` — the forms the site's period routes accept.
+        """``latest`` / a year / ``Mon-YYYY`` â€” the forms the site's period routes accept.
 
         No addressable route takes a period today, so this exercises :func:`validate_period`
         directly rather than through a deleted template. Wiring ``mutual_fund_holdings``, which
@@ -957,7 +958,7 @@ class TestSnapshotHonesty:
             assert tl.validate_period(period) == period
 
     def test_every_frame_declares_the_snapshot_flag(self):
-        """The key is always written — False included — so a consumer can rely on it existing."""
+        """The key is always written â€” False included â€” so a consumer can rely on it existing."""
         ohlc = tl.parse_ohlc(payload(), "MOTHERSON")
         assert ohlc.attrs["bfinance_trendlyne_snapshot_only"] is False
         table = tbt.find_table(text("corporate_actions_motherson.html"), "dividend")
@@ -990,7 +991,7 @@ class TestProvenance:
 
         It used to be ``"yfinance_back_adjusted"``, which described a *source* rather than this
         route and was false for the whole demerger class. The label now says the two things that
-        are true — as-traded, split/bonus adjusted — and the demerger exclusion is a separate
+        are true â€” as-traded, split/bonus adjusted â€” and the demerger exclusion is a separate
         boolean, because it is the part a consumer is most likely to get wrong.
         """
         frame = tl.parse_ohlc(payload(), "MOTHERSON")
@@ -1004,7 +1005,7 @@ class TestProvenance:
 
         ``"yfinance_back_adjusted"`` was wrong for every symbol measured. On ITC, the demerger
         name, trendlyne agrees with the exchange print (481.60 on 2025-01-03, same as bhavcopy)
-        while yfinance says 463.74 — the trendlyne/yfinance close ratio is 1.038513 at every
+        while yfinance says 463.74 â€” the trendlyne/yfinance close ratio is 1.038513 at every
         session of 2017, 2018, 2020, 2022 and 2024. So on a demerger it is the *exchange* that is
         unrewritten here. Anyone re-deriving the label must not land back on this string.
         """
@@ -1050,7 +1051,7 @@ class TestProvenance:
     def test_the_note_says_the_history_is_truncated_at_listing(self):
         """The note must NOT claim a fixed vendor window.
 
-        This assertion used to be ``"not the listing history" in note`` — i.e. the test enforced a
+        This assertion used to be ``"not the listing history" in note`` â€” i.e. the test enforced a
         statement that was itself false. The claim came from generalising a large-cap measurement
         (5,107 bars from 2006-01-02) to every symbol, and the counter-examples are decisive: a 2023
         IPO cannot have twenty years of bars, and IREDA returns 696 while delisted PAYTM returns
@@ -1108,8 +1109,8 @@ class TestPriceBasis:
     live 2026-09-27.
 
     The basis is **as-traded, back-adjusted for splits and bonuses only, demergers not applied**.
-    The test below demonstrates the *first* two halves from inside one series. The third half —
-    demergers — cannot be shown from a RELIANCE fixture, because RELIANCE is not a demerger name;
+    The test below demonstrates the *first* two halves from inside one series. The third half â€”
+    demergers â€” cannot be shown from a RELIANCE fixture, because RELIANCE is not a demerger name;
     it was measured over ITC against bhavcopy and yfinance and is recorded in
     ``docs/UPSTREAM_SOURCES.md`` and in the module docstring. :class:`TestProvenance` above pins
     the label that encodes all three.
@@ -1256,7 +1257,7 @@ class TestNoDeadScaffolding:
 
     def test_no_docstring_names_a_module_that_does_not_exist(self):
         """``__init__.py`` and ``client.py`` used to point at ``ownership``, ``deals`` and
-        ``corporate`` — modules that were never written. A cross-reference to unwritten code is a
+        ``corporate`` â€” modules that were never written. A cross-reference to unwritten code is a
         promise; the audit that found this one will not run again on its own."""
         pattern = re.compile(r"bfinance\.trendlyne\.([a-z_]+)")
         referenced: dict[str, set[str]] = {}
@@ -1300,7 +1301,18 @@ class TestFixtureProvenance:
             assert entry["http_status"] == 200, name
             assert entry["original_bytes"] > 0, name
             assert entry["trim_rule"], name
-            assert (FIXTURES / name).stat().st_size == entry["stored_bytes"], name
+            # Assert the sha of the *normalised* content, never `stat().st_size`. Git checks these
+            # out with CRLF on Windows and LF elsewhere, so a raw size assertion passes in the
+            # working tree where Python wrote the file and fails on any fresh clone. The same trap
+            # was found in the screener fixture set first, where a checkout turned 42,258 recorded
+            # bytes into 43,906 on disk. `.gitattributes` pins `eol=lf` for tests/fixtures; this
+            # stays correct even where that is not honoured, and the sha detects any real edit.
+            raw = (FIXTURES / name).read_bytes().replace(b"\r\n", b"\n")
+            assert hashlib.sha256(raw).hexdigest() == entry["stored_sha256"], (
+                f"{name} does not match the content META.json describes"
+            )
+            assert len(raw) == entry["stored_bytes"], name
+            assert entry["stored_line_endings"] == "lf", name
 
     def test_the_ohlc_fixture_records_the_true_vendor_row_count(self):
         """The frame must not be able to claim 5,107 bars from a 120-row excerpt."""

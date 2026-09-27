@@ -12,7 +12,9 @@
       "original_sha256_16": "f746d03b22686e6c",
       "stored_bytes": 2256,
       "trim_rule": "three verbatim windows of the original <url> block list (blocks[0:3], blocks[678:685], blocks[-2:]) = 12 blocks; declaration and <urlset> open tag verbatim",
-      "notes": "full document has 5922 <url> blocks. The window around MOTHERSON is at original index 681. The tail window includes a non-ticker symbol segment ('/equity/3622447/1216/bse-midsmall-private-banks/')."
+      "notes": "full document has 5922 <url> blocks. The window around MOTHERSON is at original index 681. The tail window includes a non-ticker symbol segment ('/equity/3622447/1216/bse-midsmall-private-banks/').",
+      "stored_sha256": "b61ddcfed1d52a276212a3978dfc9010cec1ed71f5d2572114dffa74850cb050",
+      "stored_line_endings": "lf"
     },
     "ohlc_motherson.json": {
       "url": "https://trendlyne.com/mapp/v1/stock/web/ohlc/878/<token>/",
@@ -22,7 +24,9 @@
       "original_sha256_16": "e8679cf614b73092",
       "stored_bytes": 19391,
       "trim_rule": "eodData trimmed to 60 head + 60 tail; liveData to 20; suggestions to 2",
-      "notes": "full eodData had 5107 rows spanning 2006-01-02..2026-09-18"
+      "notes": "full eodData had 5107 rows spanning 2006-01-02..2026-09-18",
+      "stored_sha256": "5cb8a24e8c4f7736db8d68ac7bcb008b97655c204adfa4ee763cb3b18613641c",
+      "stored_line_endings": "lf"
     },
     "chart_data_eps_ttm.json": {
       "url": "https://trendlyne.com/mapp/v1/stock/chart-data/878/EPS_TTM/",
@@ -32,7 +36,9 @@
       "original_sha256_16": "98bb2e1f1edc1d3b",
       "stored_bytes": 3763,
       "trim_rule": "none (stored verbatim)",
-      "notes": "body.eodData has 40 points"
+      "notes": "body.eodData has 40 points",
+      "stored_sha256": "98bb2e1f1edc1d3be175faacf860338e11266885af2c0e24d37abb4a7e95e1bd",
+      "stored_line_endings": "lf"
     },
     "stock_page_motherson.html": {
       "url": "https://trendlyne.com/equity/878/MOTHERSON/samvardhana-motherson-international-ltd/",
@@ -42,7 +48,9 @@
       "original_sha256_16": "fa2a1d56cafd9088",
       "stored_bytes": 3303,
       "trim_rule": "raw 3000-char window around the first OHLC URL; page chrome dropped",
-      "notes": "the per-symbol token appears 6x on the page, all identical"
+      "notes": "the per-symbol token appears 6x on the page, all identical",
+      "stored_sha256": "d397a96f368ea76ea38a9d60160db79f0b318ec34dd0a7b77b2e7dc5732ff287",
+      "stored_line_endings": "lf"
     },
     "corporate_actions_motherson.html": {
       "url": "https://trendlyne.com/equity/corporate-actions/MOTHERSON/878/samvardhana-motherson-international-ltd",
@@ -52,7 +60,9 @@
       "original_sha256_16": "28146332701745b7",
       "stored_bytes": 9500,
       "trim_rule": "verbatim <table> blocks only; page chrome dropped",
-      "notes": ""
+      "notes": "",
+      "stored_sha256": "0a0a72975548fecf1868f2a91ea396f2bfd7b6bbafa3a5bfe8dee57701f27655",
+      "stored_line_endings": "lf"
     },
     "shareholding_motherson.html": {
       "url": "https://trendlyne.com/equity/share-holding/878/MOTHERSON/latest/samvardhana-motherson-international-ltd/",
@@ -62,7 +72,9 @@
       "original_sha256_16": "c1dff74cc6651dfd",
       "stored_bytes": 22537,
       "trim_rule": "verbatim <table> blocks only; page chrome dropped",
-      "notes": ""
+      "notes": "",
+      "stored_sha256": "10ed282e3badefcc0b275e7aa6a45d559eea5b72490a5e06f08ad7e068614d0e",
+      "stored_line_endings": "lf"
     },
     "bulk_deals_motherson.html": {
       "url": "https://trendlyne.com/equity/bulk-block-deals/MOTHERSON/878/samvardhana-motherson-international-ltd",
@@ -72,7 +84,9 @@
       "original_sha256_16": "18636fadff286649",
       "stored_bytes": 21882,
       "trim_rule": "verbatim <table> blocks only; page chrome dropped",
-      "notes": "table[0]: kept first 40 of 82 rows"
+      "notes": "table[0]: kept first 40 of 82 rows",
+      "stored_sha256": "51d76a77347cdf811a84eb21c5790bd5b041a82ec501009ed19d02511038804c",
+      "stored_line_endings": "lf"
     },
     "ohlc_reliance_excerpt.json": {
       "url": "https://trendlyne.com/mapp/v1/stock/web/ohlc/1127/<token>/",
@@ -82,7 +96,9 @@
       "original_sha256_16": "a0117c64f536e1dd",
       "stored_bytes": 5700,
       "trim_rule": "eodData trimmed to 8 newest + 9 around 2024-10-28; liveData and suggestions dropped",
-      "notes": "full eodData had 5107 rows spanning 2006-01-02..2026-09-18. Used to pin the price-basis claim: the 2026-09-24 bar must equal the MarketLens-recorded close/volume for the same session."
+      "notes": "full eodData had 5107 rows spanning 2006-01-02..2026-09-18. Used to pin the price-basis claim: the 2026-09-24 bar must equal the MarketLens-recorded close/volume for the same session.",
+      "stored_sha256": "f2b5785621fd578c9d4537b82a1eaf194983df2446e8b2d18a51a894c0b54a8b",
+      "stored_line_endings": "lf"
     }
   }
 }

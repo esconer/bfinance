@@ -1,0 +1,18 @@
+# Recorded third-party fixtures and every file whose exact bytes are asserted.
+#
+# META.json in tests/fixtures/ records each recording's byte size, and the tests compare it.
+# Without this, git checks the files out with CRLF on Windows and LF elsewhere, so a
+# byte-size or sha256 assertion passes in the working tree where Python wrote the file and
+# then fails on any fresh clone. That is precisely the "green locally, red in CI" failure
+# the offline fixture suite exists to prevent, so the bytes are pinned instead.
+tests/fixtures/** text eol=lf
+
+# Snapshots and vendored payloads must never be line-ending translated.
+*.json text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+
+# Default for anything not matched above.
+* text=auto
