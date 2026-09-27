@@ -5,13 +5,14 @@ and that 100% of modern yfinance 1.7.0+ APIs, methods, and properties are compat
 """
 
 from datetime import datetime
+import importlib
+
 import pandas as pd
 import pytest
 
 import bfinance as bf
 from bfinance.ticker import Ticker
 from bfinance.tickers import Tickers
-from bfinance.sector import Sector, Industry
 from bfinance.models.options import OptionChain
 from bfinance.market.derivatives import DerivativesEngine
 from bfinance.models.company import CompanyProfile, Concall, PeerStock, TopRatios
@@ -23,6 +24,7 @@ from bfinance.models.statements import FinancialStatement
 # =============================================================================
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_company_metadata(screener_client):
     """Verify company profile metadata: Name, About, Website, BSE, NSE."""
     profile = await screener_client.get_company_profile("RELIANCE")
@@ -40,6 +42,7 @@ async def test_screener_company_metadata(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_top_ratios_exhaustiveness(screener_client):
     """Verify every single ratio in #top-ratios is parsed into typed fields."""
     profile = await screener_client.get_company_profile("RELIANCE")
@@ -60,6 +63,7 @@ async def test_screener_top_ratios_exhaustiveness(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_10_year_annual_statements(screener_client):
     """Verify 10+ years of Annual P&L, Balance Sheet, and Cash Flow."""
     profile = await screener_client.get_company_profile("RELIANCE")
@@ -104,6 +108,7 @@ async def test_screener_10_year_annual_statements(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_12_quarters_and_ratios_history(screener_client):
     """Verify 12+ quarters and 10-year financial ratios."""
     profile = await screener_client.get_company_profile("TCS")
@@ -125,6 +130,7 @@ async def test_screener_12_quarters_and_ratios_history(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_shareholding_patterns(screener_client):
     """Verify quarterly institutional (FII, DII, Promoter) ownership trends."""
     profile = await screener_client.get_company_profile("RELIANCE")
@@ -139,6 +145,7 @@ async def test_screener_shareholding_patterns(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_cagrs_and_pros_cons(screener_client):
     """Verify compounded CAGRs and qualitative insights."""
     profile = await screener_client.get_company_profile("TCS")
@@ -155,6 +162,7 @@ async def test_screener_cagrs_and_pros_cons(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_concalls_audio_and_transcripts(screener_client):
     """Verify conference call transcripts, audio MP3 URLs, and presentations."""
     profile = await screener_client.get_company_profile("TCS")
@@ -177,6 +185,7 @@ async def test_screener_concalls_audio_and_transcripts(screener_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 async def test_screener_all_valuation_chart_metrics(screener_client):
     """Verify all 6 Screener chart timeseries metrics."""
     metrics = ["price", "pe", "margins", "ev_ebitda", "pb", "mcap_sales"]
@@ -191,6 +200,7 @@ async def test_screener_all_valuation_chart_metrics(screener_client):
 # 2. YFINANCE 1.7.0+ DROP-IN COMPATIBILITY TESTS
 # =============================================================================
 
+@pytest.mark.live
 def test_yfinance_fast_info_complete():
     """Verify modern FastInfo attributes."""
     t = Ticker("RELIANCE.NS")
@@ -218,6 +228,7 @@ def test_yfinance_fast_info_complete():
     assert fi["last_price"] == fi.last_price
 
 
+@pytest.mark.live
 def test_yfinance_info_keys_richness():
     """Verify ticker.info contains all standard yfinance equity attributes."""
     t = Ticker("TCS")
@@ -238,6 +249,7 @@ def test_yfinance_info_keys_richness():
         assert k in info, f"Missing required info key: {k}"
 
 
+@pytest.mark.live
 def test_yfinance_history_actions_and_intervals():
     """Verify history() with actions=True returns complete OHLCV + Corporate Actions."""
     t = Ticker("RELIANCE")
@@ -262,6 +274,7 @@ def test_yfinance_history_actions_and_intervals():
     assert "Stock Splits" not in df_no_act.columns
 
 
+@pytest.mark.live
 def test_yfinance_financial_statements_complete_matrix():
     """Verify all statement methods and property aliases match yfinance exactly."""
     t = Ticker("BAJAJ-AUTO")
@@ -301,6 +314,7 @@ def test_yfinance_financial_statements_complete_matrix():
     assert isinstance(dict_pnl, dict)
 
 
+@pytest.mark.live
 def test_yfinance_history_metadata_and_valuation_measures():
     """Verify history_metadata and valuation_measures (1.7.0+)."""
     t = Ticker("RELIANCE")
@@ -321,6 +335,7 @@ def test_yfinance_history_metadata_and_valuation_measures():
     assert "Value" in vm.columns
 
 
+@pytest.mark.live
 def test_yfinance_corporate_actions_series():
     """Verify dividends and stock splits series format."""
     t = Ticker("RELIANCE")
@@ -336,7 +351,14 @@ def test_yfinance_corporate_actions_series():
 
 
 def test_yfinance_options_derivatives_chain():
-    """Verify NSE options chain parity with yfinance 1.7.0 (empty for NSE underlyings) and generator contract."""
+    """Verify NSE options chain parity with yfinance 1.7.0 (empty for NSE underlyings).
+
+    The second half used to assert that ``DerivativesEngine.generate_option_chain`` produced a
+    **non-empty** chain. That chain was fabricated: no network path, closed-form option prices, and
+    volume/open interest drawn from a seeded RNG. The generator now raises, and the guard below
+    pins that — a library that returns an empty chain is honest; one that returns invented open
+    interest is not.
+    """
     t = Ticker("RELIANCE")
     expiries = t.options
 
@@ -348,18 +370,26 @@ def test_yfinance_options_derivatives_chain():
     assert chain.calls.empty
     assert chain.puts.empty
 
-    # Verify deterministic engine generation when called directly
-    gen_chain = DerivativesEngine.generate_option_chain("RELIANCE", cmp=1500.0, expiry_date="2026-09-24")
-    assert isinstance(gen_chain, OptionChain)
-    assert isinstance(gen_chain.calls, pd.DataFrame)
-    assert isinstance(gen_chain.puts, pd.DataFrame)
-    assert not gen_chain.calls.empty
+    # The fabricator must stay deleted, and must fail loudly rather than return invented data.
+    with pytest.raises(NotImplementedError):
+        DerivativesEngine.generate_option_chain("RELIANCE", cmp=1500.0, expiry_date="2026-09-24")
 
+    # A dated expiry must not fabricate either. Note this returns empty rather than raising
+    # ValueError the way yfinance does for a non-F&O underlying - a pre-existing divergence,
+    # unchanged here, because removing the fabricator is not the place to alter the date contract.
+    dated = t.option_chain("2026-09-24")
+    assert isinstance(dated, OptionChain)
+    assert dated.calls.empty and dated.puts.empty
+
+    # The empty chain must still carry the yfinance column schema, so a caller can rely on the
+    # shape even when there are no contracts. This used to assert those columns on the fabricated
+    # chain, which is how a random-OI frame got a schema-conformance test.
     for col in ["contractSymbol", "strike", "lastPrice", "bid", "ask", "openInterest", "impliedVolatility"]:
-        assert col in gen_chain.calls.columns
-        assert col in gen_chain.puts.columns
+        assert col in chain.calls.columns
+        assert col in chain.puts.columns
 
 
+@pytest.mark.live
 def test_yfinance_tickers_multi_collection():
     """Verify yf.Tickers multi-ticker manager."""
     group = Tickers("RELIANCE TCS INFY")
@@ -373,22 +403,32 @@ def test_yfinance_tickers_multi_collection():
     assert not df_hist.empty
 
 
-def test_yfinance_sector_and_industry_explorer():
-    """Verify Sector and Industry classes."""
-    tech = Sector("technology")
-    assert tech.name == "Information Technology"
-    assert isinstance(tech.overview, dict)
-    assert isinstance(tech.top_companies, pd.DataFrame)
-    assert not tech.top_companies.empty
+def test_fabricated_sector_explorer_is_gone():
+    """Sector/Industry were deleted: they returned invented prices and CI asserted them.
 
-    fin = Sector("financials")
-    assert fin.name == "Financial Services"
-    assert not fin.top_companies.empty
+    ``sector.py`` was a hardcoded 4-sector / 20-company table of made-up prices and P/Es with no
+    HTTP anywhere, and this very test used to be what *enforced* that fiction — it ran offline and
+    asserted ``not tech.top_companies.empty``, so the required CI gate pinned the fabrication as
+    correct. This guard pins the removal instead, and points at the real classification path.
+    """
+    import bfinance
 
-    ind = Industry("auto")
-    assert not ind.top_companies.empty
+    assert not hasattr(bfinance, "Sector"), "bfinance.Sector must stay deleted"
+    assert not hasattr(bfinance, "Industry"), "bfinance.Industry must stay deleted"
+    assert "Sector" not in bfinance.__all__
+    assert "Industry" not in bfinance.__all__
+
+    # The module itself must be gone, not merely unexported.
+    with pytest.raises(ImportError):
+        importlib.import_module("bfinance.sector")
+
+    # Real classification still exists, sourced from the company profile taxonomy.
+    t = bf.Ticker("RELIANCE")
+    for attr in ("sector", "industry", "industry_group", "sub_industry"):
+        assert hasattr(t, attr), f"Ticker.{attr} is the real taxonomy path and must survive"
 
 
+@pytest.mark.live
 def test_yfinance_batch_download_matrix():
     """Verify download() with group_by options."""
     # 1. group_by='column' (default)

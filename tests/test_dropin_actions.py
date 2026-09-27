@@ -166,17 +166,15 @@ def test_options_and_chain_contract():
         print(f"{sym}: yf options=() chain empty; dated expiry raises ValueError")
 
     t = Ticker(RELIANCE)
-    profile = t._ensure_profile()
-    cmp_ = float(profile.ratios.current_price)
-    c1 = DerivativesEngine.generate_option_chain("RELIANCE", cmp=cmp_, expiry_date="2026-09-24")
-    c2 = DerivativesEngine.generate_option_chain("RELIANCE", cmp=cmp_, expiry_date="2026-09-24")
-    assert c1.calls.equals(c2.calls) and c1.puts.equals(c2.puts), "must be deterministic"
-    assert list(c1.calls.columns) == YF_CHAIN_COLUMNS
-    assert list(c1.puts.columns) == YF_CHAIN_COLUMNS
     e = DerivativesEngine.empty_option_chain()
     assert e.calls.shape == (0, 13) and e.puts.shape == (0, 13)
     assert DerivativesEngine.resolve_options(RELIANCE) == ()
-    print(f"bf Ticker.options={t.options} vs yf=() -> synthetic expiries recorded as gap")
+    # Ticker.option_chain() must be empty and must stay empty - it previously delegated to a
+    # generator that drew volume/open interest from a seeded RNG.
+    assert t.option_chain().calls.empty and t.option_chain().puts.empty
+    with pytest.raises(NotImplementedError):
+        DerivativesEngine.generate_option_chain("RELIANCE", cmp=1500.0, expiry_date="2026-09-24")
+    print(f"bf Ticker.options={t.options} vs yf=() -> empty chain, no fabricated data")
     _needsmain("ticker.py: gate `options`/`option_chain` on real F&O membership via DerivativesEngine.resolve_options(); empty chain via empty_option_chain()")
 
 

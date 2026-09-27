@@ -174,7 +174,6 @@ class ScreenerHTMLParser:
 
     def _parse_top_ratios(self, soup: BeautifulSoup) -> TopRatios:
         raw_ratios: Dict[str, Optional[float]] = {}
-        high_low_str = None
 
         for li in soup.select("#top-ratios li"):
             name_el = li.select_one(".name")
@@ -186,7 +185,9 @@ class ScreenerHTMLParser:
             raw_text = val_el.get_text(strip=True)
 
             if "High / Low" in name or "High/Low" in name:
-                high_low_str = raw_text
+                # Split into high_52w / low_52w. The combined string used to also be handed to a
+                # `high_low_52w=` kwarg that TopRatios does not declare, so pydantic dropped it -
+                # it was parsed, formatted, then discarded.
                 parts = raw_text.split("/")
                 if len(parts) == 2:
                     raw_ratios["High"] = parse_indian_number(parts[0])
@@ -199,7 +200,9 @@ class ScreenerHTMLParser:
             current_price=raw_ratios.get("Current Price"),
             high_52w=raw_ratios.get("High"),
             low_52w=raw_ratios.get("Low"),
-            high_low_52w=high_low_str,
+            # `high_low_52w` used to be passed here. TopRatios does not declare it, so pydantic
+            # discarded it silently (model_extra is None) - the value was parsed, formatted and
+            # then thrown away. The individual high_52w / low_52w above are the real carriers.
             stock_pe=raw_ratios.get("Stock P/E") or raw_ratios.get("P/E"),
             book_value=raw_ratios.get("Book Value"),
             dividend_yield=raw_ratios.get("Dividend Yield"),

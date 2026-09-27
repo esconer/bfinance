@@ -1,14 +1,18 @@
 """
-Tests validating 1:1 drop-in compatibility with yfinance 1.7.0+ Ticker, Tickers, and Sector API.
+Tests validating 1:1 drop-in compatibility with yfinance 1.7.0+ Ticker and Tickers APIs.
+
+``Sector``/``Industry`` were intentionally dropped from this compatibility surface: the
+implementation was a hardcoded table of invented prices with no HTTP path, so it could never
+actually match yfinance's live constituent lists. See ``test_fabricated_sector_is_not_exported``.
 """
 
 import pandas as pd
 import pytest
 from bfinance.ticker import Ticker
 from bfinance.tickers import Tickers
-from bfinance.sector import Sector, Industry
 
 
+@pytest.mark.live
 def test_yfinance_fast_info():
     """Verify ticker.fast_info matches modern yfinance 0.2+ FastInfo attributes."""
     t = Ticker("RELIANCE.NS")
@@ -31,6 +35,7 @@ def test_yfinance_fast_info():
     assert "last_price" in d
 
 
+@pytest.mark.live
 def test_yfinance_info_schema():
     """Verify ticker.info contains standard yfinance keys."""
     t = Ticker("RELIANCE.NS")
@@ -52,6 +57,7 @@ def test_yfinance_info_schema():
     assert "longBusinessSummary" in info
 
 
+@pytest.mark.live
 def test_yfinance_history_actions():
     """Verify ticker.history() with actions=True includes Dividends & Stock Splits."""
     t = Ticker("TCS")
@@ -66,6 +72,7 @@ def test_yfinance_history_actions():
     assert len(df) > 50
 
 
+@pytest.mark.live
 def test_yfinance_statement_methods_and_aliases():
     """Verify modern get_income_stmt, get_balance_sheet, get_cash_flow and property aliases."""
     t = Ticker("INFY")
@@ -97,6 +104,7 @@ def test_yfinance_statement_methods_and_aliases():
     assert t.cashflow.equals(df_cf)
 
 
+@pytest.mark.live
 def test_yfinance_calendar_and_targets():
     """Verify calendar and analyst_price_targets properties."""
     t = Ticker("RELIANCE")
@@ -110,6 +118,7 @@ def test_yfinance_calendar_and_targets():
     assert targets is None
 
 
+@pytest.mark.live
 def test_yfinance_history_metadata_and_valuation():
     """Verify history_metadata and valuation_measures matching yfinance 1.7.0."""
     t = Ticker("RELIANCE")
@@ -127,6 +136,7 @@ def test_yfinance_history_metadata_and_valuation():
     assert "Metric" in vm.columns
 
 
+@pytest.mark.live
 def test_yfinance_tickers_group():
     """Verify yf.Tickers multi-ticker collection matching yfinance 1.7.0."""
     group = Tickers(["RELIANCE", "TCS"])
@@ -139,16 +149,24 @@ def test_yfinance_tickers_group():
     assert not df_hist.empty
 
 
-def test_yfinance_sector_and_industry():
-    """Verify yf.Sector and yf.Industry matching yfinance 1.4.0+."""
-    sec = Sector("technology")
-    assert sec.name == "Information Technology"
-    df_top = sec.top_companies
-    assert isinstance(df_top, pd.DataFrame)
-    assert not df_top.empty
-    assert "symbol" in df_top.columns
+def test_fabricated_sector_is_not_exported():
+    """The yfinance ``Sector``/``Industry`` drop-in surface was removed, deliberately.
+
+    It could not be a real drop-in: the implementation was a hardcoded four-sector, twenty-company
+    table with invented prices and P/Es and no HTTP call at all. This test previously asserted
+    ``not sec.top_companies.empty``, i.e. it enforced the fabrication. It now pins the removal and
+    confirms the genuine taxonomy path is untouched.
+    """
+    import bfinance
+
+    assert not hasattr(bfinance, "Sector")
+    assert not hasattr(bfinance, "Industry")
+    t = bfinance.Ticker("RELIANCE")
+    for attr in ("sector", "industry", "industry_group", "sub_industry"):
+        assert hasattr(t, attr)
 
 
+@pytest.mark.live
 def test_yfinance_corporate_actions():
     """Verify dividends and stock splits series."""
     t = Ticker("RELIANCE")
@@ -162,6 +180,7 @@ def test_yfinance_corporate_actions():
     assert splits.name == "Stock Splits"
 
 
+@pytest.mark.live
 def test_yfinance_options_chain():
     """NSE parity: live yfinance 1.7.0 returns () for RELIANCE.NS — match it exactly."""
     t = Ticker("RELIANCE")
@@ -183,6 +202,7 @@ def test_yfinance_options_chain():
     assert list(chain.puts.columns) == expected_cols
 
 
+@pytest.mark.live
 def test_invalid_ticker_graceful_handling():
     """Verify invalid/delisted tickers do not crash the application and return clean empty structures."""
     # 1. Default mode (raise_errors=False)
@@ -200,6 +220,7 @@ def test_invalid_ticker_graceful_handling():
         _ = t_strict.financials
 
 
+@pytest.mark.live
 def test_stock_vs_etf_structural_parity():
     """Verify distinct behavioral differences between individual equities (MOTHERSON) and ETFs (MIDCAPIETF)."""
     # 1. Stock: MOTHERSON

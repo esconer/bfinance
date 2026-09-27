@@ -9,6 +9,7 @@ import yfinance as yf
 import bfinance as bf
 
 
+@pytest.mark.live
 def test_fast_info_attribute_parity():
     """Verify bfinance fast_info provides all attributes present in yfinance 1.7.0 FastInfo."""
     bf_ticker = bf.Ticker("RELIANCE.NS")
@@ -28,6 +29,7 @@ def test_fast_info_attribute_parity():
             assert val is not None, f"fast_info.{attr} returned None"
 
 
+@pytest.mark.live
 def test_info_key_parity():
     """Verify bfinance info contains core yfinance keys."""
     bf_ticker = bf.Ticker("RELIANCE")
@@ -44,6 +46,7 @@ def test_info_key_parity():
         assert k in info, f"Missing key in bfinance info: {k}"
 
 
+@pytest.mark.live
 def test_history_schema_and_actions_parity():
     """Verify bfinance history() matches yfinance 1.7.0 DataFrame index and column schema."""
     bf_ticker = bf.Ticker("TCS")
@@ -62,6 +65,7 @@ def test_history_schema_and_actions_parity():
     assert "Adj Close" in df_unadj.columns
 
 
+@pytest.mark.live
 def test_financial_statement_method_and_property_parity():
     """Verify all statement methods, freq parameter, and property aliases match yfinance 1.7.0."""
     bf_ticker = bf.Ticker("INFY")
@@ -103,6 +107,7 @@ def test_financial_statement_method_and_property_parity():
         _ = bf_ticker.ttm_cash_flow
 
 
+@pytest.mark.live
 def test_history_metadata_parity():
     """Verify bfinance history_metadata matches yfinance 1.7.0."""
     bf_ticker = bf.Ticker("RELIANCE")
@@ -113,6 +118,7 @@ def test_history_metadata_parity():
         assert key in meta, f"Missing key in history_metadata: {key}"
 
 
+@pytest.mark.live
 def test_tickers_group_parity():
     """Verify bf.Tickers behaves identically to yf.Tickers."""
     bf_group = bf.Tickers(["RELIANCE", "TCS"])
@@ -125,16 +131,22 @@ def test_tickers_group_parity():
 
 
 def test_sector_and_industry_parity():
-    """Verify bf.Sector and bf.Industry match yf.Sector/yf.Industry."""
-    sec = bf.Sector("technology")
-    assert isinstance(sec.overview, dict)
-    assert isinstance(sec.top_companies, pd.DataFrame)
-    assert not sec.top_companies.empty
+    """bf.Sector/bf.Industry are gone, so there is nothing to hold parity with.
 
-    ind = bf.Industry("technology")
-    assert isinstance(ind.overview, dict)
+    yfinance's ``yf.Sector``/``yf.Industry`` fetch real constituent lists from a live service. The
+    bfinance equivalents were a hardcoded table of invented prices, so matching them was never
+    possible and asserting parity only locked the fabrication in place. Real classification is
+    ``Ticker.sector`` / ``.industry`` / ``.industry_group`` / ``.sub_industry``.
+    """
+    import bfinance
+
+    assert not hasattr(bf, "Sector")
+    assert not hasattr(bf, "Industry")
+    t = bf.Ticker("RELIANCE")
+    assert hasattr(t, "sector") and hasattr(t, "industry")
 
 
+@pytest.mark.live
 def test_batch_download_parity():
     """Verify bf.download returns identical MultiIndex format to yf.download."""
     df = bf.download(["RELIANCE", "TCS"], period="5d", actions=False, group_by="column")

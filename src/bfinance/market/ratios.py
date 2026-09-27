@@ -8,6 +8,8 @@ import math
 import httpx
 import pandas as pd
 
+from bfinance.utils.exceptions import UpstreamServiceError
+
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     """Coerce to float; None, NaN, inf and non-numeric strings map to default."""
@@ -85,17 +87,48 @@ class ScreenerRatioSearch:
         Search ratio dictionary on Screener.in.
 
         Returns list of dicts with keys: 'name', 'description', 'unit'.
+
+        Raises:
+            UpstreamServiceError: any non-200, a non-JSON body, or a transport failure.
+
+        ⚠ **This endpoint is disallowed by screener.in's robots.txt** (``Disallow: /*?q=``) and
+        therefore has no compliant route. The method is kept because it is public API, but it is
+        no longer reachable from any internal code path, and it now **fails loudly** instead of
+        returning an empty list.
+
+        It previously swallowed every failure::
+
+            except Exception:
+                pass
+            return []
+
+        so a blocked request, a 404, and a genuine "no such ratio" were indistinguishable, and the
+        caller received an empty catalog with no error and no log. A custom-ratio builder that
+        silently offers zero ratios is worse than one that says it cannot reach the dictionary.
         """
         if not query:
             return []
         try:
             with httpx.Client(headers=cls.HEADERS, timeout=timeout, follow_redirects=True) as client:
                 r = client.get(cls.BASE_URL, params={"q": query})
-                if r.status_code == 200:
-                    return r.json()
-        except Exception:
-            pass
-        return []
+        except Exception as exc:
+            raise UpstreamServiceError(
+                f"Could not reach Screener.in's ratio dictionary ({cls.BASE_URL}): {exc}"
+            ) from exc
+
+        if r.status_code != 200:
+            raise UpstreamServiceError(
+                f"Screener.in ratio search returned HTTP {r.status_code} for {query!r}. "
+                "This is an upstream failure, not an empty result set."
+            )
+        try:
+            payload = r.json()
+        except ValueError as exc:
+            raise UpstreamServiceError(
+                f"Screener.in ratio search returned a non-JSON body for {query!r} "
+                f"({len(r.text)} bytes, content-type {r.headers.get('content-type')!r})."
+            ) from exc
+        return payload if isinstance(payload, list) else []
 
 
 class CustomRatiosCalculator:

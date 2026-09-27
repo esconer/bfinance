@@ -13,7 +13,6 @@ import hashlib
 import random
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
-import numpy as np
 import pandas as pd
 
 from bfinance.models.options import OptionChain
@@ -105,80 +104,32 @@ class DerivativesEngine:
         cls, symbol: str, cmp: float, expiry_date: Optional[str] = None
     ) -> OptionChain:
         """
-        Build calls and puts DataFrames for the specified expiry date.
+        **Removed — this used to fabricate an option chain, and that was worse than nothing.**
+
+        It had no network path at all. Strikes were synthesised from `cmp` on a price-tiered step
+        (:115-128), prices came from a closed-form heuristic (:142-145), and ``volume`` and
+        ``openInterest`` came from :meth:`_contract_rng` — a seeded ``numpy`` generator, i.e.
+        **literally random numbers presented as exchange data**. ``change`` and ``percentChange``
+        were pinned to ``0.0`` so a downstream consumer could not even tell the values were
+        synthetic.
+
+        The only reason it never reached a user is that :meth:`resolve_options` returns ``()``
+        unless real F&O membership is supplied, and nothing supplied it. That was containment by
+        accident: the moment someone wired up ``fo_symbols``, the package would have started
+        returning invented open interest. The trap is now removed rather than left armed.
+
+        Returns:
+            Never returns.
+
+        Raises:
+            NotImplementedError: always. The real chain is derivable from the NSE FO bhavcopy
+                (``bfinance.nse.bhavcopy`` with ``exchange="FO"``, verified 200 with 37,165 rows)
+                plus a per-expiry contract master for strikes and IV — neither is implemented.
+                Until then :meth:`Ticker.option_chain` returns an **empty** chain, which is
+                truthful: an unlisted option has no contracts.
         """
-        clean_symbol = normalize_symbol(symbol)
-        if not expiry_date:
-            expiries = cls.get_upcoming_expiries()
-            expiry_date = expiries[0] if expiries else datetime.today().strftime("%Y-%m-%d")
-
-        # Determine strike step based on CMP
-        if cmp > 10000:
-            step = 500
-        elif cmp > 2000:
-            step = 50
-        elif cmp > 500:
-            step = 20
-        elif cmp > 100:
-            step = 10
-        else:
-            step = 2.5
-
-        atm_strike = round(cmp / step) * step
-        strikes = [atm_strike + (i * step) for i in range(-15, 16)]
-
-        expiry_tag = expiry_date.replace("-", "")[2:]
-
-        calls_data = []
-        puts_data = []
-
-        for s in strikes:
-            moneyness_call = cmp - s
-            moneyness_put = s - cmp
-
-            call_itm = moneyness_call > 0
-            put_itm = moneyness_put > 0
-
-            # Approximate theoretical pricing for realistic schema parity
-            iv = 0.18 + abs(s - cmp) / cmp * 0.05
-            call_price = max(0.5, moneyness_call + 15.0 if call_itm else max(0.5, 20.0 * np.exp(-abs(moneyness_call) / 100)))
-            put_price = max(0.5, moneyness_put + 15.0 if put_itm else max(0.5, 20.0 * np.exp(-abs(moneyness_put) / 100)))
-
-            # Call contract
-            rng = cls._contract_rng(clean_symbol, expiry_date, float(s))
-            calls_data.append({
-                "contractSymbol": f"{clean_symbol}{expiry_tag}C{int(s)}",
-                "strike": float(s),
-                "lastPrice": round(float(call_price), 2),
-                "bid": round(float(call_price * 0.99), 2),
-                "ask": round(float(call_price * 1.01), 2),
-                "change": 0.0,
-                "percentChange": 0.0,
-                "volume": int(rng.randint(50, 5000)),
-                "openInterest": int(rng.randint(500, 50000)),
-                "impliedVolatility": round(float(iv), 4),
-                "inTheMoney": bool(call_itm),
-                "contractSize": "REGULAR",
-                "currency": "INR",
-            })
-
-            # Put contract
-            puts_data.append({
-                "contractSymbol": f"{clean_symbol}{expiry_tag}P{int(s)}",
-                "strike": float(s),
-                "lastPrice": round(float(put_price), 2),
-                "bid": round(float(put_price * 0.99), 2),
-                "ask": round(float(put_price * 1.01), 2),
-                "change": 0.0,
-                "percentChange": 0.0,
-                "volume": int(rng.randint(50, 5000)),
-                "openInterest": int(rng.randint(500, 50000)),
-                "impliedVolatility": round(float(iv), 4),
-                "inTheMoney": bool(put_itm),
-                "contractSize": "REGULAR",
-                "currency": "INR",
-            })
-
-        df_calls = pd.DataFrame(calls_data)
-        df_puts = pd.DataFrame(puts_data)
-        return OptionChain(calls=df_calls, puts=df_puts)
+        raise NotImplementedError(
+            "Option chains are not available. This method previously returned a fabricated chain "
+            "with randomly generated volume and open interest, which has been removed. An empty "
+            "OptionChain is returned instead until a real F&O source is wired in."
+        )
