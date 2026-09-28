@@ -17,6 +17,7 @@ retry, 404 and pacing code paths without a socket.
 import asyncio
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -107,16 +108,38 @@ def client():
 
 
 def test_fixture_metadata_records_the_real_shapes():
-    """Guard the fixtures themselves. A trimmed file with a rewritten header is not evidence."""
+    """Guard the fixtures themselves. A trimmed file with a rewritten header is not evidence.
+
+    Every META entry is now checked against the archive it describes — header width, data-row width
+    and row count read from the file on disk. The earlier version pinned one literal capture date
+    for every entry, which any future capture would have broken while telling nobody which field
+    had drifted; reading the shapes off the fixture is a stronger guard and does not expire.
+    """
     assert META[UDIFF]["full_row_count"] == 3654
     assert META[UDIFF]["header_fields"] == 34
     assert META[UDIFF_35COL]["header_fields"] == 35
     assert META[UDIFF_35COL]["data_row_fields"] == 34
     assert META[LEGACY]["full_row_count"] == 2427
     assert META[LEGACY]["header_fields"] == 14
+
     for key, meta in META.items():
-        assert meta["url"].startswith("https://nsearchives.nseindia.com/")
-        assert meta["captured"] == "2026-09-27"
+        assert meta["url"].startswith("https://nsearchives.nseindia.com/"), key
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", meta["captured"]), (key, meta["captured"])
+
+        path = FIXTURES / f"{key}.csv.zip"
+        assert path.is_file(), f"{key}: META documents a capture with no fixture beside it"
+        with zipfile.ZipFile(path) as archive:
+            member = [n for n in archive.namelist() if not n.endswith("/")][0]
+            text = archive.read(member).decode("utf-8-sig", errors="replace")
+        lines = text.splitlines()
+        assert len(lines[0].split(",")) == meta["header_fields"], f"{key}: header width"
+        assert {len(row.split(",")) for row in lines[1:]} == {meta["data_row_fields"]}, (
+            f"{key}: data-row width"
+        )
+        if meta.get("untrimmed"):
+            # An untrimmed capture must hold every row the archive served, or the counts in it
+            # are describing a file nobody can check.
+            assert len(lines) - 1 == meta["full_row_count"], f"{key}: untrimmed row count"
 
 
 def test_the_35_column_fixture_is_actually_malformed():
@@ -195,10 +218,17 @@ def test_udiff_missing_a_required_column_names_it(client):
 
 
 def test_column_order_and_spelling_match_ohlcv_engine(client):
-    """The exact tuple OHLCVEngine produces, in the exact order. Not a subset, not reordered."""
+    """The OHLCV five, in the exact order OHLCVEngine produces, then turnover value.
+
+    ``OHLCVEngine`` looks its columns up *by name*, so the sixth column is additive for it — but
+    the five must still be first, spelled identically and in order, or a positional consumer
+    breaks. Asserted against the literal, not against ``COLUMNS``, so that editing the constant
+    cannot make this test agree with itself.
+    """
+    expected = ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     for key in (UDIFF, UDIFF_35COL, LEGACY):
         frame = bc.parse_bhavcopy(csv_text(key), series="EQ")
-        assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"], key
+        assert list(frame.columns) == expected, key
 
 
 def test_index_is_date_then_symbol_and_level_zero_is_a_datetime_index(client):
@@ -228,7 +258,7 @@ def test_single_symbol_slice_is_a_plain_datetime_index(client):
 
     assert isinstance(single.index, pd.DatetimeIndex)
     assert single.index.name == "Date"
-    assert list(single.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(single.columns) == ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     assert len(single) == 1
 
 
@@ -307,7 +337,7 @@ def test_absent_series_yields_an_empty_frame_not_an_error(client):
     """A series that is simply not in this file is a valid answer: zero rows."""
     frame = bc.parse_bhavcopy(csv_text(UDIFF), series="ZZ")
     assert frame.empty
-    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
 
 
@@ -693,7 +723,7 @@ async def test_404_returns_an_empty_frame_with_the_right_columns(stub_httpx):
 
     assert len(transport.requests) == 1
     assert frame.empty
-    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     assert frame.attrs[bc.MISSING_DATES_ATTR] == ["2026-09-26"]
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
     # Never a synthesised row.
@@ -822,7 +852,7 @@ async def test_range_over_a_fully_missing_span_is_empty_not_an_error(client):
     frame = await client.bhavcopy_range_async("2026-09-21", "2026-09-25")
 
     assert frame.empty
-    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     assert frame.attrs[bc.SYNTHETIC_OHLC_ATTR] is False
     assert len(frame.attrs[bc.MISSING_DATES_ATTR]) == 5
 
@@ -1160,7 +1190,11 @@ def test_package_exports_the_bhavcopy_surface_without_shadowing_the_module():
 
 
 def test_module_constants_are_the_documented_values():
-    assert bc.COLUMNS == ("Open", "High", "Low", "Close", "Volume")
+    assert bc.COLUMNS == ("Open", "High", "Low", "Close", "Volume", "TurnoverValue")
+    assert bc.OHLCV_COLUMNS == ("Open", "High", "Low", "Close", "Volume")
+    assert bc.COLUMNS[:5] == bc.OHLCV_COLUMNS
+    assert bc.TURNOVER_COLUMN == "TurnoverValue"
+    assert bc.TURNOVER_COLUMN not in bc.OHLCV_COLUMNS
     assert bc.SYNTHETIC_OHLC_ATTR == "bfinance_synthetic_ohlc"
     assert bc.MISSING_DATES_ATTR == "bfinance_bhavcopy_missing_dates"
     assert bc.PROVENANCE == "nse_bhavcopy"
