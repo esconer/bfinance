@@ -113,6 +113,18 @@
       "notes": "The TRUNCATED case: `218 results found: Showing page 1 of 9`, 25 rows returned. This is the fixture that makes partiality visible - a complete list is not robots-obtainable, because the page's own pager emits ?page=2..9 and its page-size control emits ?limit=10/25/50&page=1, all disallowed, and POST /api/export/screen/?url_name=browse_industry&mes_code=IN06 answers 403 unauthenticated. Note the page's own arithmetic does not close: 9 pages x 25 = 225, against 218 claimed. And market.html's `No. of Companies` for this same leaf is 159, not 218 - the count universes disagree for one node on one day.",
       "stored_sha256": "b43919730f885b40032b114b61b7a33ce1ba6ace07d6321bbaa086e406edf24d",
       "stored_line_endings": "lf"
+    },
+    "company_itc_full_columns.html": {
+      "url": "https://www.screener.in/company/ITC/consolidated/",
+      "http_status": 200,
+      "captured_at_utc": "2026-09-28T01:52:00+00:00",
+      "original_bytes": 210834,
+      "original_sha256_16": "e7234b397dd06a9e",
+      "stored_bytes": 102257,
+      "trim_rule": "Five sub-trees kept VERBATIM as byte slices of the response (no re-serialisation, no whitespace edits), re-wrapped in a bare <html><body>: div[data-company-id]; h1; and section#quarters, section#profit-loss, section#balance-sheet, section#cash-flow, section#ratios, each with its heading and its table. NOTHING INSIDE A TABLE WAS TRIMMED - every period column survives, which is the entire point of this file. Dropped: <head>, nav, sidebar, footer, section#peers, section#insights, section#shareholding, section#documents, the four table.ranges-table elements, and all <script>. Line endings normalised CRLF->LF.",
+      "notes": "THE ANSWER FIXTURE for 'does screener.in publish quarterly balance sheet and quarterly cash flow?'. NO - it does not. Measured on this file: section#quarters has 13 period columns, 'Jun 2023'..'Jun 2026', months {Jun,Sep,Dec,Mar}, NO 'TTM' column, and its rows are P&L only (Sales, Expenses, Operating Profit, OPM %, Other Income, Interest, Depreciation, Profit before tax, Tax %, Net Profit, EPS in Rs, Raw PDF) - zero balance-sheet or cash-flow line items. section#balance-sheet and section#cash-flow each have 12 period columns, 'Mar 2015'..'Mar 2026', EVERY one of them 'Mar' (fiscal year end), with no non-Mar column and no 'TTM'. So balance sheet and cash flow are annual only. Note section#profit-loss ALSO carries a trailing 'TTM' column after its 12 annual ones, so 'TTM' marks the annual P&L table, not a quarterly section. Recorded because company_itc.html cut every one of these tables to the trailing 2 columns (['Mar 2025','Mar 2026'] for balance sheet and cash flow, ['Mar 2026','Jun 2026'] for quarters), which is what made the question unanswerable from the fixtures. Section id sequence here matches company_itc.html exactly.",
+      "stored_sha256": "2fbcf1e1b728e77d5a50b8dd65098a5b3c2600847a007bb5ac7cb2ca674a3f0d",
+      "stored_line_endings": "lf"
     }
   }
 }
