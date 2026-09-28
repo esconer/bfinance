@@ -711,3 +711,82 @@ unchanged, change temporarily, or be reused."* That lands directly on the `resol
 
 Era-dependent unit trap to watch: **NSE published F&O turnover in lakhs before 2024-07-08 and index
 turnover in crores.** Same class of bug as the `dividendYield` fraction/percent one.
+
+## 9. Routes found via a third-party client — verified, not inherited
+
+`github.com/BennyThadikaran/NseIndiaApi` (GPL-3.0, 161 stars, last pushed 2026-08-31)
+exposes ~39 NSE routes, several of which bfinance does not read. Like
+`pparesh25/NSE_BSE_Downloader` above: **learn from, never copy.** Nothing was copied; these
+are public HTTP endpoints and every fact below was **re-verified live on 2026-09-29**
+rather than taken from the other project's source. A route in someone else's code is a
+hypothesis, and bfinance's rule is that an unverified route is not a route.
+
+Verified on 2026-09-29, `www.nseindia.com/api` with a primed cookie, >= 2s pacing:
+
+| route | verdict | what came back |
+|---|---|---|
+| `/holiday-master?type=trading` | **200, 34,022 B** | 12 segments, each with `tradingDate`, `weekDay`, `description`, `morning_session`, `evening_session` |
+| `/historicalOR/indicesHistory` | **200, 19,021 B** | 70 rows x 9 columns of index OHLC for NIFTY 50 |
+| `/option-chain-v3` **with `symbol` + `expiry`** | **200, 941 B** | `expiryDates` and `strikePrices` fully populated |
+| `/public-past-issues` | **200, `[]`** | empty for a 2014-2015 window |
+| `/historicalOR/indicesHistory?indexType=NIFTY 50 - TRI` | **200, 0 rows** | 11 bytes |
+| `nsearchives.../content/equities/sec_list_{YYYYMMDD}.csv` | **404** | an HTML error page, not CSV, for both a 2026 and a 2015 date |
+
+### What this changes
+
+**The trading calendar exists, and the mirror needs exactly that.** `docs/BAVCOPY_MIRROR.md`
+section 6 records the open problem: a bhavcopy mirror cannot distinguish "a holiday, so no
+file was ever published" from "I have not downloaded that day yet", because both answer
+with zero rows. `/holiday-master` makes the first answerable from an official source rather
+than from a hardcoded holiday list. **The mirror's coverage watermark should be seeded from
+this route, not from a guess.**
+
+**Index OHLC history is available and bfinance does not read it.**
+`/historicalOR/indicesHistory` returns, per session: `EOD_INDEX_NAME`, `EOD_OPEN_INDEX_VAL`,
+`EOD_HIGH_INDEX_VAL`, `EOD_LOW_INDEX_VAL`, `EOD_CLOSE_INDEX_VAL`, `HIT_TURN_OVER`,
+`HIT_TRADED_QTY`, `EOD_TIMESTAMP`, `HI_TIMESTAMP`. That is genuine index OHLC, which
+bfinance currently has no source for.
+
+**CORRECTION: the option-chain route is not dead.** Recorded elsewhere as
+"`/api/option-chain-v3` returns 200 with a 2-byte `{}`". That is a **call artefact, not an
+upstream fact.** Called with no parameters it returns `{}`; called with `symbol` and
+`expiry` it returns the full `expiryDates` and `strikePrices` grids. `records.data` was
+empty in this test, consistent with being outside market hours, so the open question is
+narrower than "the route is dead": it is whether `records.data` populates in session. The
+route itself works.
+
+**TRI is still absent, now re-confirmed twice.** Section 7 records no TRI route; this is an
+independent second attempt via a different route and a different `indexType`, and
+`NIFTY 50 - TRI` returns zero rows where `NIFTY 50` returns 70. The refusal in
+`sources/registry.py` stands, with better evidence.
+
+**Two negative results worth keeping, so nobody re-derives them.**
+
+* `/public-past-issues` is empty for historical windows, so it cannot supply listing dates.
+  The Trendlyne client's undeclared 2,222 pre-listing rows for SBIN therefore have **no
+  official fix available from this route**; the honest options remain a listing-date gate
+  from another source, or publishing the row count as an attribute.
+* The per-day securities list 404s on the archive host. bfinance's `universe` module is a
+  forward-only **recorder** for exactly this reason, and that design is now re-confirmed
+  from a second direction: there is no per-day membership file to backfill from.
+
+### Corroborations, not new facts
+
+Three things this project states independently were confirmed by a maintainer who has run
+against NSE for years, which raises confidence in all three:
+
+* **"All requests through NSE are rate limited or throttled to 3 requests per second."**
+  bfinance's `min_request_interval_ms = 250` allows 4/s, so the shipped default is
+  slightly **more aggressive** than the rate this project considers real.
+* That project recommends "an extra 0.5 - 1 sec sleep between requests", i.e. 1-2/s, well
+  below bfinance's 4/s floor.
+* It recommends "save the file and reuse them instead of re-downloading", which is the same
+  conclusion `docs/BAVCOPY_MIRROR.md` reaches from measurement.
+
+Its transport is factored into its own module with a persistent session and a
+`download_folder` holding cookies and downloaded files, which independently matches the
+measured 3.03x keep-alive win in that document.
+
+The one place this project is *more* conservative: it never re-verifies a route from
+another implementation without fetching it, and it records the negative results alongside
+the positive ones.

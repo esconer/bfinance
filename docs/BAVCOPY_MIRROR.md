@@ -245,12 +245,33 @@ that decompresses in 8 ms.
    count.
 3. **How should the mirror interact with `universe.UniverseArchive`?** Both accumulate
    forward-only state. A mirror that already holds 30 years of membership-by-absence would
-   largely solve the survivorship problem that recorder exists to mitigate — worth checking
-   whether `mirror_days` plus the `ohlc` table can answer "was this symbol listed on this
-   day" without a second store.
+   largely solve the survivorship problem that recorder exists to mitigate — but
+   `UPSTREAM_SOURCES.md` section 9 records that the per-day securities list
+   (`sec_list_{YYYYMMDD}.csv`) returns **404**, so there is no per-day membership file to
+   backfill from. The recorder stays necessary. Still worth checking whether `mirror_days`
+   plus the `ohlc` table can answer "was this symbol listed on this day" without a second
+   store, for symbols that traded.
 4. **Does the mirror need the F&O segment too?** `/content/fo/` is verified 200 with 37,165
    rows, and `TtlTrfVal / TtlTradgVol` is structurally unresolvable there. Same schema,
    different unit — probably a separate table rather than a `segment` column, but undecided.
+
+## 11a. Resolved: the coverage watermark has an official source
+
+Open question 3 in `UPSTREAM_SOURCES.md` section 9 settles part of section 6 above.
+`https://www.nseindia.com/api/holiday-master?type=trading` returns **HTTP 200, 34,022
+bytes, 12 segments**, each row carrying `tradingDate`, `weekDay`, `description`,
+`morning_session` and `evening_session`.
+
+So the three-way distinction in section 6 does not need a guessed holiday list:
+
+| question | answered by |
+|---|---|
+| is this date a trading day at all? | `/holiday-master` |
+| have I downloaded it? | `mirror_days` |
+| did the security not exist / not trade? | absence from `ohlc` on a day that *is* in `mirror_days` |
+
+**The watermark should be seeded from that route**, which also means a caller can be told
+"2026-01-26 was a holiday" rather than merely "no data".
 
 ## 12. Why it is worth doing beyond speed
 
