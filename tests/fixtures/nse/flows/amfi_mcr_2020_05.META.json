@@ -1,0 +1,36 @@
+{
+ "url": "https://portal.amfiindia.com/spages/ammay2020repo.xls",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "application/json",
+ "original_bytes": 40062,
+ "original_sha256_16": "a77562e2068fd7e7",
+ "trim_rule": "not a network trim: transcribed from the downloaded .xls into JSON so the numbers are diffable and language-independent. Keeps the verbatim header row, the full section taxonomy, and 6 category rows + 'Total A-Open ended Schemes' + 'Grand Total'. The workbook itself has 100+ rows and is not stored.",
+ "stored_bytes": 3596,
+ "stored_sha256": "894976c47bbb110860cac26df1be858446806b6d410a6366fafdda1d64285cbf",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "exact cell-by-cell equality against the .xls, plus an internal arithmetic check",
+  "records_stored": 8,
+  "workbook_rows_available": 90,
+  "workbook_sheets": [
+   "May 2020",
+   "New Schemes"
+  ],
+  "every_stored_number_equals_the_xls_cell_bitwise": true,
+  "mobilised_minus_repurchase_equals_net_max_abs_error_crore": 3.637978807091713e-11,
+  "stable_anchor_rows": [
+   "Total A-Open ended Schemes",
+   "Grand Total"
+  ],
+  "grand_total_net_inflow_inr_crore": 70813.40546375,
+  "column_headers_contain_the_month_inline": true,
+  "header_cells_contain_embedded_newlines": true,
+  "header_is_xls_row3_not_row2": "xls row2 is the title, xls row3 is the header",
+  "stable_anchor_rows_only_across_time": [
+   "Grand Total",
+   "Total A-Open ended Schemes"
+  ],
+  "units": "INR crore"
+ }
+}

@@ -1,0 +1,27 @@
+{
+ "url": "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "text/csv",
+ "original_bytes": 49398,
+ "original_sha256_16": "31ffcf5fa839c99c",
+ "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 743 of 755 constituent rows.",
+ "stored_bytes": 791,
+ "stored_sha256": "63a4fb618bd9db8c72cd01ae2192c335fc1bfb5f3994caa587d99f751186ed6c",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "reference DictReader parse of original vs stored; stored must be a prefix-subset of original",
+  "original_data_rows": 755,
+  "stored_data_rows": 12,
+  "original_unique_symbols": 755,
+  "stored_rows_are_prefix_of_original": true,
+  "trim_keeps_first_N_rows_in_file_order": true,
+  "column_names_verbatim": [
+   "Company Name",
+   "Industry",
+   "Symbol",
+   "Series",
+   "ISIN Code"
+  ]
+ }
+}

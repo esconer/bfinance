@@ -1,0 +1,30 @@
+{
+ "url": "https://www.nseindia.com/api/fiidiiTradeReact",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "application/json",
+ "original_bytes": 217,
+ "original_sha256_16": "3f43caec50cc92f7",
+ "trim_rule": "no trim: the upstream response is already 217 bytes / 2 rows (one trading day, two categories). [added single trailing LF; upstream had none]",
+ "stored_bytes": 218,
+ "stored_sha256": "25f6cd3dec4a6af4131d8560a601e711cc11cfec10dfcdb67e9a2b21170eae60",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "unmodified",
+  "rows": 2,
+  "fields_verbatim": [
+   "buyValue",
+   "category",
+   "date",
+   "netValue",
+   "sellValue"
+  ],
+  "categories_verbatim": [
+   "DII",
+   "FII/FPI"
+  ],
+  "distinct_dates": 1,
+  "history_available": false,
+  "note": "NO date parameters. The route returns exactly one trading day. A flows series must be accumulated locally, not back-filled from this route."
+ }
+}

@@ -1,0 +1,162 @@
+{
+ "_source_workbook": "amfi-monthly-2026-08.xls",
+ "_sheet": "MCR_MonthlyReport",
+ "_months_covered": "August 2026",
+ "_workbook_title_cell_xls_row2": "Monthly Report for the month of August 2026",
+ "_verbatim_header_row_from_xls_row3": [
+  "Sr ",
+  "Scheme Name ",
+  "No. of Schemes as on August 31, 2026",
+  "No. of Folios as on August 31, 2026",
+  "Funds Mobilized for the month of August 2026 (INR in crore)",
+  "Repurchase/Redemption for the month of August 2026 (INR in crore)",
+  "Net Inflow (+ve)/Outflow (-ve) for the month of August 2026 (INR in crore)",
+  "Net Assets Under Management as on August 31, 2026 (INR in crore)",
+  "Average Net Assets Under Management for the month August 2026 (INR in crore)",
+  "No. of segregated portfolios created as on August 31, 2026",
+  "Net Assets Under Management in segregated portfolio as on August 31, 2026 (INR in crore)",
+  "SIP Infows for the Month of August 31, 2026 (INR in crore)",
+  "Existing SIP Accounts at the beginning of the Month of  August 31, 2026 (Excluding STP) ",
+  "SIP Accounts Registered during the Month of August 31, 2026 ",
+  "SIP Accounts Matured during the Month of  August 31, 2026 ",
+  "SIP Accounts terminated prematurely during the Month of  August 31, 2026",
+  "Closing no. of SIPs at the end of Month of  August 31, 2026"
+ ],
+ "_section_taxonomy_rows_in_workbook": [
+  [
+   "A",
+   "Open ended Schemes"
+  ],
+  [
+   "I",
+   "Debt Schemes"
+  ],
+  [
+   "II",
+   "Equity Schemes"
+  ],
+  [
+   "III",
+   "Hybrid Schemes"
+  ],
+  [
+   "IV",
+   "Life Cycle Funds"
+  ],
+  [
+   "V",
+   "Solution Oriented Schemes **"
+  ],
+  [
+   "VI",
+   "Index Funds"
+  ],
+  [
+   "VII",
+   "Exchange Traded Funds (ETFs)"
+  ],
+  [
+   "VIII",
+   "Overseas Fund of Funds"
+  ],
+  [
+   "B",
+   "Close Ended Schemes"
+  ],
+  [
+   "I",
+   "Income/Debt Oriented Schemes"
+  ],
+  [
+   "II",
+   "Growth/Equity Oriented Schemes"
+  ],
+  [
+   "C",
+   "Interval Schemes"
+  ],
+  [
+   "None",
+   "** Data in respect Fund of Funds Domestic is shown for information only. The same is included in the respective underlying schemes."
+  ],
+  [
+   "None",
+   "## Include NFOs- ALPHAGREP LIQUID OMNI FOF, SBI Nifty Midcap 150 Momentum 50 ETF FOF, Kotak Diversified Equity All Cap Omni FOF,HDFC Nifty Metal ETF FOF"
+  ]
+ ],
+ "_transcription_note": "Values copied from the .xls cells WITHOUT rescaling. INR crore as published. _xls_row is the 0-based row index in the workbook sheet, so any cell can be re-read and compared exactly.",
+ "records": [
+  {
+   "n_schemes": 1935,
+   "n_folios": 283091368,
+   "funds_mobilized_inr_crore": 1409412.4313246,
+   "repurchase_redemption_inr_crore": 1366946.3439156504,
+   "net_inflow_outflow_inr_crore": 42466.08740894881,
+   "_xls_row": 84,
+   "_row_label": "Total A-Open ended Schemes"
+  },
+  {
+   "n_schemes": 1985,
+   "n_folios": 283519085,
+   "funds_mobilized_inr_crore": 1409425.15669909,
+   "repurchase_redemption_inr_crore": 1368071.5594280106,
+   "net_inflow_outflow_inr_crore": 41353.59727107881,
+   "_xls_row": 104,
+   "_row_label": "Grand Total"
+  },
+  {
+   "n_schemes": 38,
+   "n_folios": 807802,
+   "funds_mobilized_inr_crore": 622703.46890184,
+   "repurchase_redemption_inr_crore": 653357.71763189,
+   "net_inflow_outflow_inr_crore": -30654.2487300509,
+   "_xls_row": 5,
+   "_row_label": "Overnight Fund"
+  },
+  {
+   "n_schemes": 42,
+   "n_folios": 3963170,
+   "funds_mobilized_inr_crore": 520626.71876404,
+   "repurchase_redemption_inr_crore": 500692.42658436,
+   "net_inflow_outflow_inr_crore": 19934.2921796797,
+   "_xls_row": 6,
+   "_row_label": "Liquid Fund"
+  },
+  {
+   "n_schemes": 26,
+   "n_folios": 786918,
+   "funds_mobilized_inr_crore": 21619.3895212,
+   "repurchase_redemption_inr_crore": 17362.83776684,
+   "net_inflow_outflow_inr_crore": 4256.55175436,
+   "_xls_row": 7,
+   "_row_label": "Ultra Short Term Fund"
+  },
+  {
+   "n_schemes": 25,
+   "n_folios": 838895,
+   "funds_mobilized_inr_crore": 13083.56284716,
+   "repurchase_redemption_inr_crore": 15552.12847277,
+   "net_inflow_outflow_inr_crore": -2468.56562561,
+   "_xls_row": 8,
+   "_row_label": "Ultra Short to Short Term Fund"
+  },
+  {
+   "n_schemes": 27,
+   "n_folios": 539157,
+   "funds_mobilized_inr_crore": 67853.4462936,
+   "repurchase_redemption_inr_crore": 56118.73594779,
+   "net_inflow_outflow_inr_crore": 11734.71034581,
+   "_xls_row": 9,
+   "_row_label": "Money Market Fund"
+  },
+  {
+   "n_schemes": 26,
+   "n_folios": 578902,
+   "funds_mobilized_inr_crore": 2639.64915649,
+   "repurchase_redemption_inr_crore": 6898.20916968,
+   "net_inflow_outflow_inr_crore": -4258.56001319,
+   "_xls_row": 10,
+   "_row_label": "Short Term Fund"
+  }
+ ]
+}

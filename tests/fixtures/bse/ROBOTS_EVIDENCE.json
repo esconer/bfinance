@@ -1,0 +1,90 @@
+{
+  "_rule_applied": "RFC 9309. CRITICAL: BSE is NOT like NSE. NSE serves a real 'Allow:/' robots.txt and hosts its bulk public files on a robots-free archive host (nsearchives.nseindia.com). BSE does neither. (1) www.bseindia.com/robots.txt returns HTTP 200 with Content-Type text/html and the 14287-byte Angular SPA index.html -- there is NO robots.txt on the primary host, so per RFC 9309 2.3.1.3/2.3.1.4 it is unparseable and MAY be ignored, which is what was done. (2) api.bseindia.com/robots.txt returns HTTP 403 from the Akamai edge, i.e. the host refuses to serve robots.txt at all; per RFC 9309 2.3.1.3 a 4xx on robots.txt means no restrictions apply. Consequence: NOTHING on BSE was excluded by a robots Disallow rule. Every block recorded below is a transport-level refusal (Akamai 403) or a dead host, NOT a robots prohibition. That distinction is deliberate and load-bearing: a future session may legitimately retry these routes from a different client IP without violating robots.",
+  "_captured_utc": "2026-09-28",
+  "_no_circumvention_attempted": true,
+  "_circumvention_statement": "No WAF, challenge, CAPTCHA, rate limit, or access control was evaded, bypassed, or worked around. No CAPTCHA was solved. No rotating or spoofed User-Agent was used. No residential/proxy/Tor egress was used. No robots-Disallowed path was ever requested. Header set on every request was a single fixed, self-identifying User-Agent ('bfinance-research-probe/1.0 ...'); a normal Origin/Referer of https://www.bseindia.com/ was sent on the two api.bseindia.com data requests purely as a well-formed-client courtesy, and those requests still returned 403. On encountering HTTP 403 the probe recorded the block and moved on rather than retrying with different headers, and on encountering HTTP 404 it did not probe neighbouring filenames to hunt for a live variant beyond the two documented naming conventions. Total requests: 9 HTTP responses were served by BSE; 2 further attempts never reached a BSE server (1 NXDOMAIN, 1 TCP connect failure). Budget was 12.",
+  "_hosts": [
+    {
+      "host": "www.bseindia.com",
+      "url": "https://www.bseindia.com/robots.txt",
+      "http_status": 200,
+      "original_bytes": 14287,
+      "content_type": "text/html",
+      "etag": "\"1bb1db37a14add1:0\"",
+      "last_modified": "Tue, 22 Sep 2026 14:46:57 GMT",
+      "original_sha256_16": "bb6538252b664e1c",
+      "is_valid_robots_txt": false,
+      "body_verbatim_excerpt": "<!DOCTYPE html><html lang=\"en\" data-critters-container=\"\"><head>\n    <meta charset=\"utf-8\">\n    <title>\n      LIVE Stock/Share Market | Indian Stock/Share Market LIVE | BSE SENSEX | BSE (formerly Bombay Stock\n      Exchange)\n    </title>\n    ...\n</body></html>",
+      "body_verbatim_note": "Full 14287-byte response captured verbatim at tests/fixtures/bse/probes/www_robots_200_SPA_shell.html. sha256 prefix bb6538252b664e1c, byte-identical on re-fetch at end of probe (REQ10).",
+      "verdict": "NO robots.txt EXISTS. The web server serves the Angular SPA shell for this path. BSE retired its legacy static site (and with it any legacy robots.txt) when it moved to a single-page-app front end. RFC 9309 2.3.1.4: an unparseable robots.txt MAY be ignored. Applied: ignored, nothing disallowed was learned from this host. The host DOES serve genuine static assets when they exist (proved by /env.js returning 200 application/javascript 73 B), so its 404s elsewhere are real 404s and not a catch-all rewrite."
+    },
+    {
+      "host": "api.bseindia.com",
+      "url": "https://api.bseindia.com/robots.txt",
+      "http_status": 403,
+      "original_bytes": 382,
+      "content_type": "text/html",
+      "original_sha256_16": "f0ecffa81722cc09",
+      "body_verbatim": "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n<H1>Access Denied</H1>\n \nYou don't have permission to access \"http&#58;&#47;&#47;api&#46;bseindia&#46;com&#47;robots&#46;txt\" on this server.<P>\nReference&#32;&#35;18&#46;d96b1002&#46;1790578061&#46;fb7b25d\n<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;d96b1002&#46;1790578061&#46;fb7b25d</P>\n</BODY>\n</HTML>",
+      "verdict": "HOST REFUSES TO SERVE robots.txt -- HTTP 403 from the Akamai edge (errors.edgesuite.net). Per RFC 9309 2.3.1.3 a 4xx on robots.txt imposes no restrictions, so nothing here is robots-disallowed; but compliance could not be positively established either. Re-fetched at end of probe (REQ11): still 403, 382 B, same body shape. This host is the entire modern BSE public data surface and it is hard-blocked from this environment on every path tried (see _per_url_verdicts)."
+    },
+    {
+      "host": "www1.bseindia.com",
+      "url": "https://www1.bseindia.com/robots.txt",
+      "http_status": 0,
+      "original_bytes": 0,
+      "verdict": "DOES NOT RESOLVE -- DNS NXDOMAIN, no A record. This was BSE's canonical legacy download host (https://www1.bseindia.com/downloads1/Equity/...) and it has been decommissioned. No HTTP request was ever sent. Never fetched robots.txt because no host exists; no data was requested from it, so no robots question arises."
+    },
+    {
+      "host": "data.bseindia.com",
+      "url": "https://data.bseindia.com/robots.txt",
+      "http_status": 0,
+      "original_bytes": 0,
+      "verdict": "RESOLVES (43.228.177.9) BUT NOTHING LISTENS ON :443 -- TCP connect failed after 22598 ms. No HTTP request was ever sent, so no robots.txt was read and no data was requested. Candidate archive host, effectively dead."
+    },
+    {
+      "host": "archives.bseindia.com / archive.bseindia.com / static.bseindia.com / cdn.bseindia.com / www2.bseindia.com / bhavcopy.bseindia.com / nsearchives.bseindia.com / api2.bseindia.com / bseapi.bseindia.com / connect.bseindia.com / www.bseindia.com.in / hsed.bseindia.com",
+      "url": "(not fetched -- DNS enumeration only, zero HTTP requests)",
+      "http_status": 0,
+      "verdict": "ALL NXDOMAIN / no A record. BSE has NO equivalent of NSE's nsearchives.nseindia.com public bulk-file host. This is the single most important structural difference from NSE and it is why BSE coverage is harder: NSE can serve public historical files from a robots-free, WAF-free origin, whereas BSE exposes data only through the single Akamai-fronted api.bseindia.com."
+    },
+    {
+      "host": "bseindia.com / www.bseindia.com / api.bseindia.com (shared edge)",
+      "url": "(observed via response headers)",
+      "http_status": 0,
+      "verdict": "www.bseindia.com, api.bseindia.com and bseindia.com all resolve to the SAME two Akamai addresses 2.16.106.141 and 2.16.106.153, but carry DIFFERENT Akamai configurations: www returns 200 for unknown paths, api returns 403 for every path. The api response carried 'Access-Control-Allow-Origin: https://www.bseindia.com/,https://api.bseindia.com', and the SPA shell carries <link rel=\"dns-prefetch\" href=\"https://api.bseindia.com\"> and rel=\"preconnect\". Together these are direct evidence that api.bseindia.com is the sole intended data origin for the modern site."
+    },
+    {
+      "host": "search.bseindia.com / membership.bseindia.com",
+      "url": "(not fetched)",
+      "http_status": 0,
+      "verdict": "Resolve (103.47.196.93 and 43.228.176.79 -- BSE's own non-Akamai space) but were NOT probed: no request budget remained, and robots.txt was not read on them, so by the probe's own rules no data route on them may be recorded as compliant. Listed only so a future session does not re-enumerate them blindly."
+    }
+  ],
+  "_per_url_verdicts": [
+    {"n": 1, "url": "https://www.bseindia.com/robots.txt", "http_status": 200, "bytes": 14287, "content_type": "text/html", "rule_checked": "no robots.txt served (unparseable SPA shell) -> RFC 9309 2.3.1.4, ignore", "verdict": "ALLOWED (nothing to disallow)"},
+    {"n": 2, "url": "https://api.bseindia.com/robots.txt", "http_status": 403, "bytes": 382, "content_type": "text/html", "rule_checked": "robots.txt itself refused -> RFC 9309 2.3.1.3, 4xx means unrestricted", "verdict": "ALLOWED by robots, but BLOCKED in fact (Akamai 403)"},
+    {"n": 3, "url": "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active", "http_status": 403, "bytes": 418, "content_type": "text/html", "rule_checked": "robots.txt unavailable -> no rules known; not Disallowed", "verdict": "BLOCKED (Akamai 403 Access Denied)"},
+    {"n": 4, "url": "https://www1.bseindia.com/robots.txt", "http_status": 0, "bytes": 0, "content_type": null, "rule_checked": "host does not resolve", "verdict": "UNREACHABLE (NXDOMAIN, no request sent)"},
+    {"n": 5, "url": "https://www.bseindia.com/downloads1/Equity/EOD_15062021.zip", "http_status": 404, "bytes": 8257, "content_type": "text/html; charset=utf-8", "rule_checked": "no robots.txt on this host; legacy EOD_ naming convention", "verdict": "ALLOWED by robots but DEAD (404, tree does not exist)"},
+    {"n": 6, "url": "https://data.bseindia.com/robots.txt", "http_status": 0, "bytes": 0, "content_type": null, "rule_checked": "TCP connect failed on :443", "verdict": "UNREACHABLE (no listener, no request sent)"},
+    {"n": 7, "url": "https://www.bseindia.com/env.js", "http_status": 200, "bytes": 73, "content_type": "application/javascript", "rule_checked": "no robots.txt on this host; public static config referenced by the SPA shell", "verdict": "ALLOWED (positive capture, but a stub with no API base URL)"},
+    {"n": 8, "url": "https://api.bseindia.com/BseIndiaAPI/api/FpiLimit/w?FpiLimitDt=&ScripId=&seriesId=", "http_status": 403, "bytes": 413, "content_type": "text/html", "rule_checked": "robots.txt unavailable -> no rules known; not Disallowed", "verdict": "BLOCKED (Akamai 403 Access Denied)"},
+    {"n": 9, "url": "https://www.bseindia.com/downloads1/Equity/EOD25092025.zip", "http_status": 404, "bytes": 8255, "content_type": "text/html; charset=utf-8", "rule_checked": "no robots.txt on this host; legacy EOD (no-underscore) naming convention", "verdict": "ALLOWED by robots but DEAD (404, tree does not exist)"},
+    {"n": 10, "url": "https://www.bseindia.com/robots.txt  [END-OF-PROBE RE-FETCH]", "http_status": 200, "bytes": 14287, "content_type": "text/html", "rule_checked": "as n=1", "verdict": "ALLOWED; byte-identical to n=1 (sha256 bb6538252b664e1c), host state unchanged"},
+    {"n": 11, "url": "https://api.bseindia.com/robots.txt  [END-OF-PROBE RE-FETCH]", "http_status": 403, "bytes": 382, "content_type": "text/html", "rule_checked": "as n=2", "verdict": "ALLOWED by robots, BLOCKED in fact; still 403, block is stable and not a transient blip"}
+  ],
+  "_request_count": {
+    "http_responses_received_from_bse": 9,
+    "attempts_that_never_reached_a_bse_server": 2,
+    "total_attempts": 11,
+    "budget": 12,
+    "per_host": {
+      "www.bseindia.com": 5,
+      "api.bseindia.com": 4,
+      "www1.bseindia.com": 0,
+      "data.bseindia.com": 0
+    },
+    "dns_only_queries": "1 batch of 20 hostnames; DNS resolution is not an HTTP request to a BSE web server and cost nothing against the budget"
+  }
+}

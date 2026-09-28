@@ -1,0 +1,24 @@
+# TRIMMED EXCERPT of NSE/FA/73061 (Circular Ref. 1) issued February 27, 2026, Revision in Transaction Charges.
+# Original: https://nsearchives.nseindia.com/content/circulars/FA73061.pdf | 163365 B | sha256[:16] 6085601a26177ed6
+# Trimmed to the rate tables and the identity/lineage lines only. LF endings.
+# This file is a FIXTURE, not an upstream product: it is what the parsers in
+# bfinance.costs read, so every rate in a computed bps traces back to these bytes.
+## IDENTITY
+Download Ref No: NSE/FA/73061 Date: February 27, 2026
+Circular Ref. No: 1
+Sub: Revision in Transaction Charges
+The above revision will be applicable with effect from March 1, 2026.
+
+## AUTHORITY CITED
+SEBI circular SEBI/HO/MRD/TPD -1/P/CIR/2024/92 dated July 1, 2024 (directed MIIs that the charge structure be uniform and equal for all members instead of a slab-wise structure dependent on volume)
+
+## PREDECESSORS CITED
+NSE/FA/56129 dated March 24, 2023
+NSE/FA/64323 dated September 27, 2024
+The Trading Member's contributions towards NSE IPFT stand at the level levied prior to April 1, 2023.
+
+## PRIOR-LEVEL DELTAS (NSE/FA/56129, verbatim)
+Trading Members may recall that the Exchange vide circular no. NSE/FA/56129 dated March 24, 2023, had reduced its transaction charges for cash market segment by Rs 20 per crore of traded value , Equity Futures by Rs. 10 per c rore of traded value and for Equity options by Rs. 300 per crore traded premium value. Further, to augment the corpus of NSE IPFT the Exchange had enhanced the contribution of the Trading Member towards the corpus of NSE IPFT by Rs. 9.99 per crore of traded value for Cash Market Segment & Equity Futures and by Rs. 49.99 per crore of traded premium value for Equity Options. Thus, the Trading Member may note that the Exchange had reduced the overall outflow of the trading members by Rs.10.01 per crore of traded value for Cash Market Segment, Re.0.01 per crore of traded value for Equity Futures and Rs. 250.01 per crore of traded premium value for Equity Options.
+
+## RATE TABLE (verbatim, Rs. per crore of Traded Value, each side)
+Segment Existing outflow of the Trading Member Revised outflow of the Trading Member Transaction Charges Contribution to NSE IPFT Total Transaction Charges Contribution to NSE IPFT Total Cash Market Rs. 297 each side Rs. 10 each side Rs. 307 each side Rs. 306.99 each side Rs. 0.01 each side Rs. 307 each side Equity futures Rs. 173 each side Rs. 10 each side Rs. 183 each side Rs. 1 82.99 each side Rs. 0.01 each side Rs. 183 each side Equity Options (on premium) Rs. 3 ,503 each side Rs. 50 each side Rs. 3 ,553 each side Rs. 3,552.99 each side Rs. 0.01 each side Rs. 3 ,553 each side The above revision will be applicable with effect from March 1, 2026.

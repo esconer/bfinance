@@ -1,0 +1,48 @@
+{
+ "directory": "tests/fixtures/nse",
+ "purpose": "Evidence for the tri_index_return refusal registered in bfinance.sources.registry.UNAVAILABLE and enforced by bfinance.nse.macro.UNAVAILABLE_SOURCES['index_tri']. Every OTHER registered refusal in that table is tied to an HTTP status recorded on disk. This one was not, which is why this file exists.",
+ "_owned_by": "bfinance.nse.macro",
+ "_captured": "2026-09-28",
+ "_captured_by": "the bfinance.nse.macro research pass, one request at a time, no retries, no parallel probing",
+ "_robots": {
+  "rule_applied": "RFC 9309. The four probed routes were on nsearchives.nseindia.com and www.nseindia.com. nsearchives serves NO robots.txt (HTTP 404) and is therefore unrestricted per RFC 9309 2.3.1.3; that 404 is recorded in tests/fixtures/nse/ROBOTS_EVIDENCE.json. www.nseindia.com/robots.txt is 200 and reads 'User-agent: * / Allow: / / Disallow: /market-data-test', so every /api/ path probed here was allowed.",
+  "cited_from": "tests/fixtures/nse/ROBOTS_EVIDENCE.json",
+  "read_before_probing": true
+ },
+ "urls_not_committed": true,
+ "why_urls_are_absent": "The four probe URLs were never written to any artifact in this repository. They exist only in the reason string compiled into src/bfinance/nse/macro.py, which says four candidate routes were probed and every one answered 404, and in the integer probe_count: 4 beside it. This file records that gap rather than filling it. Writing four plausible-looking nseindia.com paths here would manufacture evidence: a reader would reasonably take a URL in a file called tri_probe_log.json to be a URL that was actually requested, and a fabricated route in an evidence fixture is precisely the class of fabrication this repository has spent its history removing. An honest record of a missing measurement is worth more than a convincing-looking invented one.",
+ "what_would_close_this_gap": "Re-run the four probes and record, per URL: the exact url, http_status, original_bytes and original_sha256_16 of the 404 body, plus retrieved_utc. Then set urls_not_committed to false, add the four entries to 'probes', and the test that currently reads the recorded 404s as a bare count will start reading per-route statuses. Until then the count is the only committed record of the 404s, and tests/test_tri_probe_evidence.py says so in its own module docstring rather than implying the URLs are pinned.",
+ "probes": [],
+ "probe_count_recorded": 4,
+ "probe_count_source": "src/bfinance/nse/macro.py, UNAVAILABLE_SOURCES['index_tri']['probe_count'], cross-checked against the same entry's 'why' string, which spells out 'Four candidate routes were probed and every one returned HTTP 404.' The two agree, and tests/test_tri_probe_evidence.py asserts they agree rather than restating either.",
+ "recorded_status_per_route": null,
+ "recorded_status_note": "null, not 404, on purpose. Nothing in this repository records an HTTP status for any individual TRI probe route, so writing 404 here four times would be a second fabrication layered on the first. The count below is the whole of the committed record.",
+ "independent_evidence_that_the_nse_index_route_carries_no_total_return": {
+  "what_it_shows": "The route bfinance.nse.macro DOES read -- ind_close_all_{DDMMYYYY}.csv -- carries no total-return field in either committed vintage, six years apart. A TRI refusal justified only by four remembered 404s would be weak on its own; this is a separate, byte-level absence over payloads that are actually committed.",
+  "files": [
+   "tests/fixtures/nse/macro/ind_close_all_01012020.csv",
+   "tests/fixtures/nse/macro/ind_close_all_25092026.csv"
+  ],
+  "columns_observed_13": [
+   "Index Name",
+   "Index Date",
+   "Open Index Value",
+   "High Index Value",
+   "Low Index Value",
+   "Closing Index Value",
+   "Points Change",
+   "Change(%)",
+   "Volume",
+   "Turnover (Rs. Cr.)",
+   "P/E",
+   "P/B",
+   "Div Yield"
+  ],
+  "columns_observed_13_note": "Listed so this file is checkable by hand and the test has a literal to compare the CSVs against. The test reads the headers off disk instead, so a header change is a red test rather than a stale list agreeing with a stale file.",
+  "why_absent_is_meaningful": "The same file publishes P/E, P/B and Div Yield, so it is not a price-only payload that would omit yield-derived fields for lack of the concept. Div Yield is present and is a per-annum figure, not a reinvested total-return level, and the module's own docstring records that no artifact here establishes even its unit.",
+  "not_evidence_for": "This absence does not prove no TRI route exists anywhere on NSE. It proves only that the one index route this package reads does not carry one, and that the four routes someone probed were not found. Both are reasons not to ship a TRI accessor; neither is a proof of global absence."
+ },
+ "why_not_committed_as_a_rationale": "NSE does publish total-return index levels for a small set of indices, and the registry's own reason for tri_index_return says so. What is refused is narrower: no reachable source publishes a TRI series for an arbitrary NIFTY constituent. That is the claim this evidence supports, and it is why the fixture records an absence over committed bytes rather than a claim about all of NSE.",
+ "how_to_read_this_file": "As three separate things, at three different strengths. (1) probe_count: 4 and the sentence spelling out 'Four' -- an internally consistent but UNANCHORED count; nothing outside src/bfinance/nse/macro.py corroborates it. (2) the absence of any total-return column in two committed CSVs -- a real, byte-level, independently checkable absence. (3) urls_not_committed: true -- a recorded gap. Only (2) and (3) are evidence about anything outside this file. Reading (1) as if it were a pinned 404 would be reading it as more than it is.",
+ "checked_by": "tests/test_tri_probe_evidence.py, which reads this file and the two CSVs and returns a verdict string, and which carries a negative control per input. Read the derivation and its control together: a control that cannot flip the verdict is the unfailable assertion this repository has removed four times."
+}

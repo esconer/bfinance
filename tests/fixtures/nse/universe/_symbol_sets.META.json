@@ -1,0 +1,30 @@
+{
+ "url": "https://nsearchives.nseindia.com/content/indices/",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "text/plain",
+ "original_bytes": 49305,
+ "original_sha256_16": "82a5d53282da93e9",
+ "trim_rule": "no trim: the COMPLETE symbol set of the five constituent files the mislabelling claim depends on, as a flat TSV. Deliberately untrimmed so the claim is re-verifiable without network access. Excludes ind_nifty50list.csv and ind_niftytotalmarket_list.csv, which appear in none of the identities.",
+ "stored_bytes": 49305,
+ "stored_sha256": "82a5d53282da93e9dd40934ce11582a418e8ae35e2e925f453f399e001083278",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "set arithmetic re-checkable from this file alone",
+  "files_included": [
+   "ind_nifty500list.csv",
+   "ind_niftysmallcap250list.csv",
+   "ind_niftymidcap150list.csv",
+   "ind_niftymidcap100list.csv",
+   "ind_niftymidsmallcap400list.csv"
+  ],
+  "files_excluded": [
+   "ind_nifty50list.csv",
+   "ind_niftytotalmarket_list.csv"
+  ],
+  "total_symbol_lines": 1403,
+  "matches_sum_of_row_counts": true,
+  "tabs_per_line": 1,
+  "header_comment_lines": 9
+ }
+}

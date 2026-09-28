@@ -1,0 +1,18 @@
+{
+ "url": "derived-from:https://nsearchives.nseindia.com/content/indices/",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "application/json",
+ "original_bytes": 2807,
+ "original_sha256_16": "587a8f3347e317e3",
+ "trim_rule": "not a trim: a DERIVED artifact, small by construction. Holds counts, per-file symbol-set hashes and the set-arithmetic verdict. The full symbol sets are in _symbol_sets.txt.",
+ "stored_bytes": 2807,
+ "stored_sha256": "587a8f3347e317e3b66c5bf69ad17a974f148558e2e4ded49028b31cac589a73",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "set arithmetic on the seven snapshot symbol sets",
+  "all_seven_files_symbol_sets_complete": true,
+  "niftysmallcap250_subset_of_nifty500": true,
+  "niftysmallcap250_equals_midsmall400_minus_midcap150": true
+ }
+}

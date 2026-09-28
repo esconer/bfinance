@@ -1,0 +1,26 @@
+{
+ "url": "https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "application/json",
+ "original_bytes": 2,
+ "original_sha256_16": "44136fa355b3678a",
+ "trim_rule": "no trim: the response is 2 bytes. [added single trailing LF; upstream had none]",
+ "stored_bytes": 3,
+ "stored_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "unmodified",
+  "body": "{}",
+  "http_status": 200,
+  "VERDICT": "ROUTE EXISTS but returned an EMPTY OBJECT on a closed market. 200 + valid JSON + zero keys + zero error. This is the single most dangerous failure shape for a parser: it looks like success.",
+  "controlled_comparison_same_primed_session": {
+   "/api/marketStatus": "200, 2088 B, real payload -> the session was NOT blocked",
+   "/api/allIndices": "200, 113773 B, real payload -> the session was NOT blocked",
+   "/api/quote-equity?symbol=RELIANCE": "403 Access Denied (Akamai edgesuite) -> that route IS blocked"
+  },
+  "not_a_404": "/api/option-chain-indices?symbol=NIFTY returns the 272-byte 'Resource not found' body, which is this host's signature for a route that is GONE. option-chain-v3 is not gone.",
+  "UNRESOLVED": "cannot distinguish 'market closed' from 'soft block' without re-testing inside 09:15-15:30 IST. No populated payload was captured, so NO option-chain parser should be written against this fixture.",
+  "do_not_fabricate": "the repo previously deleted a SHA-256-seeded fabricated chain. That deletion is correct and this fixture does not undo it."
+ }
+}

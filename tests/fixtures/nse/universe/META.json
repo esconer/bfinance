@@ -1,0 +1,197 @@
+{
+  "source": "https://nsearchives.nseindia.com/content/indices/",
+  "captured_at_utc": "2026-09-27T20:44:25+00:00",
+  "user_agent": "bfinance/0.1 (+index membership recorder)",
+  "purpose": "NSE index constituent snapshots for bfinance.universe. These pin two facts that are easy to get wrong: the ind_nifty<name>list.csv filename pattern, and the fact that ind_niftysmallcap250list.csv is mislabelled and contains zero small caps. NSE publishes ONLY the current snapshot and overwrites membership in place, so there is no dated variant to record - these are point-in-time by nature.",
+  "robots": "nsearchives.nseindia.com serves NO robots.txt (404); per RFC 9309 a missing robots.txt means unrestricted. www.nseindia.com/robots.txt is 'Allow: /' with only /market-data-test disallowed. Recorded in tests/fixtures/nse/ROBOTS_EVIDENCE.json.",
+  "nse_publishes_only_current_membership": "No history exists at any source. Four dated/history filename variants were probed and all 404'd: ind_nifty<name>list_YYYYMMDD.csv, ind_nifty<name>list_DDMMYYYY.csv, ind_nifty<name>_YYYY.csv, and /content/indices/YYYY/.... The rebalance calendar lives on nseindices.com, which does not resolve at all. Survivorship bias therefore cannot be removed retroactively, and bfinance.universe accumulates snapshots locally from first use instead of pretending to read history.",
+  "confirmed_404_filenames": [
+    "ind_midcap150list.csv",
+    "ind_midsmallcap400list.csv"
+  ],
+  "trim_policy": "MIXED, and deliberately so. The seven .csv recordings are trimmed to their first 12 data rows: they exist to pin the header, the column vocabulary and the Series/ISIN values, none of which need 755 rows. The membership CLAIMS (row counts, subset relations, the 501-row 'Nifty 500' file) are pinned by _symbol_sets.txt, which is UNTRIMMED and holds the complete symbol set of the five files participating in the mislabelling identity. Trimming the CSVs while keeping the symbol sets whole is what keeps every claim below re-checkable offline without 145 KB of near-duplicate CSV.",
+  "row_counts_are_not_membership_sizes": "ind_nifty500list.csv has 501 data rows, not 500. A row count is never a membership size and nothing in bfinance caps a universe at 500. ind_niftytotalmarket_list.csv (755) is the only genuine small/mid-cap source; ind_niftysmallcap250list.csv (251) is a strict subset of Nifty 500 and is fenced off as unusable.",
+  "sidecar_entries_note": "A '<name>.META.json' entry describes the sibling recording '<name>' (its url, http_status, original_bytes, original_sha256_16 and trim_rule are that of the data file, not of the sidecar). stored_bytes and stored_sha256 always describe the sidecar file itself.",
+  "files": {
+    "_partition_proof.json": {
+      "url": "derived-from:https://nsearchives.nseindia.com/content/indices/",
+      "http_status": 200,
+      "original_bytes": 2807,
+      "original_sha256_16": "587a8f3347e317e3",
+      "trim_rule": "not a trim: a DERIVED artifact, small by construction. Holds counts, per-file symbol-set hashes and the set-arithmetic verdict. The full symbol sets are in _symbol_sets.txt.",
+      "stored_bytes": 2807,
+      "stored_sha256": "587a8f3347e317e3b66c5bf69ad17a974f148558e2e4ded49028b31cac589a73",
+      "stored_line_endings": "lf"
+    },
+    "_partition_proof.META.json": {
+      "url": "derived-from:https://nsearchives.nseindia.com/content/indices/",
+      "http_status": 200,
+      "original_bytes": 2807,
+      "original_sha256_16": "587a8f3347e317e3",
+      "trim_rule": "not a trim: a DERIVED artifact, small by construction. Holds counts, per-file symbol-set hashes and the set-arithmetic verdict. The full symbol sets are in _symbol_sets.txt.",
+      "stored_bytes": 834,
+      "stored_sha256": "3560833c8d44db51ae9dd6d2c9e08b0bfb53d290cb94c9cb403640bb3fcd7b56",
+      "stored_line_endings": "lf"
+    },
+    "_symbol_sets.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/",
+      "http_status": 200,
+      "original_bytes": 49305,
+      "original_sha256_16": "82a5d53282da93e9",
+      "trim_rule": "no trim: the COMPLETE symbol set of the five constituent files the mislabelling claim depends on, as a flat TSV. Deliberately untrimmed so the claim is re-verifiable without network access. Excludes ind_nifty50list.csv and ind_niftytotalmarket_list.csv, which appear in none of the identities.",
+      "stored_bytes": 1177,
+      "stored_sha256": "79704f33e7267b049d951fb976f19abe8221d1f752463c8bbceaedfd6ce4af3c",
+      "stored_line_endings": "lf"
+    },
+    "_symbol_sets.txt": {
+      "url": "https://nsearchives.nseindia.com/content/indices/",
+      "http_status": 200,
+      "original_bytes": 49305,
+      "original_sha256_16": "82a5d53282da93e9",
+      "trim_rule": "no trim: the COMPLETE symbol set of the five constituent files the mislabelling claim depends on, as a flat TSV. Deliberately untrimmed so the claim is re-verifiable without network access. Excludes ind_nifty50list.csv and ind_niftytotalmarket_list.csv, which appear in none of the identities.",
+      "stored_bytes": 49305,
+      "stored_sha256": "82a5d53282da93e9dd40934ce11582a418e8ae35e2e925f453f399e001083278",
+      "stored_line_endings": "lf"
+    },
+    "ind_nifty500list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+      "http_status": 200,
+      "original_bytes": 32840,
+      "original_sha256_16": "c043bdc21e6080f1",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 489 of 501 constituent rows.",
+      "stored_bytes": 765,
+      "stored_sha256": "d6014a6db83c98c84f85bf08c3680dde37020bd8922905ea8446cfa7c49b0a0a",
+      "stored_line_endings": "lf"
+    },
+    "ind_nifty500list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+      "http_status": 200,
+      "original_bytes": 32840,
+      "original_sha256_16": "c043bdc21e6080f1",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 489 of 501 constituent rows.",
+      "stored_bytes": 941,
+      "stored_sha256": "a8a9dd6a6d89c9b3758ca710b01db38e52e96df3293ed7228889228a0902db3c",
+      "stored_line_endings": "lf"
+    },
+    "ind_nifty50list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv",
+      "http_status": 200,
+      "original_bytes": 3352,
+      "original_sha256_16": "9fb8832853c27944",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 38 of 50 constituent rows.",
+      "stored_bytes": 821,
+      "stored_sha256": "d33737a59706776f111d03bf6cd99b276288a18928d0bcae9db7910873f7a3ad",
+      "stored_line_endings": "lf"
+    },
+    "ind_nifty50list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv",
+      "http_status": 200,
+      "original_bytes": 3352,
+      "original_sha256_16": "9fb8832853c27944",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 38 of 50 constituent rows.",
+      "stored_bytes": 935,
+      "stored_sha256": "18dfb4057e6de3339301027d758e9c7d5fd9370e5f1e6b59cb1512962e55e9d1",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidcap100list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap100list.csv",
+      "http_status": 200,
+      "original_bytes": 6516,
+      "original_sha256_16": "ced40adb5ac0986a",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 88 of 100 constituent rows.",
+      "stored_bytes": 762,
+      "stored_sha256": "fd425ebacda096172dcffae3f1c1372648319cae79191020afc423d007bab821",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidcap100list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap100list.csv",
+      "http_status": 200,
+      "original_bytes": 6516,
+      "original_sha256_16": "ced40adb5ac0986a",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 88 of 100 constituent rows.",
+      "stored_bytes": 945,
+      "stored_sha256": "6fda9c0bc70ce1e31612eba3d24342fc8792ae694a231783264d59d7a01e7f81",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidcap150list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
+      "http_status": 200,
+      "original_bytes": 9778,
+      "original_sha256_16": "e829eff817846485",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 138 of 150 constituent rows.",
+      "stored_bytes": 785,
+      "stored_sha256": "9023168fe24b76fcc968d725f59b686fda22bddf5370ce9c30bfe334dd64642c",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidcap150list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
+      "http_status": 200,
+      "original_bytes": 9778,
+      "original_sha256_16": "e829eff817846485",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 138 of 150 constituent rows.",
+      "stored_bytes": 946,
+      "stored_sha256": "5112251a417815d3a7b7a7976a30b806da5694f0deec96c0b0ea6c765a08c6bb",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidsmallcap400list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidsmallcap400list.csv",
+      "http_status": 200,
+      "original_bytes": 26275,
+      "original_sha256_16": "93781b605b2989f9",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 389 of 401 constituent rows.",
+      "stored_bytes": 772,
+      "stored_sha256": "29d91290171579f28906b4c0fa187be28c91cffea4136fc2603c752f4b819ed1",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftymidsmallcap400list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidsmallcap400list.csv",
+      "http_status": 200,
+      "original_bytes": 26275,
+      "original_sha256_16": "93781b605b2989f9",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 389 of 401 constituent rows.",
+      "stored_bytes": 952,
+      "stored_sha256": "488caada8b73a4fd1a85149795f576ea8c32161c1c8cb0ec0c25125079201a05",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftysmallcap250list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+      "http_status": 200,
+      "original_bytes": 16543,
+      "original_sha256_16": "d109adb29310df0b",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 239 of 251 constituent rows.",
+      "stored_bytes": 839,
+      "stored_sha256": "f4ee51be729a00b2c9eb8d90dabbe62b48b5440fae3897928aef2e3cf23eb164",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftysmallcap250list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+      "http_status": 200,
+      "original_bytes": 16543,
+      "original_sha256_16": "d109adb29310df0b",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 239 of 251 constituent rows.",
+      "stored_bytes": 949,
+      "stored_sha256": "e1d2ddbfab62afc300a482f1a9505134d57db9ff711374fb8c860582ad826653",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftytotalmarket_list.csv": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
+      "http_status": 200,
+      "original_bytes": 49398,
+      "original_sha256_16": "31ffcf5fa839c99c",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 743 of 755 constituent rows.",
+      "stored_bytes": 791,
+      "stored_sha256": "63a4fb618bd9db8c72cd01ae2192c335fc1bfb5f3994caa587d99f751186ed6c",
+      "stored_line_endings": "lf"
+    },
+    "ind_niftytotalmarket_list.META.json": {
+      "url": "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
+      "http_status": 200,
+      "original_bytes": 49398,
+      "original_sha256_16": "31ffcf5fa839c99c",
+      "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 743 of 755 constituent rows.",
+      "stored_bytes": 950,
+      "stored_sha256": "c706dd4fa2836c6b709e204aa859a87fa8c9ed7dfbb965fe098a3e2d6ecfb33a",
+      "stored_line_endings": "lf"
+    }
+  }
+}

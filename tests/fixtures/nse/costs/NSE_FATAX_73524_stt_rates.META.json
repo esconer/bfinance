@@ -1,0 +1,15 @@
+{
+  "url": "https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf",
+  "http_status": 200,
+  "content_type": "text/plain (trimmed text excerpt of a text-layer PDF)",
+  "retrieved_utc": "2026-09-28T06:12:40+00:00",
+  "circular_ref": "NSE/FATAX/73524",
+  "circular_reference": "02/2026",
+  "circular_issued": "2026-03-31",
+  "original_bytes": 358718,
+  "original_sha256_16": "f4cbd1f917f88dcb",
+  "trim_rule": "Keep the circular's own identity lines (Download Ref No, Circular Ref. No, Sub, the Presidential-assent sentence, the 'on or after <date>' effective sentence), the seven lineage references it cites, the (a)/(b)/(c) revised-rate prose VERBATIM, and the rate table VERBATIM from its 'Sr. No.' header to the end of row 4. Dropped: the To/From block, the department banner, the contact names, phone numbers and email, the signatory and title, and the closing 'This is for information and compliance' paragraph. The table's long legal wording is KEPT rather than summarised: it is what distinguishes row 2 from row 2A from row 3, which are three different rates charged to three different payers, and a paraphrase is how a table stops being a table. Extractable text is 4,087 characters of a 358,718-byte PDF; the remaining bytes are an embedded letterhead image and carry no rate.",
+  "stored_bytes": 3504,
+  "stored_sha256": "19a1b699dac57bd3974c2283ee185f702c710229b7714cdbc1fba3ddab21b32c",
+  "stored_line_endings": "lf"
+}

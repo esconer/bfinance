@@ -1,0 +1,27 @@
+{
+ "url": "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap100list.csv",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "text/csv",
+ "original_bytes": 6516,
+ "original_sha256_16": "ced40adb5ac0986a",
+ "trim_rule": "keep header verbatim + first 12 data rows in original file order. Dropped 88 of 100 constituent rows.",
+ "stored_bytes": 762,
+ "stored_sha256": "fd425ebacda096172dcffae3f1c1372648319cae79191020afc423d007bab821",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "reference DictReader parse of original vs stored; stored must be a prefix-subset of original",
+  "original_data_rows": 100,
+  "stored_data_rows": 12,
+  "original_unique_symbols": 100,
+  "stored_rows_are_prefix_of_original": true,
+  "trim_keeps_first_N_rows_in_file_order": true,
+  "column_names_verbatim": [
+   "Company Name",
+   "Industry",
+   "Symbol",
+   "Series",
+   "ISIN Code"
+  ]
+ }
+}

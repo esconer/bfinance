@@ -1,0 +1,425 @@
+{
+  "_owned_by": "bfinance.flows",
+  "_captured": "2026-09-28",
+  "_robots": {
+    "rule_applied": "RFC 9309. nsearchives.nseindia.com and portal.amfiindia.com both serve NO robots.txt (HTTP 404), which per RFC 9309 2.3.1.3 leaves them unrestricted. www.nseindia.com/robots.txt is 200 and Allow:/ with only /market-data-test disallowed. www.amfiindia.com disallows only /admin/ /login/ /search/.",
+    "verified_here_2026_09_28": {
+      "https://nsearchives.nseindia.com/robots.txt": {
+        "http_status": 404,
+        "original_bytes": 3425,
+        "content_type": "text/html;charset=UTF-8",
+        "original_sha256_16": "41fd81290608a684",
+        "verdict": "NO robots.txt. Unrestricted per RFC 9309 2.3.1.3."
+      },
+      "https://portal.amfiindia.com/robots.txt": {
+        "http_status": 404,
+        "original_bytes": 1245,
+        "content_type": "text/html",
+        "original_sha256_16": "dc1d54dab6ec8c00",
+        "verdict": "NO robots.txt (IIS 404 page). Unrestricted per RFC 9309 2.3.1.3."
+      }
+    }
+  },
+  "_route_conflict_resolution": {
+    "question": "Two research probes disagreed: one reported fao_participant_oi_{DDMMYYYY}.csv gives FII/DII/Client/Pro/Arb history to 2020; the other reported three nsccl archive candidates 404'd and that /api/fiidiiTradeReact is a one-day snapshot.",
+    "resolution": "BOTH ARE REAL. They are two different routes and each probe generalised from one.",
+    "dated_csv_route": {
+      "pattern": "https://nsearchives.nseindia.com/content/nsccl/fao_participant_{oi,vol}_{DDMMYYYY}.csv",
+      "cookie_or_akamai_required": false,
+      "measured_200": [
+        {
+          "date": "2026-09-25",
+          "measure": "oi",
+          "bytes": 982,
+          "sha256_16": "3c2f5854b31766e3"
+        },
+        {
+          "date": "2020-06-15",
+          "measure": "oi",
+          "bytes": 917,
+          "sha256_16": "28f86d575f63ac9c"
+        },
+        {
+          "date": "2026-09-25",
+          "measure": "vol",
+          "bytes": 999,
+          "sha256_16": "2f32f5aba1380bbd"
+        }
+      ],
+      "measured_404": [
+        {
+          "date": "2026-09-27",
+          "measure": "oi",
+          "reason": "a Sunday - NSE does not publish"
+        },
+        {
+          "measure": "turnover",
+          "date": "2026-09-25",
+          "reason": "route does not exist on this host"
+        }
+      ],
+      "archive_depth": "confirmed back to 2020-06-15 (917 B, 200). Not the archive floor; that was not probed."
+    },
+    "snapshot_route": {
+      "url": "https://www.nseindia.com/api/fiidiiTradeReact",
+      "http_status": 200,
+      "bytes": 217,
+      "accepts_date_parameters": false,
+      "verdict": "A genuine single-trading-day, no-history route. Built too, under parse_participant_snapshot, and it is the one that genuinely needs local accumulation. It is NOT a counter-example to the dated CSV route."
+    },
+    "arb_correction": "There is NO 'Arb' row in the participant files. All three files that returned 200 (oi 2026-09-25, oi 2020-06-15, vol 2026-09-25) carry exactly Client, DII, FII, Pro plus a market-wide TOTAL. The original ticket's five-category claim is wrong for this route. What the feed genuinely adds over FII/DII is the Client/Pro split."
+  },
+  "_units_determination": {
+    "participant_oi_and_vol": {
+      "declared_unit": "contracts",
+      "how_determined": [
+        "NSE equity-index future open interest on 2026-09-25 is 488,031. At the 75-lot Nifty contract that is ~36.6M contracts, ~INR 91,500 crore notional.",
+        "Read as INR crore the same cell would be INR 4.88 trillion of open interest in one product, exceeding a normal full day's NSE derivatives turnover.",
+        "The file's per-category long and short legs each reconcile to the market-wide TOTAL, and Total Long == Total Short exactly - a rupee-denominated file has no reason to balance that precisely.",
+        "The sibling _vol file is the same order of magnitude (170,177 vs 488,031), consistent with both being counts."
+      ],
+      "not_inferred_from": "The title row says '(no. of contracts)'. That string is recorded but the unit was not taken on its word; the four measurements above are the basis."
+    },
+    "amfi_snapshot": {
+      "declared_unit": "inr_crore",
+      "how_determined": [
+        "Per-row identity netValue == buyValue - sellValue holds exactly: 14035.77 - 11197.60 = 2838.17 and 12327.36 - 16021.29 = -3693.93.",
+        "Daily magnitudes (~INR 14,000 crore DII gross) are consistent with crore and not with rupees (too small) or millions (INR 140 crore is far below a real DII day)."
+      ]
+    },
+    "amfi_workbook": {
+      "declared_unit": "inr_crore",
+      "how_determined": "The workbook's own verbatim column header: 'Net Inflow (+ve)/Outflow (-ve) for the month of August 2026 (INR in crore)'. Corroborated by the two known-value controls: Grand Total +41,353.60 INR crore (Aug 2026) and +70,813.41 (May 2020)."
+    }
+  },
+  "_total_reconciliation_finding": "The publisher's TOTAL row is NOT exactly the sum of its own detail rows. On the 2026-09-25 open-interest file: reported Total Long Contracts 27,533,553 vs 27,533,552 summed from the four categories (residual -1), short side +1. The 2020-06-15 file and the 2026-09-25 volume file both reconcile to 0. A 'totals must add up' assertion would fail on real upstream data; the residual is published in attrs['bfinance_total_reconciliation_residual'] instead.",
+  "files": {
+    "participant_oi_20260925": {
+      "url": "https://nsearchives.nseindia.com/content/nsccl/fao_participant_oi_25092026.csv",
+      "http_status": 200,
+      "content_type": "text/csv",
+      "retrieved_utc": "2026-09-28T02:19:56+05:30",
+      "original_bytes": 982,
+      "original_sha256_16": "3c2f5854b31766e3",
+      "trim_rule": "no trim. Whole file stored verbatim, including the title row, the padded header row and the TOTAL row. The ONLY transformation is CRLF -> LF.",
+      "line_ending_transform": "CRLF -> LF (upstream serves \\r\\n; the repo stores LF only)",
+      "stored_bytes": 975,
+      "stored_sha256": "cacd68e28ae4a0006592b59df7e7d0a561c5af1781979e724221626631b17a6f",
+      "stored_line_endings": "lf",
+      "data_rows": 48,
+      "measure": "oi",
+      "as_of": "2026-09-25",
+      "as_of_verified": true,
+      "units": "contracts",
+      "participants_present": [
+        "Client",
+        "DII",
+        "FII",
+        "Pro"
+      ],
+      "market_totals": {
+        "Long": 27533553,
+        "Short": 27533553
+      },
+      "total_reconciliation_residual": {
+        "Long": -1,
+        "Short": 1
+      },
+      "trim_behaviour_neutral": {
+        "method": "parsed the ORIGINAL CRLF bytes and the STORED LF bytes with the same expected_date, then pandas.testing.assert_frame_equal(check_exact=True); also re-read the committed file from disk and compared a third time",
+        "raw_vs_stored_identical": true,
+        "raw_vs_disk_identical": true,
+        "columns_identical": [
+          "Date",
+          "Measure",
+          "AssetClass",
+          "OptionType",
+          "Side",
+          "Value"
+        ],
+        "index_identical": [
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro"
+        ],
+        "attrs_identical": true,
+        "crlf_count_in_original": 7,
+        "lf_count_in_stored": 7,
+        "crlf_count_in_stored": 0
+      },
+      "header_padding_note": "Header fields carry trailing padding and the padding differs by vintage: the 2026 files pad with SPACES ('Future Stock Short       '), the 2020 file pads the same fields with a TAB ('Future Stock Short\\t'). Both are stored as served.",
+      "title_row_note": "Row 1 is the publisher's title row and the only as-of statement in the file. It is NOT a data row. The date format differs by vintage: 'as on Sep 25, 2026' (space) vs 'as on Jun 15,2020' (no space)."
+    },
+    "participant_oi_20200615": {
+      "url": "https://nsearchives.nseindia.com/content/nsccl/fao_participant_oi_15062020.csv",
+      "http_status": 200,
+      "content_type": "text/csv",
+      "retrieved_utc": "2026-09-28T02:19:56+05:30",
+      "original_bytes": 917,
+      "original_sha256_16": "28f86d575f63ac9c",
+      "trim_rule": "no trim. Whole file stored verbatim, including the title row, the padded header row and the TOTAL row. The ONLY transformation is CRLF -> LF.",
+      "line_ending_transform": "CRLF -> LF (upstream serves \\r\\n; the repo stores LF only)",
+      "stored_bytes": 910,
+      "stored_sha256": "8023a2c44c15b34315c04274b82db00b05dcea71fd37623f6165f3b0396ffdc7",
+      "stored_line_endings": "lf",
+      "data_rows": 48,
+      "measure": "oi",
+      "as_of": "2020-06-15",
+      "as_of_verified": true,
+      "units": "contracts",
+      "participants_present": [
+        "Client",
+        "DII",
+        "FII",
+        "Pro"
+      ],
+      "market_totals": {
+        "Long": 5140147,
+        "Short": 5140147
+      },
+      "total_reconciliation_residual": {
+        "Long": 0,
+        "Short": 0
+      },
+      "trim_behaviour_neutral": {
+        "method": "parsed the ORIGINAL CRLF bytes and the STORED LF bytes with the same expected_date, then pandas.testing.assert_frame_equal(check_exact=True); also re-read the committed file from disk and compared a third time",
+        "raw_vs_stored_identical": true,
+        "raw_vs_disk_identical": true,
+        "columns_identical": [
+          "Date",
+          "Measure",
+          "AssetClass",
+          "OptionType",
+          "Side",
+          "Value"
+        ],
+        "index_identical": [
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro"
+        ],
+        "attrs_identical": true,
+        "crlf_count_in_original": 7,
+        "lf_count_in_stored": 7,
+        "crlf_count_in_stored": 0
+      },
+      "header_padding_note": "Header fields carry trailing padding and the padding differs by vintage: the 2026 files pad with SPACES ('Future Stock Short       '), the 2020 file pads the same fields with a TAB ('Future Stock Short\\t'). Both are stored as served.",
+      "title_row_note": "Row 1 is the publisher's title row and the only as-of statement in the file. It is NOT a data row. The date format differs by vintage: 'as on Sep 25, 2026' (space) vs 'as on Jun 15,2020' (no space)."
+    },
+    "participant_vol_20260925": {
+      "url": "https://nsearchives.nseindia.com/content/nsccl/fao_participant_vol_25092026.csv",
+      "http_status": 200,
+      "content_type": "text/csv",
+      "retrieved_utc": "2026-09-28T02:19:56+05:30",
+      "original_bytes": 999,
+      "original_sha256_16": "2f32f5aba1380bbd",
+      "trim_rule": "no trim. Whole file stored verbatim, including the title row, the padded header row and the TOTAL row. The ONLY transformation is CRLF -> LF.",
+      "line_ending_transform": "CRLF -> LF (upstream serves \\r\\n; the repo stores LF only)",
+      "stored_bytes": 992,
+      "stored_sha256": "2a4edc2a7db55b8b54c85e215dc5534b6a60f66a35037543c7cac4189432acf8",
+      "stored_line_endings": "lf",
+      "data_rows": 48,
+      "measure": "vol",
+      "as_of": "2026-09-25",
+      "as_of_verified": true,
+      "units": "contracts",
+      "participants_present": [
+        "Client",
+        "DII",
+        "FII",
+        "Pro"
+      ],
+      "market_totals": {
+        "Long": 120211895,
+        "Short": 120211895
+      },
+      "total_reconciliation_residual": {
+        "Long": 0,
+        "Short": 0
+      },
+      "trim_behaviour_neutral": {
+        "method": "parsed the ORIGINAL CRLF bytes and the STORED LF bytes with the same expected_date, then pandas.testing.assert_frame_equal(check_exact=True); also re-read the committed file from disk and compared a third time",
+        "raw_vs_stored_identical": true,
+        "raw_vs_disk_identical": true,
+        "columns_identical": [
+          "Date",
+          "Measure",
+          "AssetClass",
+          "OptionType",
+          "Side",
+          "Value"
+        ],
+        "index_identical": [
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "Client",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "DII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "FII",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro",
+          "Pro"
+        ],
+        "attrs_identical": true,
+        "crlf_count_in_original": 7,
+        "lf_count_in_stored": 7,
+        "crlf_count_in_stored": 0
+      },
+      "header_padding_note": "Header fields carry trailing padding and the padding differs by vintage: the 2026 files pad with SPACES ('Future Stock Short       '), the 2020 file pads the same fields with a TAB ('Future Stock Short\\t'). Both are stored as served.",
+      "title_row_note": "Row 1 is the publisher's title row and the only as-of statement in the file. It is NOT a data row. The date format differs by vintage: 'as on Sep 25, 2026' (space) vs 'as on Jun 15,2020' (no space)."
+    },
+    "participant_oi_20260927_sunday_404": {
+      "url": "https://nsearchives.nseindia.com/content/nsccl/fao_participant_oi_27092026.csv",
+      "http_status": 404,
+      "content_type": "text/html;charset=UTF-8",
+      "retrieved_utc": "2026-09-28T02:20:00+05:30",
+      "original_bytes": 3548,
+      "original_sha256_16": "a845994c1d7a2831",
+      "trim_rule": "no trim. NSE's 404 SPA error page, stored whole, so a test can prove a 404 body is recognised as a 404 and never parsed as a participant CSV. This is an HTML page with a 200-looking shape; parsing it as CSV is exactly the failure mode being guarded.",
+      "line_ending_transform": "CRLF -> LF",
+      "stored_bytes": 3434,
+      "stored_sha256": "c8e78ea5497deb39416af00e0751b2b1b03f6daf3cb1387d23406f373f5721b5",
+      "stored_line_endings": "lf",
+      "is_error_page": true,
+      "note": "2026-09-27 was a SUNDAY. NSE does not publish on a weekend, so this 404 is the expected, correct outcome - not an error. The module answers this from the local weekday check and never spends the request."
+    }
+  },
+  "_pre_existing_files_not_owned_by_this_module": {
+    "note": "These four fixtures and their per-file .META.json files were already in this directory when bfinance.flows was written, from an earlier research pass. They are left untouched. fiidii_20260925.json and the amfi_* transcriptions ARE used by tests/test_flows.py; the participant_*.csv files listed in 'files' above are the ones this module added.",
+    "files": [
+      "fiidii_20260925.json",
+      "amfi_mcr_2020_05.json",
+      "amfi_mcr_2026_08.json",
+      "amfi_monthly_index.json"
+    ]
+  }
+}

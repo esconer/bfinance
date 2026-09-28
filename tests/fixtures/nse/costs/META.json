@@ -1,0 +1,119 @@
+{
+  "url": [
+    "https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf",
+    "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf"
+  ],
+  "http_status": 200,
+  "retrieved_utc": "2026-09-28T06:12:40+00:00",
+  "original_bytes": 522083,
+  "original_sha256_16": [
+    "f4cbd1f917f88dcb",
+    "6085601a26177ed6"
+  ],
+  "trim_rule": "BOTH circulars are trimmed identically in kind: identity + authority citations + rate table VERBATIM; letterhead, contacts, signatory and compliance boilerplate dropped. See files[*].trim_rule for the per-circular rule. Neither fixture is a hand-typed summary of the rates -- both are excerpts whose bytes are re-parsed by bfinance.costs.parse_stt_circular / parse_exchange_charge_circular on every call, so the figure a test asserts is computed from these bytes rather than asserted beside them.",
+  "stored_bytes": 6245,
+  "stored_sha256": {
+    "NSE_FATAX_73524_stt_rates.txt": "19a1b699dac57bd3974c2283ee185f702c710229b7714cdbc1fba3ddab21b32c",
+    "NSE_FA_73061_exchange_charges.txt": "4716292c16c7a9fde20e364e38583f01c0cd23f00321b4e432895fe085fc5125"
+  },
+  "stored_line_endings": "lf",
+  "files": {
+    "NSE_FATAX_73524_stt_rates.txt": {
+      "url": "https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf",
+      "http_status": 200,
+      "content_type": "text/plain (trimmed text excerpt of a text-layer PDF)",
+      "retrieved_utc": "2026-09-28T06:12:40+00:00",
+      "circular_ref": "NSE/FATAX/73524",
+      "circular_reference": "02/2026",
+      "circular_issued": "2026-03-31",
+      "original_bytes": 358718,
+      "original_sha256_16": "f4cbd1f917f88dcb",
+      "trim_rule": "Keep the circular's own identity lines (Download Ref No, Circular Ref. No, Sub, the Presidential-assent sentence, the 'on or after <date>' effective sentence), the seven lineage references it cites, the (a)/(b)/(c) revised-rate prose VERBATIM, and the rate table VERBATIM from its 'Sr. No.' header to the end of row 4. Dropped: the To/From block, the department banner, the contact names, phone numbers and email, the signatory and title, and the closing 'This is for information and compliance' paragraph. The table's long legal wording is KEPT rather than summarised: it is what distinguishes row 2 from row 2A from row 3, which are three different rates charged to three different payers, and a paraphrase is how a table stops being a table. Extractable text is 4,087 characters of a 358,718-byte PDF; the remaining bytes are an embedded letterhead image and carry no rate.",
+      "stored_bytes": 3504,
+      "stored_sha256": "19a1b699dac57bd3974c2283ee185f702c710229b7714cdbc1fba3ddab21b32c",
+      "stored_line_endings": "lf"
+    },
+    "NSE_FA_73061_exchange_charges.txt": {
+      "url": "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf",
+      "http_status": 200,
+      "content_type": "text/plain (trimmed text excerpt of a text-layer PDF)",
+      "retrieved_utc": "2026-09-28T06:12:40+00:00",
+      "circular_ref": "NSE/FA/73061",
+      "circular_reference": "1",
+      "circular_issued": "2026-02-27",
+      "original_bytes": 163365,
+      "original_sha256_16": "6085601a26177ed6",
+      "trim_rule": "Keep the circular's own identity lines (Download Ref No, Circular Ref. No, Sub, the 'applicable with effect from <date>' sentence), the SEBI uniform-charge directive it cites, the two predecessor circular refs and dates, the 'level levied prior to <date>' sentence, the NSE/FA/56129 DELTA PARAGRAPH verbatim, and the rate table VERBATIM from its 'Segment Existing outflow' header to the end of the Equity Options row. Dropped: the letterhead and contact block, the NSE/FA/64323 narrative paragraph, the closing 'For and on behalf of' and signatory. The 56129 delta paragraph is KEPT rather than dropped because it is the only place the pre-2023-04-01 level is stated -- as differences (-20/-10/-300 on the transaction charge, +9.99/+49.99 on IPFT) rather than as a rate. The module reconstructs that level from it and labels the result `derived`; without the paragraph the fixture would not support the reconstruction at all. Extractable text is 3,083 characters of a 163,365-byte PDF; the remaining bytes are an embedded letterhead image and carry no rate.",
+      "stored_bytes": 2741,
+      "stored_sha256": "4716292c16c7a9fde20e364e38583f01c0cd23f00321b4e432895fe085fc5125",
+      "stored_line_endings": "lf"
+    }
+  },
+  "request_count": {
+    "issued_for_this_fixture_set": 2,
+    "hosts": [
+      "nsearchives.nseindia.com"
+    ],
+    "sequenced": true,
+    "min_gap_seconds": 2.5,
+    "note": "Both PDFs are on nsearchives.nseindia.com, which serves them with no cookie or Akamai prime; no www.nseindia.com request was needed and the circular index (8.3 MB / 18,977 circulars) was never queried, because the two circular refs are already known and their download URLs are deterministic."
+  },
+  "trim_behaviour_neutral": {
+    "method": "Ran bfinance.costs.schedule_from_circulars twice -- once on the full pypdf text extraction of each original PDF (4,087 and 3,083 characters) and once on the stored trimmed excerpts -- and compared a 16-field snapshot: both STT regimes (all 7 rates x pct/payer/previous_pct/no_change), both circulars' identity, the effective dates, the 7 lineage refs, the SEBI directive, the 2 predecessor refs, all 3 segments' revised+existing charges, the derived pre-2023 segments, and the regime boundary dates. Then quoted a Rs 1 crore delivery round trip from each schedule and compared the full to_dict() output. Script kept at tests/fixtures/nse/costs/verify_trim.py.",
+    "fields_compared": 16,
+    "all_identical": true,
+    "quote_identical": true,
+    "original_text_chars": {
+      "NSE/FATAX/73524": 4087,
+      "NSE/FA/73061": 3083
+    },
+    "why_a_text_fixture_not_a_pdf": "The circulars are text-layer PDFs; 99% of each file's bytes are an embedded letterhead image. Storing 522 KB of PDFs to test a rate table would put the assertion behind a PDF parser and an extra dependency, and the pypdf text layer is exactly what the parsers read.",
+    "pypdf_dependency": "pypdf is NOT a bfinance dependency and is not needed to run the tests. It was used once, out-of-band, to extract the two text layers at fixture-creation time. bfinance.costs.extract_pdf_text imports it lazily and raises a clear error naming the alternative (pass text to schedule_from_circulars) if it is absent."
+  },
+  "not_sourced_from_any_circular": {
+    "note": "Four of the seven cost components are NOT published by any exchange circular and are not in either of these two fixtures. They are carried as declared constants in bfinance.costs with fixture_sourced=False, and CostSchedule.provenance() reports them separately from the two exchange-published components.",
+    "components": {
+      "sebi_turnover": {
+        "authority": "statutory",
+        "rate": "0.0001% of turnover",
+        "published_by": "SEBI Act 1972 s.15B",
+        "in_either_fixture": false,
+        "cap": "Rs. 10 crore per year"
+      },
+      "stamp_duty": {
+        "authority": "statutory",
+        "rate": "0.015% buy side from 2020-07-20 (0.018% before)",
+        "published_by": "state stamp acts",
+        "in_either_fixture": false,
+        "note": "no NSE or SEBI circular for this exists; it is a state levy"
+      },
+      "gst": {
+        "authority": "statutory",
+        "rate": "18% on brokerage + exchange charge + SEBI fee + IPFT",
+        "published_by": "CGST + SGST + IGST",
+        "in_either_fixture": false,
+        "note": "NOT levied on STT and NOT on stamp duty"
+      },
+      "brokerage": {
+        "authority": "contractual",
+        "rate": "caller-supplied; 0.03%/side gives 29.328 bps",
+        "published_by": "nothing; it is negotiated with a broker",
+        "in_either_fixture": false
+      }
+    }
+  },
+  "empirical_cross_check": {
+    "attempted": false,
+    "why_not": "It is structurally impossible, not merely inconvenient. (1) The bhavcopy has no cost, fee or tax column: all 34 UDiFF cash-market columns were checked and the only substring hit for 'stt' is SttlmPric, the SETTLEMENT PRICE, which is a false positive worth recording precisely because it looks like a hit. (2) The file is an all-participant quote/consensus aggregate with no side and no counterparty, so one portfolio's round trip cannot be isolated from it even in principle.",
+    "no_synthesised_observed_bps": true,
+    "offered_instead": "Every figure here is a statutory computation from named, sourced rates, and the taxable base the bhavcopy DOES support is stated separately: TtlTrfVal / TtlTradgVol is a true session VWAP inside [Low, High] for 7/7 recorded rows. See bfinance.costs.taxable_base_requires_turnover_value() for the bhavcopy change that would make it reachable.",
+    "known_bhavcopy_gap": "src/bfinance/nse/bhavcopy.py maps volume to TtlTradgVol and has NO turnover-value column, so the VWAP above cannot be computed through this package today. Needed: a 'turnover': ('TtlTrfVal',) entry in _SCHEMAS['udiff'] (and a legacy equivalent if the legacy CSV is still read) plus a 'Turnover' output column. REPORTED, NOT EDITED -- that file belongs to another module's owner."
+  },
+  "supersedes": {
+    "files": [
+      "delivery_cost_schedule.json",
+      "delivery_cost_schedule.META.json"
+    ],
+    "why_removed": "That pair was a hand-typed JSON summary whose numbers sat BESIDE the tests rather than being computed from a source. Its 'derived_delivery_round_trip_bps' block asserted 22.248 / 22.548 / 29.328 as literals, which is the same class of defect this module exists to remove: a test that reads a precomputed answer cannot fail when the transcription is wrong. These fixtures are excerpts that are re-parsed, so editing a rate in them changes the computed bps. The prose provenance it recorded (both circular refs, byte counts, sha256 prefixes) was correct and is preserved here."
+  }
+}

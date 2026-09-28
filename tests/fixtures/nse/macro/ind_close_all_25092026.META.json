@@ -1,0 +1,41 @@
+{
+ "url": "https://nsearchives.nseindia.com/content/indices/ind_close_all_25092026.csv",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "text/csv",
+ "original_bytes": 17285,
+ "original_sha256_16": "a8d84e9836956bb1",
+ "trim_rule": "keep header verbatim + only these Index Name rows: Nifty 50, India VIX, Nifty Bank, NIFTY Midcap 100, NIFTY Smallcap 100. Dropped all other index rows (the file carries every NSE index).",
+ "stored_bytes": 635,
+ "stored_sha256": "f0465bcf7cc118609e69271300d75bf158867c28df5a34ef92c9ba3dc76c8b84",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "reference DictReader parse of original vs stored; compared the retained Index Name rows",
+  "original_data_rows": 166,
+  "stored_data_rows": 5,
+  "retained_index_names": [
+   "Nifty 50",
+   "India VIX",
+   "Nifty Bank",
+   "NIFTY Midcap 100",
+   "NIFTY Smallcap 100"
+  ],
+  "rows_identical": true,
+  "all_field_names_preserved": [
+   "Index Name",
+   "Index Date",
+   "Open Index Value",
+   "High Index Value",
+   "Low Index Value",
+   "Closing Index Value",
+   "Points Change",
+   "Change(%)",
+   "Volume",
+   "Turnover (Rs. Cr.)",
+   "P/E",
+   "P/B",
+   "Div Yield"
+  ],
+  "header_identical": true
+ }
+}

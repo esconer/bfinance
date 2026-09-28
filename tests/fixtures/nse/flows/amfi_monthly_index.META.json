@@ -1,0 +1,32 @@
+{
+ "url": "https://www.amfiindia.com/research-information/amfi-data (Next.js RSC payload, key 'monthlyData')",
+ "http_status": 200,
+ "retrieved_utc": "2026-09-27T20:44:25+00:00",
+ "content_type": "application/json",
+ "original_bytes": 78375,
+ "original_sha256_16": "ca18a64b1dc62aa3",
+ "trim_rule": "keep only 2 financial-year buckets (newest and oldest) x first 3 Pages each. Dropped 26 of 28 buckets and 320 of 326 month entries. The index is a flat list of independent month objects, so keeping a subset changes no record.",
+ "stored_bytes": 1587,
+ "stored_sha256": "3222cd1ce23c9fedb9073c11cf2f1690bb6668e80826b9f9766fc974b5c72e9f",
+ "stored_line_endings": "lf",
+ "trim_behaviour_neutral": {
+  "method": "json structural comparison of original vs stored",
+  "original_financial_year_buckets": 28,
+  "stored_financial_year_buckets": 2,
+  "original_months": 318,
+  "stored_months": 6,
+  "page_keys_verbatim": [
+   "Title",
+   "excel_url",
+   "financial_year",
+   "month",
+   "pdf_url",
+   "year"
+  ],
+  "bucket_keys_verbatim": [
+   "Pages",
+   "Year"
+  ],
+  "every_stored_page_is_byte_identical_to_an_original_page": true
+ }
+}

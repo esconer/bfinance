@@ -1,0 +1,60 @@
+[
+ {
+  "Year": "April 2026-March 2027",
+  "Pages": [
+   {
+    "Title": "August 2026",
+    "month": "08",
+    "year": "2026",
+    "pdf_url": "https://portal.amfiindia.com/spages/amaug2026repo.pdf",
+    "excel_url": "https://portal.amfiindia.com/spages/amaug2026repo.xls",
+    "financial_year": "April 2026-March 2027"
+   },
+   {
+    "Title": "July 2026",
+    "month": "07",
+    "year": "2026",
+    "pdf_url": "https://portal.amfiindia.com/spages/amjul2026repo.pdf",
+    "excel_url": "https://portal.amfiindia.com/spages/amjul2026repo.xls",
+    "financial_year": "April 2026-March 2027"
+   },
+   {
+    "Title": "June 2026",
+    "month": "06",
+    "year": "2026",
+    "pdf_url": "https://portal.amfiindia.com/spages/amjun2026repo.pdf",
+    "excel_url": "https://portal.amfiindia.com/spages/amjun2026repo.xls",
+    "financial_year": "April 2026-March 2027"
+   }
+  ]
+ },
+ {
+  "Year": "April 1999-March 2000",
+  "Pages": [
+   {
+    "Title": "March 2000",
+    "month": "03",
+    "year": "2000",
+    "pdf_url": "https://portal.amfiindia.com/spages/ammar2000repo.html",
+    "excel_url": null,
+    "financial_year": "April 1999-March 2000"
+   },
+   {
+    "Title": "February 2000",
+    "month": "02",
+    "year": "2000",
+    "pdf_url": "https://portal.amfiindia.com/spages/amfeb2000repo.html",
+    "excel_url": null,
+    "financial_year": "April 1999-March 2000"
+   },
+   {
+    "Title": "January 2000",
+    "month": "01",
+    "year": "2000",
+    "pdf_url": "https://portal.amfiindia.com/spages/amjan2000repo.html",
+    "excel_url": null,
+    "financial_year": "April 1999-March 2000"
+   }
+  ]
+ }
+]

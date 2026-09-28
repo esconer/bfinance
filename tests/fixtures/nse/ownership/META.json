@@ -1,0 +1,183 @@
+{
+ "directory": "tests/fixtures/nse/ownership",
+ "purpose": "Fixtures for bfinance.ownership. Every capture is the raw HTTP response body stored byte-for-byte; the module's parsers are tested against the upstream bytes, not against a transcription of them.",
+ "host": "https://www.nseindia.com",
+ "captured_utc": "2026-09-27T21:14:01+00:00",
+ "captured_ist": "2026-09-28T02:44:01+05:30",
+ "request_count": 3,
+ "capture_method": "one request per capture, strictly sequential, >= 2.5 s apart on www.nseindia.com. Headers copied from src/bfinance/nse/corporate_actions.py (browser UA, X-Requested-With, Referer) and the same bounded prime-on-403 retry. NOT needed here: all three routes returned 200 with zero cookies primed, which is the fourth independent measurement of that result on the nseindia.com /api/* family.",
+ "note_on_line_endings": "Every stored file is byte-identical to the response body: no re-serialisation, no re-indentation, no added trailing newline. None of the three bodies contains CR, so stored_line_endings is lf by inspection and not by conversion.",
+ "captures": {
+  "shareholding_RELIANCE.json": {
+   "url": "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities&symbol=RELIANCE",
+   "http_status": 200,
+   "retrieved_utc": "2026-09-27T21:13:58+00:00",
+   "content_type": "application/json",
+   "original_bytes": 40154,
+   "original_sha256_16": "55cc778de40d8880",
+   "original_sha256": "55cc778de40d88805154ea9204442faf3759643e980f37aa5200ca8e06ae7d67",
+   "trim_rule": "NO TRIM. The whole 40,154-byte body is stored: it is the schema evidence, and a trimmed copy could not answer 'how many keys does a filing carry' or 'does any revision field ever get populated'. 22 of 22 rows, 33 of 33 keys.",
+   "stored_bytes": 40154,
+   "stored_sha256": "55cc778de40d88805154ea9204442faf3759643e980f37aa5200ca8e06ae7d67",
+   "stored_line_endings": "lf",
+   "shape": {
+    "json_type": "array",
+    "is_bare_array": true,
+    "has_data_key": false,
+    "rows": 22,
+    "distinct_keysets": 1,
+    "keys_per_row": 33,
+    "keys_verbatim": [
+     "broadcastDate", "cgTimeStamp", "countString", "date", "desc", "employeeTrusts",
+     "format", "index", "industry", "isin", "name", "newColumn", "pr_and_prgrp",
+     "promoterDematNotes", "publicShareholdingNotes", "public_val", "recordId", "remarksWeb",
+     "revisedData", "revisedDate", "revisedRemark", "revisedStatus", "revisionDate",
+     "revisionRemark", "shareholdingPatternNotes", "submissionDate", "symbol", "systemDate",
+     "timeDifference", "typeOfSubmission", "underlyingDrs", "xbrl", "xbrlFileSize"
+    ],
+    "served_order": "descending by date; the module re-sorts ascending",
+    "date_range": ["2021-09-30", "2026-06-30"],
+    "history_only": "newest row is the last filed quarter, 30-JUN-2026; no forward row"
+   },
+   "measured": {
+    "off_cycle_filings": ["2021-12-08", "2024-10-29"],
+    "off_cycle_note": "TWO filings whose `date` is not a calendar quarter end, not one. A one-row-per-quarter parser loses both.",
+    "date_spellings": {
+     "DD-MMM-YYYY": ["date", "submissionDate"],
+     "DD-MMM-YYYY HH:MM:SS": ["broadcastDate", "systemDate"],
+     "HH:MM:SS (elapsed, not a date)": ["timeDifference"]
+    },
+    "time_difference_identity": "timeDifference == systemDate - broadcastDate to the second on all 15 rows carrying both (31-MAR-2024: broadcast 20-APR-2024 00:20:05, system 20-APR-2024 08:05:03, lag 07:44:58 = 27,898 s). Range 3 s to 27,898 s.",
+    "time_difference_sentinel": "\"::\" on 7 of 22 rows, and on exactly the 7 rows whose systemDate is null (0 of the 15 populated rows)",
+    "restatement": {
+     "revisedData_histogram": {"N": 22},
+     "revisedStatus_values": ["-"],
+     "revisedDate_non_null": 0,
+     "revisionDate_non_null": 0,
+     "revisionRemark_non_null": 0,
+     "verdict": "restatement is MODELLED upstream (the fields are first-class) and UNOBSERVED in this data. No handler for a restatement is claimed to be verified."
+    },
+    "units": {
+     "pr_and_prgrp_and_public_val": "percent of total shares, measured: they sum to exactly 100.00 on all 22 rows (50.00-50.66 / 49.34-50.00). The spelling \"50\" means 50.00.",
+     "employeeTrusts": "UNDECLARED: the string \"0\" on all 22 rows is consistent with a share count and with a percent. Carried verbatim, never coerced.",
+     "xbrlFileSize": "formatted string e.g. \"510.29 KB\" (5 of 22 non-null). NOT parsed to bytes: NSE does not state whether KB is 1000 or 1024.",
+     "recordId": "digits on all 22 rows; kept as text"
+    },
+    "sentinels": {
+     "\"-\"": "revisedStatus, index, industry on 22/22",
+     "\"N\"": "remarksWeb on 14/22 (upstream 'no notes') AND revisedData on 22/22 (meaning 'not revised'). Two meanings, one spelling, so \"N\" is deliberately NOT treated as absent.",
+     "null": "revisedDate, revisionDate, typeOfSubmission, isin, cgTimeStamp, countString, format, underlyingDrs on 22/22"
+    },
+    "composite_key": "(symbol, date, broadcastDate) is distinct on all 22 rows. (symbol, date) is also distinct HERE, but (symbol, broadcast DAY) is not: 30-SEP-2021 (02:55:01) and the off-cycle 08-DEC-2021 (03:25:01) were both broadcast on 07-JAN-2022."
+   },
+   "payload_not_byte_stable": "A capture of the same URL on 2026-09-27 was 40,130 bytes with sha256 14aeb3ce299fa240; this one is 40,154 bytes with sha256 55cc778de40d8880. Same 22 rows, same 33 keys, same as-of dates -- a value in some row was revised in place. Any cache over this route must therefore expire."
+  },
+  "deals_snapshot_20260925.json": {
+   "url": "https://www.nseindia.com/api/snapshot-capital-market-largedeal",
+   "http_status": 200,
+   "retrieved_utc": "2026-09-27T21:13:59+00:00",
+   "content_type": "application/json",
+   "original_bytes": 54901,
+   "original_sha256_16": "655e378b37690bfa",
+   "original_sha256": "655e378b37690bfaac95879e864a2ef54f506c3d26569ab93a0ef8f93bcdf71c",
+   "trim_rule": "NO TRIM. The whole 54,901-byte body is stored. Truncating the *_DATA arrays would have destroyed the two measured defects this fixture exists to pin: the mixed 24-Sep/25-Sep row dates (which live in the short-deal rows) and the 50% null density of SHORT_DEALS_DATA.",
+   "stored_bytes": 54901,
+   "stored_sha256": "655e378b37690bfaac95879e864a2ef54f506c3d26569ab93a0ef8f93bcdf71c",
+   "stored_line_endings": "lf",
+   "shape": {
+    "json_type": "object",
+    "as_on_date": "25-Sep-2026",
+    "top_level_keys_verbatim": [
+     "as_on_date", "BULK_DEALS", "BULK_DEALS_DATA", "SHORT_DEALS", "SHORT_DEALS_DATA",
+     "BLOCK_DEALS", "BLOCK_DEALS_DATA"
+    ],
+    "counters_are_strings": {
+     "BULK_DEALS": "237",
+     "SHORT_DEALS": "75",
+     "BLOCK_DEALS": "6"
+    },
+    "counter_json_type": "str",
+    "counter_equals_array_length": {
+     "BULK_DEALS": "237 == len(BULK_DEALS_DATA) = 237",
+     "SHORT_DEALS": "75 == len(SHORT_DEALS_DATA) = 75",
+     "BLOCK_DEALS": "6 == len(BLOCK_DEALS_DATA) = 6"
+    },
+    "array_lengths": {"BULK_DEALS_DATA": 237, "SHORT_DEALS_DATA": 75, "BLOCK_DEALS_DATA": 6},
+    "row_keys_verbatim": ["buySell", "clientName", "date", "name", "qty", "remarks", "symbol", "watp"],
+    "all_three_kinds_in_one_request": true,
+    "block_deals_sibling_route": "/api/snapshot-capital-market-blockdeal returns 404 (route gone). BLOCK_DEALS_DATA rides in this payload, so no second route is needed.",
+    "snapshot_only": "no history parameter and no date argument on this route. expected_date= in the module is an assertion against the payload, never a request parameter."
+   },
+   "measured": {
+    "trap_1_as_on_date_does_not_cover_short_deals": {
+     "as_on_date": "25-Sep-2026",
+     "row_dates_by_kind": {"bulk": ["25-Sep-2026"], "short": ["24-Sep-2026"], "block": ["25-Sep-2026"]},
+     "rows_dropped_by_an_as_on_date_filter": 75,
+     "total_rows": 318,
+     "share_of_short_deals_dropped": 1.0,
+     "consequence": "an as_on_date filter returns 243 rows, of which ZERO are short deals, and looks like a quiet market rather than a missed filter"
+    },
+    "trap_2_null_density": {
+     "bulk": {"rows": 237, "null_cells": 0, "total_cells": 1896, "density": 0.0, "all_null_columns": []},
+     "short": {"rows": 75, "null_cells": 300, "total_cells": 600, "density": 0.5, "all_null_columns": ["buySell", "clientName", "remarks", "watp"]},
+     "block": {"rows": 6, "null_cells": 6, "total_cells": 48, "density": 0.125, "all_null_columns": ["remarks"]}
+    },
+    "client_name_is_the_differentiator": {
+     "non_null_clientName": 243,
+     "of_which_short": 0,
+     "rows_distinguishable_with_client": 318,
+     "rows_distinguishable_without_client": 317,
+     "collapsed_pair": "two AXIOMGAS SELL 186,000 @ 54.75 bulk rows on 25-Sep-2026, separated only by clientName"
+    },
+    "units": {
+     "qty": "share_count. Every value a digit string. Bulk 20,000-14,550,924; block 357,000-8,600,000; short 1-157,502. The 20,000 bulk floor is the SEBI bulk-deal screen, an independent check on the reading.",
+     "watp": "INR per share (weighted average traded price). 8.97-2,905.0. Qty x WATP lands at 0.03-2,498.30 INR crore, the right order for these deal sizes.",
+     "notional": "NOT PUBLISHED. qty*watp is derivable; the module exposes it as NotionalCr and labels it DERIVED in attrs and UNITS.",
+     "remarks": "bulk: the string \"-\" on 237/237. block: null on 6/6. Two different sentinels for the same concept in one payload."
+    },
+    "sides": {"bulk": {"BUY": 117, "SELL": 120}, "block": {"BUY": 3, "SELL": 3}, "short": "no side on any row"}
+   },
+   "payload_not_byte_stable": "A capture of the same URL on 2026-09-27 was also 54,901 bytes but sha256 a911cb3ab7d15e5e, with identical as_on_date, identical counters, identical array lengths, and all 6 rows retained by that session's trim present verbatim in this one. A row value was revised in place. Hence the 1-hour cache TTL and force_refresh."
+  },
+  "pledge_yesbank_EMPTY.json": {
+   "url": "https://www.nseindia.com/api/corporate-pledgedata?index=equities&symbol=YESBANK&from_date=01-01-2018&to_date=27-09-2026",
+   "http_status": 200,
+   "retrieved_utc": "2026-09-27T21:14:01+00:00",
+   "content_type": "application/json",
+   "original_bytes": 28,
+   "original_sha256_16": "c2fc7dc8d3a30aaf",
+   "original_sha256": "c2fc7dc8d3a30aaf60ded0514320ffb259e6197023fb8c1b967a149060121717",
+   "trim_rule": "NO TRIM, and nothing to trim. This is a DELIBERATE NEGATIVE FIXTURE, not a failed capture: the route is live and answers 200 with a 28-byte empty envelope. Storing it is the point -- it is the evidence for 'reachable, empty, schema unverified' and the reason bfinance.ownership ships a probe instead of a pledge parser.",
+   "stored_bytes": 28,
+   "stored_sha256": "c2fc7dc8d3a30aaf60ded0514320ffb259e6197023fb8c1b967a149060121717",
+   "stored_line_endings": "lf",
+   "body_verbatim": "{\"comNameList\":[],\"data\":[]}",
+   "measured": {
+    "http_status": 200,
+    "is_404": false,
+    "rows_returned": 0,
+    "top_level_keys_verbatim": ["comNameList", "data"],
+    "also_empty_market_wide": true,
+    "market_wide_url": "https://www.nseindia.com/api/corporate-pledgedata?index=equities",
+    "window_asked_for": "2018-01-01 to 2026-09-2026, a symbol with a large pledged book",
+    "byte_identical_on_two_consecutive_days": true,
+    "VERDICT": "route reachable, payload empty, ROW SCHEMA UNVERIFIED. Zero rows have ever been observed, so no pledge field name is verified and none is written anywhere in this package. Building a pledge parser against this fixture would produce a parser for a payload that has never existed."
+   }
+  }
+ },
+ "not_captured": {
+  "fpi_foreign_ownership": {
+   "would_live_at": "/api/quote-equity",
+   "http_status_observed": 403,
+   "body": "Access Denied (Akamai edgesuite)",
+   "primed": "primed and unprimed, same result",
+   "requested_on_2026_09_28": false,
+   "why": "A known blocked route, already recorded in src/bfinance/nse/marketlens.py. Not attempted, and no fixture stored: a 403 body is not a payload, and storing one would invite exactly the parser this module refuses to write."
+  },
+  "blockdeal_sibling_route": {
+   "url": "https://www.nseindia.com/api/snapshot-capital-market-blockdeal",
+   "http_status": 404,
+   "why": "Route gone. BLOCK_DEALS_DATA is in the largedeal payload above, so this request was never needed and was not spent."
+  }
+ }
+}

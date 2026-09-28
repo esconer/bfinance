@@ -1,0 +1,138 @@
+{
+ "_source_workbook": "amfi-monthly-2020-05.xls",
+ "_sheet": "May 2020",
+ "_months_covered": "May 2020",
+ "_workbook_title_cell_xls_row2": "Monthly Data for May 2020",
+ "_verbatim_header_row_from_xls_row3": [
+  "Sr ",
+  "Scheme Name ",
+  "No. of Schemes as on May 31, 2020",
+  "No. of Folios as on \nMay 31, 2020",
+  "Funds Mobilized for the month of May 2020 ",
+  "Repurchase/ Redemption for the month of May 2020",
+  "Net Inflow (+ve)/ Outflow (-ve) for the month of \nMay 2020 ",
+  "Net Assets Under Management as on \nMay 31, 2020",
+  "Average Net Assets Under Management for the month May 2020"
+ ],
+ "_section_taxonomy_rows_in_workbook": [
+  [
+   "A",
+   "Open ended Schemes"
+  ],
+  [
+   "I",
+   "Income/Debt Oriented Schemes"
+  ],
+  [
+   "II",
+   "Growth/Equity Oriented Schemes"
+  ],
+  [
+   "III",
+   "Hybrid Schemes"
+  ],
+  [
+   "IV",
+   "Solution Oriented Schemes"
+  ],
+  [
+   "V",
+   "Other Schemes"
+  ],
+  [
+   "B",
+   "Close Ended Schemes"
+  ],
+  [
+   "I",
+   "Income/Debt Oriented Schemes"
+  ],
+  [
+   "II",
+   "Growth/Equity Oriented Schemes"
+  ],
+  [
+   "C",
+   "Interval Schemes"
+  ],
+  [
+   "Note :",
+   "** Data in respect Fund of Funds Domestic is shown for information only. The same is included in the respective underlying schemes."
+  ]
+ ],
+ "_transcription_note": "Values copied from the .xls cells WITHOUT rescaling. INR crore as published. _xls_row is the 0-based row index in the workbook sheet, so any cell can be re-read and compared exactly.",
+ "records": [
+  {
+   "n_schemes": 967,
+   "n_folios": 88523428,
+   "funds_mobilized_inr_crore": 866113.3866099301,
+   "repurchase_redemption_inr_crore": 785970.9992002101,
+   "net_inflow_outflow_inr_crore": 80142.38740971999,
+   "_xls_row": 57,
+   "_row_label": "Total A-Open ended Schemes"
+  },
+  {
+   "n_schemes": 1829,
+   "n_folios": 91041392,
+   "funds_mobilized_inr_crore": 866133.6648521901,
+   "repurchase_redemption_inr_crore": 795320.25938844,
+   "net_inflow_outflow_inr_crore": 70813.40546375,
+   "_xls_row": 85,
+   "_row_label": "Grand Total"
+  },
+  {
+   "n_schemes": 30,
+   "n_folios": 127427,
+   "funds_mobilized_inr_crore": 389559.04934549,
+   "repurchase_redemption_inr_crore": 405439.95844276,
+   "net_inflow_outflow_inr_crore": -15880.90909727,
+   "_xls_row": 5,
+   "_row_label": "Overnight Fund"
+  },
+  {
+   "n_schemes": 39,
+   "n_folios": 1931298,
+   "funds_mobilized_inr_crore": 375051.85871839,
+   "repurchase_redemption_inr_crore": 313180.99120972,
+   "net_inflow_outflow_inr_crore": 61870.86750867,
+   "_xls_row": 6,
+   "_row_label": "Liquid Fund"
+  },
+  {
+   "n_schemes": 29,
+   "n_folios": 625000,
+   "funds_mobilized_inr_crore": 9450.41819526,
+   "repurchase_redemption_inr_crore": 7925.64999715,
+   "net_inflow_outflow_inr_crore": 1524.76819811,
+   "_xls_row": 7,
+   "_row_label": "Ultra Short Duration Fund"
+  },
+  {
+   "n_schemes": 26,
+   "n_folios": 932870,
+   "funds_mobilized_inr_crore": 9005.26166569,
+   "repurchase_redemption_inr_crore": 8704.01536145,
+   "net_inflow_outflow_inr_crore": 301.246304240001,
+   "_xls_row": 8,
+   "_row_label": "Low Duration Fund"
+  },
+  {
+   "n_schemes": 20,
+   "n_folios": 360688,
+   "funds_mobilized_inr_crore": 15658.286979,
+   "repurchase_redemption_inr_crore": 10647.82077918,
+   "net_inflow_outflow_inr_crore": 5010.46619982,
+   "_xls_row": 9,
+   "_row_label": "Money Market Fund"
+  },
+  {
+   "n_schemes": 28,
+   "n_folios": 360347,
+   "funds_mobilized_inr_crore": 6874.45835202,
+   "repurchase_redemption_inr_crore": 4834.27573849,
+   "net_inflow_outflow_inr_crore": 2040.18261353,
+   "_xls_row": 10,
+   "_row_label": "Short Duration Fund"
+  }
+ ]
+}

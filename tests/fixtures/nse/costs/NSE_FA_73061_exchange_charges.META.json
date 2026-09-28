@@ -1,0 +1,15 @@
+{
+  "url": "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf",
+  "http_status": 200,
+  "content_type": "text/plain (trimmed text excerpt of a text-layer PDF)",
+  "retrieved_utc": "2026-09-28T06:12:40+00:00",
+  "circular_ref": "NSE/FA/73061",
+  "circular_reference": "1",
+  "circular_issued": "2026-02-27",
+  "original_bytes": 163365,
+  "original_sha256_16": "6085601a26177ed6",
+  "trim_rule": "Keep the circular's own identity lines (Download Ref No, Circular Ref. No, Sub, the 'applicable with effect from <date>' sentence), the SEBI uniform-charge directive it cites, the two predecessor circular refs and dates, the 'level levied prior to <date>' sentence, the NSE/FA/56129 DELTA PARAGRAPH verbatim, and the rate table VERBATIM from its 'Segment Existing outflow' header to the end of the Equity Options row. Dropped: the letterhead and contact block, the NSE/FA/64323 narrative paragraph, the closing 'For and on behalf of' and signatory. The 56129 delta paragraph is KEPT rather than dropped because it is the only place the pre-2023-04-01 level is stated -- as differences (-20/-10/-300 on the transaction charge, +9.99/+49.99 on IPFT) rather than as a rate. The module reconstructs that level from it and labels the result `derived`; without the paragraph the fixture would not support the reconstruction at all. Extractable text is 3,083 characters of a 163,365-byte PDF; the remaining bytes are an embedded letterhead image and carry no rate.",
+  "stored_bytes": 2741,
+  "stored_sha256": "4716292c16c7a9fde20e364e38583f01c0cd23f00321b4e432895fe085fc5125",
+  "stored_line_endings": "lf"
+}
