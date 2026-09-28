@@ -1,0 +1,83 @@
+{
+ "_rule_applied": "RFC 9309. www.nseindia.com/robots.txt is Allow:/ with only /market-data-test disallowed, so every /api/ and /json/ path used here is allowed. NSE's data hosts serve NO robots.txt; the 404s below are recorded as the evidence and, per RFC 9309, a missing robots.txt means unrestricted.",
+ "_captured_utc": "2026-09-28",
+ "hosts": [
+  {
+   "host": "www.nseindia.com",
+   "url": "https://www.nseindia.com/robots.txt",
+   "http_status": 200,
+   "original_bytes": 96,
+   "original_sha256_16": null,
+   "body_verbatim": "User-agent: *\nAllow: /\nDisallow: /market-data-test\nSitemap: https://www.nseindia.com/sitemap.xml\n",
+   "verdict": "ALLOW everything except /market-data-test. Every route used in this research is /api/* or /dist/js/*, both allowed. No key, no licence, no rate limit stated."
+  },
+  {
+   "host": "nsearchives.nseindia.com",
+   "url": "https://nsearchives.nseindia.com/robots.txt",
+   "http_status": 404,
+   "original_bytes": 3815,
+   "content_type": "text/html;charset=UTF-8",
+   "verdict": "NO robots.txt served. Unrestricted per RFC 9309. Hosts the bhavcopy archives, the index close/valuation CSVs, the constituent CSVs and the circular PDFs."
+  },
+  {
+   "host": "archives.nseindia.com",
+   "url": "https://archives.nseindia.com/robots.txt",
+   "http_status": 404,
+   "original_bytes": 3425,
+   "content_type": "text/html;charset=UTF-8",
+   "verdict": "NO robots.txt served. Unrestricted per RFC 9309. Verified to mirror the identical ind_close_all_25092026.csv (17285 B, same bytes) as nsearchives."
+  },
+  {
+   "host": "marketlens.nseindia.com",
+   "url": "https://marketlens.nseindia.com/robots.txt",
+   "http_status": 404,
+   "original_bytes": 11365,
+   "verdict": "NO robots.txt served. Unrestricted. Not used in this research beyond the robots probe."
+  },
+  {
+   "host": "www.amfiindia.com",
+   "url": "https://www.amfiindia.com/robots.txt",
+   "http_status": 200,
+   "original_bytes": 165,
+   "body_verbatim": "User-agent: *\nDisallow: /admin/\nDisallow: /login/\nDisallow: /search/\n\nUser-agent: Screaming Frog SEO Spider\nAllow: /\n\nSitemap: https://www.amfiindia.com/sitemap.xml\n",
+   "verdict": "Only /admin/, /login/ and /search/ are disallowed. The monthly-data page used (/research-information/amfi-data) is ALLOWED. No crawl-delay is specified, so none was assumed beyond the 1.2 s global floor."
+  },
+  {
+   "host": "portal.amfiindia.com",
+   "url": "https://portal.amfiindia.com/robots.txt",
+   "http_status": 404,
+   "original_bytes": 1245,
+   "content_type": "text/html",
+   "verdict": "NO robots.txt served (IIS 404 page). Unrestricted per RFC 9309. Hosts the monthly .xls workbooks under /spages/."
+  },
+  {
+   "host": "www.sebi.gov.in",
+   "url": "https://www.sebi.gov.in/robots.txt",
+   "http_status": 200,
+   "original_bytes": 101,
+   "body_verbatim": "User-agent: *\nDisallow: \nDisallow: /js\nDisallow: /hindi/js\nDisallow: /css\nDisallow: /hindi/css\n",
+   "verdict": "Only static asset paths disallowed; /legal/circulars/* would be allowed. Not successfully read during this research (see the SEBI note in the report)."
+  },
+  {
+   "host": "www.rbi.org.in",
+   "url": "https://www.rbi.org.in/robots.txt",
+   "http_status": 418,
+   "original_bytes": 626,
+   "body_verbatim": "You are not authorized to view this page. Please contact concerned Support Team. Support ID: (varies per request)",
+   "verdict": "WAF refuses robots.txt AND all POSTs from this IP with HTTP 418. The initial GET of a page DOES return 200. Not circumvented. See the RBI verdict in the report."
+  },
+  {
+   "host": "www.incometaxindia.gov.in",
+   "url": "https://www.incometaxindia.gov.in/robots.txt",
+   "http_status": 403,
+   "original_bytes": 397,
+   "verdict": "Akamai edgesuite 'Access Denied' -- the host refuses to serve robots.txt at all, so compliance cannot be established and no path on it was read. STT was therefore sourced from NSE's own circular instead, which is a better primary source anyway."
+  },
+  {
+   "host": "nseindices.com / www.nseindices.com",
+   "url": "(not fetched)",
+   "http_status": 0,
+   "verdict": "DOES NOT RESOLVE. DNS query times out and TCP/443 is unreachable. NSE Indices' own website is unavailable, so its per-index 'factsheet' pages and its rebalancing calendar could not be read. The constituent CSVs live on nsearchives instead, which is why universe data is still available."
+  }
+ ]
+}

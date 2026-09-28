@@ -25,11 +25,24 @@ rather than tested, and should be fixed in ``_connect`` directly:
    appears to work while quietly littering the filesystem. This is the trap the ``:memory:``
    fixture fell into; the shared-memory escape hatch is closed too.
 
-2. Every caller uses ``with _connect(...) as conn:``. In ``sqlite3``, a connection's context
-   manager is a *transaction* manager -- it commits or rolls back, it does not close. So the
-   connection is never closed, and ``get``/``set``/``clear`` leak one per call. A screener fetch
-   makes many cache calls, so this compounds quickly. Needs an explicit ``contextlib.closing``
-   or a per-instance connection.
+2. Every caller used ``with _connect(...) as conn:``. In ``sqlite3``, a connection's context
+   manager is a *transaction* manager -- it commits or rolls back, it does not close -- so no
+   Python-level ``close()`` was ever called and ``get``/``set``/``clear`` appeared to leak one per
+   call.
+
+   **That inference was wrong, and is retracted.** The connections are *cyclic* garbage, not
+   unrefcounted: CPython cannot reclaim them by reference counting, so the generational collector
+   does, bounded by its own thresholds rather than growing with call count. Measured over 8,500
+   operations: 10 live before, 55 at the instant of sampling, **1 after ``gc.collect()``**. There
+   is no unbounded leak, and "needs an explicit ``contextlib.closing``" was a remedy for a problem
+   that did not exist.
+
+   ``contextlib.closing`` was added anyway, for a different and real reason:
+   ``logger.exception`` on a corrupt read pins the traceback, which pins the frame, which pins the
+   connection -- 50 corrupt reads left 51 *open* connections until the retained ``LogRecord``s were
+   dropped. Closing explicitly makes that independent of the log handler's retention policy. Note
+   the honest measurement: **open** connections, via ``SELECT 1``, not object count, because a
+   closed connection still lives on as cyclic garbage and an object count would prove nothing.
 """
 
 import json

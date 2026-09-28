@@ -212,15 +212,19 @@ async def test_offline_adj_close_differs_from_close_when_dividends_exist():
     assert "Dividends" in df.columns
     assert float(df["Dividends"].abs().sum()) > 0, "fixture must carry a real dividend"
     assert not df["Adj Close"].equals(df["Close"]), "Adj Close is still a copy of Close"
-    # The actions sit on 2024-03-31: a 10.0 dividend against a 100.0 previous close and a 2:1
-    # split, so the single bar before it carries factor (1 - 10/100) / 2 = 0.45. The ex-date bar
-    # and everything after are unadjusted.
-    assert float(df["Adj Close"].iloc[0]) == pytest.approx(45.0)
+    # The dividend sits on 2024-03-31: Rs 10.0 against a Rs 100.0 previous close, so the single bar
+    # before it carries factor (1 - 10/100) = 0.9. There is no /2 any more: this profile's
+    # 'Equity Capital' doubling (100 -> 200) is a capital raise, not a 2:1 split. Inferring a split
+    # from an equity-capital ratio is unsound -- a 1:1 bonus, a rights issue and a fresh issue all
+    # move that field identically, and a face-value sub-division multiplies the share count by 10
+    # while leaving it unchanged. The signal is ambiguous, not noisy, so no threshold separates
+    # the cases and the inference was deleted (see CorporateActionsEngine.extract_splits).
+    assert float(df["Adj Close"].iloc[0]) == pytest.approx(90.0)
     assert float(df["Adj Close"].iloc[1]) == pytest.approx(102.0)
 
 
 # ------------------------------------------------------------- OFFLINE: actions merge via fetch_history
-async def test_offline_actions_merge_real_dividends_splits():
+async def test_offline_actions_merge_dividends_and_refuse_to_infer_splits():
     df = await _fetch(
         _synthetic_chart_frame(), _synthetic_profile(), symbol="TEST", actions=True
     )
@@ -228,12 +232,16 @@ async def test_offline_actions_merge_real_dividends_splits():
         "Open", "High", "Low", "Close", "Adj Close", "Volume",
         "Dividends", "Stock Splits",
     ]
-    # 2024-03-31 carries a real dividend (40% of EPS 25 = 10.0) and split (200/100 = 2.0)
+    # 2024-03-31 carries a real dividend (40% of EPS 25 = 10.0). The profile also doubles
+    # 'Equity Capital' (100 -> 200), which used to become a 2.0 "split"; it no longer does.
     keys = df.index.normalize().tz_localize(None)
     row = df.loc[keys == pd.Timestamp("2024-03-31")]
     assert len(row) == 1
     assert float(row["Dividends"].iloc[0]) == pytest.approx(10.0)
-    assert float(row["Stock Splits"].iloc[0]) == pytest.approx(2.0)
+    assert float(row["Stock Splits"].iloc[0]) == 0.0, "a capital raise is not a split"
+    # And the frame must say so, rather than letting 0.0 read as "no split occurred".
+    assert df.attrs["bfinance_actions_share_count_observable"] is False
+    assert df.attrs["bfinance_actions_share_count_source"] == "not_observable_from_screener_pnl"
     # Non-action dates stay zero
     rest = df.loc[keys != pd.Timestamp("2024-03-31")]
     assert bool((rest["Dividends"] == 0.0).all())

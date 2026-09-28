@@ -12,6 +12,81 @@ from bfinance.models.company import CompanyProfile
 from bfinance.utils.symbols import format_yf_ticker
 
 
+#: Unit of every value-bearing key in the ``info`` dict built by
+#: :meth:`QuoteEngine.build_info_dict`. This is the single source of truth for the dict's
+#: units -- read it here, not in :mod:`bfinance.screens` and not by inferring from a
+#: sibling key.
+#:
+#: Vocabulary:
+#:   ``inr``      rupees per share          ``inr_cr``  rupees crore
+#:   ``pct``      RAW percent, 20.0 == 20% ``ratio``  decimal fraction, 0.20 == 20%
+#:   ``multiple`` dimensionless multiple (P/E, P/B, PEG, D/E, beta)
+#:   ``count``    integer count             ``ms``      epoch milliseconds
+#:   ``text``     string                    ``bool``    boolean
+#:   ``text_list``list of strings           ``mapping`` nested dict
+#:   ``unknown``  always None -- no source in the file
+#:
+#: ⚠ **THE RETURN AND YIELD KEYS ARE MIXED-UNIT ON PURPOSE.** Do not "tidy" them:
+#:
+#:   returnOnEquity           ratio  (fraction)   roe/100
+#:   returnOnAssets           ratio  (fraction)   Net Profit / Total Assets
+#:   returnOnCapitalEmployed  pct    (RAW PERCENT) roce, unconverted  <-- the odd one
+#:   dividendYield            pct    (RAW PERCENT) already a percent; a *100 here once
+#:                                                    inflated every yield 100x
+#:
+#: ``returnOnCapitalEmployed`` is deliberately left as a raw percent. Four screen gates in
+#: :mod:`bfinance.screens` compare it against percent thresholds (15.0 / 20.0 / 12.0) and
+#: ``screens.py`` publishes it as a ``ROCE_%`` column documented in those same units.
+#: Normalising it to a fraction would silently turn every one of those gates into a
+#: never-true comparison while looking like a pure consistency cleanup -- i.e. it is a
+#: 0.2.0 breaking change, not a fix, and it was rejected for that reason. Its cost when
+#: accepted would be: 4 gate constants + the ROCE_% column + 3 example scripts that format
+#: it with ``%.2f%%`` + every downstream caller that copied the number into their own
+#: threshold. The migration, if ever wanted, must be a versioned major with all of those
+#: moved together, never a quiet edit here.
+#:
+#: Keys injected from ``TopRatios.custom_ratios`` (the pass-through of every raw
+#: screener.in label) are not listed: their unit is whatever screener.in printed for that
+#: label -- percent for the ratio labels, rupees crore for the money ones.
+INFO_VALUE_UNITS: Dict[str, str] = {
+    # identity / classification
+    "symbol": "text", "shortName": "text", "longName": "text", "quoteType": "text",
+    "currency": "text", "financialCurrency": "text", "exchange": "text",
+    "fullExchangeName": "text", "exchangeTimezoneName": "text",
+    "exchangeTimezoneShortName": "text", "gmtOffSetMilliseconds": "ms",
+    "sector": "text", "industry": "text", "sectorKey": "text", "industryKey": "text",
+    "website": "text", "irWebsite": "text", "address1": "text", "address2": "text",
+    "city": "text", "zip": "text", "country": "text", "phone": "text", "fax": "text",
+    "bseCode": "text", "nseSymbol": "text", "screenerUrl": "text",
+    "longBusinessSummary": "text", "isConsolidated": "bool",
+    "fullTimeEmployees": "unknown", "pros": "text_list", "cons": "text_list",
+    "cagrs": "mapping",
+    # price / size
+    "currentPrice": "inr", "regularMarketPrice": "inr", "open": "inr",
+    "regularMarketOpen": "unknown", "regularMarketDayHigh": "unknown",
+    "regularMarketDayLow": "unknown", "dayHigh": "unknown", "dayLow": "unknown",
+    "regularMarketPreviousClose": "inr", "previousClose": "inr",
+    "fiftyDayAverage": "inr", "twoHundredDayAverage": "inr",
+    "fiftyTwoWeekHigh": "inr", "fiftyTwoWeekLow": "inr",
+    "bookValue": "inr", "faceValue": "inr", "trailingEps": "inr", "forwardEps": "unknown",
+    "marketCap": "inr", "marketCapInCr": "inr_cr",
+    "sharesOutstanding": "count", "impliedSharesOutstanding": "count",
+    "floatShares": "count", "regularMarketVolume": "count", "volume": "count",
+    # valuation multiples
+    "trailingPE": "multiple", "forwardPE": "unknown", "priceToBook": "multiple",
+    "pegRatio": "multiple", "trailingPegRatio": "multiple", "debtToEquity": "multiple",
+    "beta": "unknown",
+    # returns and yields -- MIXED UNITS, see the note above
+    "returnOnEquity": "ratio", "returnOnAssets": "ratio",
+    "returnOnCapitalEmployed": "pct",
+    "dividendYield": "pct", "dividendYieldPercent": "pct",
+    "earningsGrowth": "unknown", "revenueGrowth": "unknown",
+    # ownership
+    "heldPercentInsiders": "ratio", "heldPercentInstitutions": "unknown",
+    "promoterHolding": "pct", "promoterPledged": "pct",
+}
+
+
 def resolve_exchange(symbol: str) -> str:
     """Map ticker suffix to exchange: .NS->NSE, .BO/.BSE->BSE, bare->NSE (numeric->BSE)."""
     s = (symbol or "").strip().upper()
@@ -106,6 +181,10 @@ class QuoteEngine:
         """
         Merge Screener fundamental ratios with market metrics to match yfinance `ticker.info`.
         `history` is an already-fetched chart/history series (no extra network fan-out).
+
+        Units of the returned keys are declared in `INFO_VALUE_UNITS` -- read them there.
+        They are NOT uniform: `returnOnEquity`/`returnOnAssets` are decimal fractions,
+        `returnOnCapitalEmployed`/`dividendYield` are raw percents, deliberately.
         """
         r = profile.ratios
         symbol = profile.symbol
@@ -236,13 +315,24 @@ class QuoteEngine:
             "trailingPE": r.stock_pe,
             "forwardPE": None,  # No forward-EPS source in file
             "forwardEps": None,  # No forward-EPS source in file
-            "priceToBook": r.price_to_book or (round(cmp / r.book_value, 2) if r.book_value and cmp > 0 else None),
+            # A reported P/B of 0.00 is data, not an absence, so the membership test is
+            # `is not None`; the `or` form silently discarded it and substituted the
+            # CMP/book-value estimate. `r.book_value` keeps its truthiness test on purpose:
+            # it is a divide-by-zero guard, and book value of 0.00 must yield None, not a
+            # ZeroDivisionError.
+            "priceToBook": r.price_to_book if r.price_to_book is not None
+            else (round(cmp / r.book_value, 2) if r.book_value and cmp > 0 else None),
             "bookValue": r.book_value,
             "dividendYield": r.dividend_yield if r.dividend_yield is not None else None,
             "dividendYieldPercent": r.dividend_yield,
             "trailingEps": _eps,
-            "returnOnEquity": (r.roe / 100.0) if r.roe else None,
-            "returnOnAssets": _roa,
+            # `is not None`, not `if r.roe`: a genuine ROE of 0.00 (a company that earned
+            # nothing, or exactly offset earnings) is a real number and was being mapped to
+            # None. roe is a RAW PERCENT (see TopRatios), so /100.0 is the correct
+            # percent-to-fraction conversion for this key -- measured round-trip: 18.25 -> 0.1825.
+            "returnOnEquity": (r.roe / 100.0) if r.roe is not None else None,
+            "returnOnAssets": _roa,  # true fraction: Net Profit / Total Assets
+            # RAW PERCENT among fraction siblings -- deliberate, see INFO_VALUE_UNITS.
             "returnOnCapitalEmployed": r.roce,
             "debtToEquity": r.debt_to_equity,
             "pegRatio": r.peg_ratio,

@@ -9,7 +9,6 @@ from datetime import datetime
 import pandas as pd
 
 from bfinance.ticker import Ticker
-from bfinance.utils.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -213,13 +212,29 @@ def download(
         accepted the argument, did nothing, and returned an empty DataFrame. Any caller who
         asked for strict behaviour got silent behaviour instead, which is the worst possible
         outcome for a debugging flag.
+
+        Every other unsupported keyword now raises ``TypeError`` for the same reason. The
+        intermediate state -- warn and continue -- is the one that was tried and rejected: a
+        misspelled argument (``download(symbols, period="1mo", interval="1d")``, or
+        ``raise_errorz=True``) was accepted, vanished, and produced a log line on a logger
+        nobody reads, so the caller got a *different* window than the one they asked for with no
+        signal at the call site. A warning is the same silent answer with extra steps.
+
+        This is also what yfinance 1.7.0 does: its ``download()`` signature is closed (no
+        ``**kwargs`` at all), so Python itself raises ``TypeError`` there. Verified with
+        ``inspect.signature(yfinance.download)`` in this env. bfinance's only intentional
+        pass-through was ``raise_errors``, which is now a named parameter -- nothing else was
+        ever forwarded: ``**kwargs`` reached no callee.
     """
-    # Surface any other misspelled/unknown keyword rather than swallowing it. These used to be
-    # accepted and ignored, which is how raise_errors went missing for so long.
+    # An unsupported keyword is a caller bug, not a runtime condition. Refusing it is the only
+    # outcome that makes the mistake findable at the call site instead of in a log file.
     if kwargs:
-        logger.warning(
-            "download() ignoring unsupported keyword argument(s): %s",
-            ", ".join(sorted(kwargs)),
+        offending = ", ".join(repr(name) for name in sorted(kwargs))
+        raise TypeError(
+            f"download() got unsupported keyword argument(s): {offending}. bfinance's download() "
+            f"accepts no arbitrary keyword arguments: everything it honours is a named parameter "
+            f"(read them off the signature, or inspect.signature(bfinance.download)), and anything "
+            f"else would be silently discarded -- which is how raise_errors went missing for years."
         )
 
     if isinstance(tickers, str):

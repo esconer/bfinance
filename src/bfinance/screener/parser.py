@@ -49,6 +49,33 @@ _PAGE_INFO_RE = re.compile(
 )
 
 
+def _first_present(raw: Dict[str, Optional[float]], *keys: str) -> Optional[float]:
+    """First of ``keys`` whose parsed value is not ``None``, in the order given.
+
+    screener.in spells some ratios two ways on the same page family -- "Stock P/E" /
+    "P/E", "Debt to equity" / "Debt / Eq", "Price to book value" / "P/B" -- so each
+    canonical label is paired with its alias, canonical first.
+
+    The membership test is ``is not None`` and deliberately NOT truthiness. A genuine
+    ``0.00`` is a real, reportable number (a debt-free company prints 0.00 D/E; a company
+    with a fully written-off equity prints 0.00 P/B), and ``a or b`` cannot tell one from
+    a missing value. It failed in both directions, measured on real fragments:
+
+    * primary ``0.00``, alias absent  -> ``None`` (the real zero vanished)
+    * primary ``0.00``, alias ``7.77`` -> ``7.77`` (the real zero was replaced by a
+      *different wrong number*, which is worse than vanishing)
+
+    Only the second is recoverable: ``custom_ratios`` still carried the ``0.0`` while the
+    typed field was already lost. Returns ``None`` only when no key holds a value, so a
+    real zero, a missing value, and an alias fallback stay three distinguishable outcomes.
+    """
+    for key in keys:
+        value = raw.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 class ScreenerHTMLParser:
     """
     DOM Parser extracting 100% of structured tables, corporate media, and qualitative notes from Screener.in HTML.
@@ -235,19 +262,24 @@ class ScreenerHTMLParser:
             # `high_low_52w` used to be passed here. TopRatios does not declare it, so pydantic
             # discarded it silently (model_extra is None) - the value was parsed, formatted and
             # then thrown away. The individual high_52w / low_52w above are the real carriers.
-            stock_pe=raw_ratios.get("Stock P/E") or raw_ratios.get("P/E"),
+            # The three aliased labels go through _first_present, not `or`: a genuine 0.00
+            # must survive, must not be replaced by the alias, and must stay distinguishable
+            # from an absent value. See _first_present for the measured failure modes.
+            stock_pe=_first_present(raw_ratios, "Stock P/E", "P/E"),
             book_value=raw_ratios.get("Book Value"),
             dividend_yield=raw_ratios.get("Dividend Yield"),
             roce=raw_ratios.get("ROCE"),
             roe=raw_ratios.get("ROE"),
             face_value=raw_ratios.get("Face Value"),
-            debt_to_equity=raw_ratios.get("Debt to equity") or raw_ratios.get("Debt / Eq"),
+            debt_to_equity=_first_present(raw_ratios, "Debt to equity", "Debt / Eq"),
             peg_ratio=raw_ratios.get("PEG Ratio"),
-            price_to_book=raw_ratios.get("Price to book value") or raw_ratios.get("P/B"),
+            price_to_book=_first_present(raw_ratios, "Price to book value", "P/B"),
             eps_ttm=raw_ratios.get("EPS"),
             promoter_holding=raw_ratios.get("Promoter holding"),
             promoter_pledged=raw_ratios.get("Pledged percentage"),
             free_cash_flow_3y=raw_ratios.get("Free Cash Flow 3Y"),
+            # Unfiltered pass-through of every label screener.in printed, so a value the
+            # typed fields above dropped is still recoverable by its raw label.
             custom_ratios=raw_ratios,
         )
 
@@ -476,7 +508,12 @@ class ScreenerHTMLParser:
 
             peers.append(
                 PeerStock(
-                    rank=int(rank_val) if rank_val else len(peers) + 1,
+                    # `is not None`, not truthiness: the `len(peers)+1` fallback is documented
+                    # above as the *empty-S.No. cell* case (the "Median: N Co." row), and
+                    # parse_indian_number already maps "-" to None. screener.in's S.No. column
+                    # is 1-based, so a real 0 does not occur and this is a latent-consistency
+                    # fix rather than a behaviour change: ranks 1..N are identical either way.
+                    rank=int(rank_val) if rank_val is not None else len(peers) + 1,
                     name=name,
                     symbol=symbol,
                     cmp=parse_indian_number(cells[2]) if len(cells) > 2 else None,

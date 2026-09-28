@@ -545,14 +545,17 @@ def test_real_bhavcopy_module_matches_the_contract_assumed_here():
     bhavcopy = pytest.importorskip("bfinance.nse.bhavcopy")
 
     assert ohlcv_mod.bhavcopy_range is not None
-    assert list(bhavcopy.COLUMNS) == ["Open", "High", "Low", "Close", "Volume"]
+    # Turnover value is part of the frame contract now, so the stub has to carry it.
+    assert list(bhavcopy.COLUMNS) == [
+        "Open", "High", "Low", "Close", "Volume", "TurnoverValue"
+    ]
 
     frame = bhavcopy.parse_bhavcopy(
-        "SYMBOL,SERIES,TIMESTAMP,OPEN,HIGH,LOW,CLOSE,TOTTRDQTY\n"
-        "RELIANCE,EQ,03-Jun-2024,100.0,112.0,97.5,110.0,1000\n"
-        "TCS,EQ,03-Jun-2024,400.0,402.0,390.0,391.0,500\n"
+        "SYMBOL,SERIES,TIMESTAMP,OPEN,HIGH,LOW,CLOSE,TOTTRDQTY,TOTTRDVAL\n"
+        "RELIANCE,EQ,03-Jun-2024,100.0,112.0,97.5,110.0,1000,105000.0\n"
+        "TCS,EQ,03-Jun-2024,400.0,402.0,390.0,391.0,500,198000.0\n"
     )
-    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "TurnoverValue"]
     assert frame.index.names == ["Date", "Symbol"]
     assert frame.attrs["bfinance_synthetic_ohlc"] is False
 

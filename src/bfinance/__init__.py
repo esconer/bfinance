@@ -13,6 +13,33 @@ Removed in this working tree:
 * ``DerivativesEngine.generate_option_chain`` — deleted. It priced options with a closed-form
   heuristic and drew volume/open interest from a seeded RNG. ``Ticker.option_chain()`` now always
   returns an empty chain.
+
+Not imported here, on purpose
+-----------------------------
+Seven capabilities are **opt-in** and are deliberately absent from this module and from
+``__all__``:
+
+    bfinance.statements   bfinance.sources   bfinance.costs   bfinance.flows
+    bfinance.universe     bfinance.ownership  bfinance.nse.macro
+
+``from bfinance import costs`` already works and is the documented way in, because Python resolves
+a name against the package's submodules. **No re-export is needed for that, and adding one would
+cost the only thing that matters here:** a module object can only be an attribute of this package
+if executing it put it there, and executing any of the seven is exactly what must not happen on
+``import bfinance``. The same goes for the entries themselves — a top-level ``resolve`` or
+``UniverseArchive`` would have to be bound by an import of its own module, so option (b) is not a
+policy question, it is mechanically the same thing as option (a) with the isolation removed.
+
+``bfinance.trendlyne`` is a third-party-source client and is opt-in for the same reason. The other
+six opt in for two further ones: :mod:`bfinance.sources` is the *registry* that describes the rest,
+and a table of strings that imports its own subjects is not a table; and :mod:`bfinance.statements`
+carries a second cascade underneath, so importing it eagerly would put a sub-cascade on every
+caller's import path.
+
+So ``import bfinance`` pays for none of them, and a caller who wants one names it. The isolation is
+a contract, not a convention: ``tests/test_public_surface.py`` asks the question in a fresh
+interpreter, because in-process ``sys.modules`` is already polluted by the very import a test
+performs.
 """
 
 from .ticker import Ticker

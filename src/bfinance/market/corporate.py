@@ -20,6 +20,16 @@ silently: :func:`resolve_actions` stamps the degraded source into ``df.attrs`` a
 OHLCV path only reaches for it when the NSE feed is **unreachable** — never when NSE answers
 "no action", which is a real answer and must not be overwritten by a guess.
 
+The fallback is **dividends only**. It carries no share-count information at all, so it can never
+supply a split or bonus, and it does not try: :meth:`CorporateActionsEngine.extract_splits` used to
+infer one from the balance sheet's ``Equity Capital`` row, which turned every capital raise into a
+"split" and silently rescaled the price history by the fabricated ratio. That inference is deleted
+— an equity-capital change is ambiguous by construction (bonus, rights, fresh issue, conversion and
+capital reduction all move it, and a face-value sub-division moves the share count without moving
+it at all), so no threshold could separate the cases. A result from this path therefore carries
+``extra["bfinance_actions_share_count_observable"] = False``: the dividend column is an
+approximation, and ``Stock Splits`` is 0.0 meaning "not known", not "none happened".
+
 yfinance parity notes that still hold for both paths:
 - yfinance ``ticker.dividends`` is indexed by **ex-date**; only the NSE path matches that.
 - yfinance represents NSE 1:1 **bonus issues as a 2.0 split** (e.g. RELIANCE 2017-09-07,
@@ -126,6 +136,15 @@ class CorporateActionsEngine:
 
             if payout_pct is not None and eps_val is not None and payout_pct > 0:
                 div_per_share = (payout_pct / 100.0) * eps_val
+                # The identity above is only defined for a profitable year. A payout ratio left
+                # positive from an earlier profitable period, paired with a loss year's EPS,
+                # inverts the sign: 0.40 * -5.0 == -2.0. No company pays a negative dividend, so
+                # that is not a noisy estimate, it is not a dividend at all -- the same standard
+                # that removed the equity-capital split inference. Unguarded it reached the
+                # published Dividends column as -2.0, and _dividend_adjustment_factor turned it
+                # into a step of 1 - (-2.0)/prev_close > 1, inflating the adjusted price history.
+                if div_per_share <= 0:
+                    continue
                 # Parse period like 'Mar 2024' -> date '2024-03-31'
                 try:
                     dt = pd.to_datetime(f"01 {period}", format="%d %b %Y") + pd.offsets.MonthEnd(1)
@@ -141,35 +160,55 @@ class CorporateActionsEngine:
     @classmethod
     def extract_splits(cls, profile: CompanyProfile) -> pd.Series:
         """
-        Extract stock split / bonus series matching yfinance `ticker.splits`.
-        Bonus issues are normalized to split ratios (1:1 bonus -> 2.0).
+        Split / bonus series from a Screener.in profile: **always empty, by construction.**
+
+        Returned rather than deleted because :mod:`bfinance.ticker` calls this directly for
+        ``Ticker.splits``. It used to infer splits from growth in the balance sheet's
+        ``Equity Capital`` row, with no split filing required, and that inference is deleted. This
+        docstring is here so that it is not re-added.
+
+        Why the inference cannot be tuned, only removed
+        -------------------------------------------------
+        ``Equity Capital`` is ``shares issued x face value``, so its change is produced by at least
+        six different corporate events, and the balance sheet does not say which one happened:
+
+        * **1:1 bonus** -- capitalised reserves become share capital. Share count rises. *A split.*
+        * **Rights issue** -- new shares at a premium. Share count rises. *Not a split.*
+        * **Fresh issue / preferential allotment / QIP** -- share count rises. *Not a split.*
+        * **Warrant, ESOP or convertible-bond conversion** -- share count rises. *Not a split.*
+        * **Capital reduction, buy-back cancellation, demerger** -- capital falls. *Not a split.*
+        * **Face-value sub-division** -- share count rises by 10x while equity capital is
+          **unchanged**. *Not even visible in this field.*
+
+        Only the first is a share-count event for price-adjustment purposes, and for that one alone
+        the capital ratio happens to equal the share ratio. A 1:1 bonus and a rights issue that
+        raised the same rupee amount are the *same number in the same field*. So the signal is not
+        noisy, it is **ambiguous**, and no threshold separates the cases. Raising the old
+        ``ratio >= 1.5`` cliff would only have chosen which wrong answer to return -- calibrating a
+        fabrication is still a fabrication.
+
+        The measured consequence, on a real balance sheet: equity capital 4505 -> 23700 Cr, a
+        capital raise at a company that has never had a share-count event, produced
+        ``{2026-03-31: 5.26}`` as a "split". That put a fabricated number in the published
+        ``Stock Splits`` column and, because the back-adjustment factor is the cumulative product
+        over such ratios, silently rescaled every earlier bar by 1/5.26 (10.0 -> 1.901141) while the
+        frame's provenance flags reported real bars and a complete adjustment. When the fabricated
+        date fell outside the bar window the column read 0.0 and the rescaling happened anyway.
+        This is the historical "Vodafone Idea reports four fabricated splits, never having had one"
+        bug. The NSE feed path was fixed earlier; this fallback was not.
+
+        What is left instead
+        --------------------
+        A split is a *declared* fact, not an inferred one, and the NSE feed already carries it as a
+        filing: :func:`bfinance.nse.corporate_actions.split_ratio` reads the ratio out of the subject
+        string and returns ``None`` for anything that does not declare one, which is why that path
+        is not vulnerable to any of the six cases above. That is the only source a split is taken
+        from here. An empty series is the honest absence: downstream it reads as 0.0, which
+        :meth:`merge_actions_into_history` documents as meaning "not known", not "none happened",
+        and :meth:`resolve_actions_async` records as
+        ``extra["bfinance_actions_share_count_observable"] = False``.
         """
-        bs = profile.balance_sheet
-        if not bs.headers:
-            return pd.Series(dtype=float, name="Stock Splits")
-
-        equity_map = bs.get_metric("Equity Capital")
-        splits_records = {}
-
-        prev_cap = None
-        for period in bs.headers:
-            curr_cap = equity_map.get(period)
-            if curr_cap and prev_cap and prev_cap > 0:
-                ratio = curr_cap / prev_cap
-                # If equity capital doubled or grew by integer factor, mark as bonus/split
-                if ratio >= 1.5:
-                    try:
-                        dt = pd.to_datetime(f"01 {period}", format="%d %b %Y") + pd.offsets.MonthEnd(1)
-                        splits_records[dt] = round(ratio, 2)
-                    except Exception:
-                        pass
-            if curr_cap:
-                prev_cap = curr_cap
-
-        if not splits_records:
-            return pd.Series(dtype=float, name="Stock Splits")
-
-        return cls._tz_dated(splits_records, "Stock Splits")
+        return pd.Series(dtype=float, name="Stock Splits")
 
     @classmethod
     def build_actions(
@@ -456,11 +495,16 @@ class CorporateActionsEngine:
             profile = await cls._maybe_load_profile(symbol, profile, load_profile)
             if profile is not None:
                 dividends = cls.extract_dividends(profile)
+                # Always empty, and that is the point: a Screener.in P&L carries no share-count
+                # field, so there is nothing here to derive a split from. See extract_splits for
+                # why the balance sheet's 'Equity Capital' row cannot stand in for one.
                 splits = cls.extract_splits(profile)
                 logger.warning(
-                    "%s: %s. Falling back to the Screener.in fiscal-year-end approximation, so "
-                    "dividend DATES are ~4-5 months off the true ex-date and 'Adj Close' is "
-                    "approximate. Provenance is recorded in df.attrs['bfinance_actions_source'].",
+                    "%s: %s. Falling back to the Screener.in fiscal-year-end approximation. "
+                    "Dividend DATES are ~4-5 months off the true ex-date, and SPLITS AND BONUSES "
+                    "ARE NOT OBSERVABLE FROM THIS SOURCE AT ALL, so 'Stock Splits' is 0.0 meaning "
+                    "'not known' rather than 'none happened' and no share-count factor is derived "
+                    "from it. Provenance is recorded in df.attrs['bfinance_actions_source'].",
                     symbol, reason,
                 )
                 return ResolvedActions(
@@ -468,10 +512,26 @@ class CorporateActionsEngine:
                     splits=splits,
                     source=ACTIONS_SOURCE_SCREENER,
                     detail=(
-                        "Screener.in P&L approximation, dividends dated at fiscal year end; "
-                        f"{reason}"
+                        "Screener.in P&L approximation: dividends dated at fiscal year end "
+                        "(~4-5 months after the true ex-date) and no share-count data of any kind, "
+                        f"so no split factor is derived; {reason}"
                     ),
-                    extra={"bfinance_actions_fallback_reason": reason},
+                    extra={
+                        "bfinance_actions_fallback_reason": reason,
+                        # The one fact the attrs vocabulary could not previously express: a NAMED
+                        # source that cannot underwrite a share-count factor. Emitted rather than
+                        # left absent so a consumer can branch on one key, and False rather than
+                        # omitted so "cannot see splits" is distinguishable from "not consulted".
+                        # It reaches the frame through OHLCVEngine's `df.attrs.update(extra)`.
+                        #
+                        # Deliberately NOT the `bfinance_actions_unconverted_rows` key that drives
+                        # _incomplete_adjustment: that one means "the feed wrote a row down and this
+                        # engine declined to convert it", and here the feed wrote down *nothing*.
+                        # Reporting 1 would forge a feed record, which is the same defect in a
+                        # different column. See the note in market/ohlcv.py::_incomplete_adjustment.
+                        "bfinance_actions_share_count_observable": False,
+                        "bfinance_actions_share_count_source": "not_observable_from_screener_pnl",
+                    },
                 )
 
         # Either the fallback is disabled, or there was no profile to approximate from. Both are

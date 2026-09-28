@@ -2,8 +2,12 @@
 Quantitative stock screening engine inspired by Screener.in's popular screens and custom query builder.
 Supports pre-built institutional strategies: Coffee Can, Magic Formula, Debt-Free Compounders, High Dividend, Undervalued Growth.
 
-Unit contract (finengine parity):
-- ROCE_% is raw percent (e.g. 20.0 means 20%).
+Unit contract: the authoritative statement of the unit of every `info` key lives in
+`bfinance.market.quotes.INFO_VALUE_UNITS`. Read it there, not here. Summary of the
+keys these screens touch:
+
+- ROCE_% is raw percent (e.g. 20.0 means 20%) -- `returnOnCapitalEmployed` is unconverted
+  on purpose; the gates below compare it against percent thresholds.
 - ROE_%/DivYield_% are percent; info holds decimals (0.15 -> 15.0).
 - None stays None; missing thresholds fail (0.0 in filters).
 """
@@ -92,7 +96,8 @@ class Screen:
         Returns sorted DataFrame of matching stocks and key ratios.
 
         Units: ROCE_% raw-%, ROE_%/DivYield_% percent (decimals x100);
-        None stays None.
+        None stays None. See `bfinance.market.quotes.INFO_VALUE_UNITS` for the
+        authoritative per-key unit table -- this is a summary, not the contract.
         """
         symbols = universe or DEFAULT_UNIVERSE
         if max_stocks:
@@ -111,7 +116,11 @@ class Screen:
                         "MarketCap_Cr": r.get("marketCapInCr", 0.0),
                         "PE": r.get("trailingPE"),
                         "ROCE_%": r.get("returnOnCapitalEmployed"),
-                        "ROE_%": (r.get("returnOnEquity") * 100) if r.get("returnOnEquity") else None,
+                        # `is not None`, not truthiness: a genuine ROE of 0.0% is a real
+                        # reading and belongs in the table as 0.0, not as a blank. The
+                        # truthiness form wrote None for it, which also silently undid the
+                        # matching fix in build_info_dict.
+                        "ROE_%": (r.get("returnOnEquity") * 100) if r.get("returnOnEquity") is not None else None,
                         # dividendYield is already a PERCENT, matching yfinance (verified live:
                         # RELIANCE.NS 0.49, TCS.NS 3.12, HDFCBANK.NS 1.77). The *100 that used to
                         # be here inflated every yield 100x, so a 0.15% payer reported as 15.00.

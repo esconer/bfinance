@@ -7,6 +7,17 @@
 # the offline fixture suite exists to prevent, so the bytes are pinned instead.
 tests/fixtures/** text eol=lf
 
+# ...except archives, which must never be touched. `text` is a *force*, not a hint: it tells
+# git to treat a file as text whatever its content, which could rewrite CRLF byte pairs inside
+# a zip and so corrupt a recording whose sha256 the tests assert.
+#
+# Verified: each committed bhavcopy zip is byte-identical between the working tree and the
+# staged blob. Note that git's own content detection is what actually achieved that - the
+# rule below is defence in depth for an archive whose bytes *do* contain CRLF pairs, not the
+# reason the current seven are safe.
+*.zip binary
+*.gz binary
+
 # Snapshots and vendored payloads must never be line-ending translated.
 *.json text eol=lf
 *.py text eol=lf

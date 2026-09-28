@@ -3,8 +3,11 @@ AI Context Engine: Formats and serializes 100% of bfinance corporate data into
 token-optimized, highly structured Markdown, JSON, and text representations for LLMs.
 """
 
-from typing import Any, Dict, List, Literal, Optional, Set
-import json
+# ``json`` and ``Literal`` were imported here and used by neither this module's markdown
+# nor ``build_json_context`` (which returns a dict; the serialisation lives in
+# ``bfinance.ai.tools``). Dropped as dead imports -- they were already failing
+# ``ruff check --select E9,F`` before this change.
+from typing import Any, Dict, List, Optional, Set
 import math
 import pandas as pd
 
@@ -24,6 +27,24 @@ LARGE_VALUE_FLOOR = 1000
 #: Decimals kept for the small values that share a column with a large one (EPS,
 #: OPM %, ROCE %). Anything above this only adds ".00" noise to Rs Cr figures.
 _MAX_SHARED_DECIMALS = 2
+
+
+# GFM tables are *leaf* blocks: a renderer only starts one when the table is its own
+# block, so a table glued directly onto the "##" heading above it stops being a table.
+# python-markdown's ``tables`` extension states the rule outright -- "tables must be
+# separated from surrounding text by blank lines" -- and renders the glued form as a
+# paragraph of literal pipe characters. So the blank line is a *precondition* of the
+# table being a table, not decoration, and it is the one part of this that can be
+# guaranteed and tested offline (no Markdown parser needed to assert a blank line).
+def _add_table(lines: List[str], table: str) -> None:
+    """Append one rendered table as its own block, preceded by a blank line.
+
+    Every table in the dossier must go through here. Appending a table directly to
+    ``lines`` is the defect this guards: it leaves no blank line between the table and
+    whatever precedes it, and the block is then absorbed instead of parsed.
+    """
+    lines.append("")
+    lines.append(table)
 
 
 def _display_frame(df: Any) -> pd.DataFrame:
@@ -126,11 +147,19 @@ class AIContextBuilder:
             lines.append("\n## Current Valuation & Quality Metrics")
             lines.append(f"- **Current Market Price (CMP)**: ₹{r.current_price:,.2f}" if r.current_price else "- **CMP**: N/A")
             lines.append(f"- **Market Capitalization**: ₹{r.market_cap:,.2f} Cr" if r.market_cap else "- **Market Cap**: N/A")
-            lines.append(f"- **52-Week Range**: ₹{r.low_52w:,.2f} - ₹{r.high_52w:,.2f}" if r.low_52w and r.high_52w else "")
-            lines.append(f"- **Stock P/E**: {r.stock_pe:.2f}x | **Book Value**: ₹{r.book_value:,.2f}" if r.stock_pe and r.book_value else "")
-            lines.append(f"- **ROCE**: {r.roce:.2f}% | **ROE**: {r.roe:.2f}%" if r.roce and r.roe else "")
+            # A metric the screener did not return is *absent*, not a blank line. These
+            # four used to append "" as their else-branch and relied on a blanket
+            # blank-stripping filter downstream to erase the hole; the filter is gone
+            # (it also erased the blank line every table needs), so they are now guards.
+            if r.low_52w and r.high_52w:
+                lines.append(f"- **52-Week Range**: ₹{r.low_52w:,.2f} - ₹{r.high_52w:,.2f}")
+            if r.stock_pe and r.book_value:
+                lines.append(f"- **Stock P/E**: {r.stock_pe:.2f}x | **Book Value**: ₹{r.book_value:,.2f}")
+            if r.roce and r.roe:
+                lines.append(f"- **ROCE**: {r.roce:.2f}% | **ROE**: {r.roe:.2f}%")
             face_str = f"₹{r.face_value}" if r.face_value is not None else "N/A"
-            lines.append(f"- **Dividend Yield**: {r.dividend_yield:.2f}% | **Face Value**: {face_str}" if r.dividend_yield is not None else "")
+            if r.dividend_yield is not None:
+                lines.append(f"- **Dividend Yield**: {r.dividend_yield:.2f}% | **Face Value**: {face_str}")
             if r.debt_to_equity is not None:
                 lines.append(f"- **Debt to Equity**: {r.debt_to_equity:.2f}")
 
@@ -140,7 +169,7 @@ class AIContextBuilder:
             df_pnl = profile.profit_loss.to_dataframe(orient="columns")
             if not df_pnl.empty:
                 cols = list(df_pnl.columns)[-max_years:]
-                lines.append(_safe_markdown(df_pnl[cols]))
+                _add_table(lines, _safe_markdown(df_pnl[cols]))
 
         # 4. Quarterly Results
         if "quarters" in active and not profile.quarters.empty:
@@ -148,7 +177,7 @@ class AIContextBuilder:
             df_q = profile.quarters.to_dataframe(orient="columns")
             if not df_q.empty:
                 cols = list(df_q.columns)[-max_quarters:]
-                lines.append(_safe_markdown(df_q[cols]))
+                _add_table(lines, _safe_markdown(df_q[cols]))
 
         # 5. Balance Sheet
         if "balance_sheet" in active and not profile.balance_sheet.empty:
@@ -156,7 +185,7 @@ class AIContextBuilder:
             df_bs = profile.balance_sheet.to_dataframe(orient="columns")
             if not df_bs.empty:
                 cols = list(df_bs.columns)[-max_years:]
-                lines.append(_safe_markdown(df_bs[cols]))
+                _add_table(lines, _safe_markdown(df_bs[cols]))
 
         # 6. Cash Flow Statement
         if "cash_flow" in active and not profile.cash_flow.empty:
@@ -164,7 +193,7 @@ class AIContextBuilder:
             df_cf = profile.cash_flow.to_dataframe(orient="columns")
             if not df_cf.empty:
                 cols = list(df_cf.columns)[-max_years:]
-                lines.append(_safe_markdown(df_cf[cols]))
+                _add_table(lines, _safe_markdown(df_cf[cols]))
 
         # 7. Shareholding Pattern Trends
         if "shareholding" in active:
@@ -172,19 +201,19 @@ class AIContextBuilder:
             df_sh = profile.shareholding.to_dataframe(orient="columns")
             if not df_sh.empty:
                 lines.append("### Quarterly Trend (Recent Quarters)")
-                lines.append(_safe_markdown(df_sh.iloc[:, -6:]))
+                _add_table(lines, _safe_markdown(df_sh.iloc[:, -6:]))
 
             df_shy = profile.shareholding_yearly.to_dataframe(orient="columns")
             if not df_shy.empty:
                 lines.append("\n### 10-Year Annual Trend")
-                lines.append(_safe_markdown(df_shy.iloc[:, -6:]))
+                _add_table(lines, _safe_markdown(df_shy.iloc[:, -6:]))
 
         # 8. Operating Ratios History
         if "ratios" in active and not profile.ratios_history.empty:
             lines.append("\n## Historical Operating Ratios & Efficiency Metrics")
             df_rh = profile.ratios_history.to_dataframe(orient="columns")
             if not df_rh.empty:
-                lines.append(_safe_markdown(df_rh.iloc[:, -max_years:]))
+                _add_table(lines, _safe_markdown(df_rh.iloc[:, -max_years:]))
 
         # 9. Compounded CAGRs
         if "cagrs" in active and profile.cagrs:
@@ -224,9 +253,17 @@ class AIContextBuilder:
             df_peers = profile.peers_dataframe()
             if not df_peers.empty:
                 peer_cols = [c for c in ["rank", "name", "cmp", "pe", "market_cap_cr", "roce", "dividend_yield"] if c in df_peers.columns]
-                lines.append(_safe_markdown(df_peers[peer_cols].head(8), index=False))
+                _add_table(lines, _safe_markdown(df_peers[peer_cols].head(8), index=False))
 
-        return "\n".join([line for line in lines if line.strip() != ""])
+        # Deliberately NOT filtered. The old line was
+        #     "\n".join([line for line in lines if line.strip() != ""])
+        # which stripped every blank line, including the one _add_table puts before each
+        # table -- so all 7 tables in a full dossier were emitted glued to their own
+        # "##" heading. The blank lines that *are* wanted (the ones inside the
+        # f"\n## Heading" section strings, and the ones _add_table inserts) are already
+        # in `lines` as real entries, so joining unfiltered is correct. Metrics that
+        # were missing are simply never appended, so no holes are introduced.
+        return "\n".join(lines)
 
     @classmethod
     def build_json_context(cls, profile: CompanyProfile) -> Dict[str, Any]:

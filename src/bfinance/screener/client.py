@@ -102,6 +102,55 @@ class ScreenerClient:
 
     BASE_URL = "https://www.screener.in"
 
+    #: TTL, in hours, for every category this client caches -- the whole vocabulary, in one place,
+    #: because a TTL that lives only at the call site that happens to use it is not reviewable.
+    #:
+    #: The rule behind the numbers: a TTL may be no longer than the fastest-moving thing in the
+    #: payload, and each entry below is the fastest-moving thing in *its* payload.
+    #:
+    #: =====================  ======  ===========================================================
+    #: key                    hours   what moves in it, and why the number is that one
+    #: =====================  ======  ===========================================================
+    #: ``search``             168.0  company-name -> id resolution: static for the life of a
+    #:                                  listing, so it can afford the longest life here.
+    #: ``profile``               1.0  carries ``ratios.current_price`` and ``market_cap``. A price
+    #:                                  is not "slightly old", it is a *wrong number* the moment
+    #:                                  the market moves, so this sits BELOW the 5-year chart
+    #:                                  series: 60 minutes, not 24 hours. The 24h this replaced was
+    #:                                  never a decision -- it was ``SQLiteCache``'s
+    #:                                  ``default_ttl_hours`` reached by accident, because this was
+    #:                                  the one call site of the five that passed no ``ttl_hours``.
+    #: ``chart``                 6.0  a 5-year daily price series, re-asked far less often than a
+    #:                                  quote.
+    #: ``market_overview``      24.0  ``/market/``: 188 industries of aggregates, moving daily at
+    #:                                  worst.
+    #: ``market_leaf``          12.0  a leaf industry page: 25 companies, re-ranked intraday.
+    #: =====================  ======  ===========================================================
+    #:
+    #: The keys name what is cached, which is why the two ``/market/`` rows differ -- both are
+    #: stored under ``category="market"`` (the cache table has one category column), but they are
+    #: separate pages with separate ages.
+    #:
+    #: A caller who needs a different number sets it on the instance
+    #: (``client.CATEGORY_TTL_HOURS["profile"] = 168.0``); each instance gets its own copy, so one
+    #: client cannot silently retune another.
+    CATEGORY_TTL_HOURS: Dict[str, float] = {
+        "search": 168.0,
+        "profile": 1.0,
+        "chart": 6.0,
+        "market_overview": 24.0,
+        "market_leaf": 12.0,
+    }
+
+    def ttl_hours(self, category: str) -> float:
+        """The explicit TTL for a cache category, in hours.
+
+        Every ``cache.set`` in this client goes through here, so no cached payload can take a TTL
+        by falling off the end of a call. An unknown key raises rather than defaulting: a typo in a
+        category name must not become "some other category's TTL".
+        """
+        return self.CATEGORY_TTL_HOURS[category]
+
     def __init__(
         self,
         timeout: float = 15.0,
@@ -111,11 +160,39 @@ class ScreenerClient:
         min_request_interval_ms: float = 150.0,
         cache: Union[SQLiteCache, None, _DefaultCache] = USE_DEFAULT_CACHE,
     ):
+        """Args:
+            timeout: per-request HTTP timeout, seconds.
+            cache_ttl_hours: **A default, not a ceiling.** When ``cache`` is omitted it becomes
+                ``SQLiteCache(default_ttl_hours=...)`` -- the TTL for a category that does not name
+                one -- and a value of ``0`` or less skips the cache entirely (no ``SQLiteCache`` is
+                built at all). Pass an explicit ``cache`` and the argument is ignored: that object
+                carries its own default.
+
+                Every category this client actually caches names its own TTL, and every one of them
+                therefore *ignores* this argument: ``search`` 168.0h, ``profile`` 1.0h, ``chart``
+                6.0h, ``market_overview`` 24.0h, ``market_leaf`` 12.0h (see
+                :data:`CATEGORY_TTL_HOURS`, and ``ttl_hours``). To retune one, set it on the
+                instance. Before that was true, this argument was the *only* lever on the
+                price-bearing ``profile`` entry -- which is precisely how a 24-hour-old
+                ``currentPrice`` became the shipped default without anyone choosing it.
+            max_retries: attempts per request before the 5xx/429 backoff gives up. The error text
+                on exhaustion names this number ("failed after N attempts"), so it is asserted by
+                ``tests/test_nse_bhavcopy.py`` and ``tests/test_nse_corporate_actions.py``.
+            proxy: optional HTTP/HTTPS/SOCKS5 proxy URL; falls back to ``HTTPS_PROXY``/``HTTP_PROXY``.
+            min_request_interval_ms: floor on the gap between two requests from any client in the
+                process.
+            cache: ``USE_DEFAULT_CACHE`` (omit) to build the home-directory
+                :class:`~bfinance.cache.sqlite_cache.SQLiteCache`; ``None`` to cache nothing;
+                a :class:`~bfinance.cache.sqlite_cache.SQLiteCache` to use that one.
+        """
         self.timeout = timeout
         self.max_retries = max_retries
         self.proxy = proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self.min_request_interval_ms = min_request_interval_ms
         self._last_request_time = 0.0
+        # Per-instance copy of the TTL vocabulary, so `client.CATEGORY_TTL_HOURS[...] = x` retunes
+        # this client and not every client in the process.
+        self.CATEGORY_TTL_HOURS = dict(type(self).CATEGORY_TTL_HOURS)
         # Omitted -> honour cache_ttl_hours. Explicit None -> no caching at all.
         # Explicit cache -> use that object. The three cases used to be two.
         if isinstance(cache, _DefaultCache):
@@ -274,7 +351,9 @@ class ScreenerClient:
         try:
             results = resp.json()
             if self.cache and results:
-                self.cache.set(cache_key, results, category="search", ttl_hours=168.0)  # 7 days
+                self.cache.set(
+                    cache_key, results, category="search", ttl_hours=self.ttl_hours("search")
+                )
             return results
         except Exception:
             return []
@@ -396,9 +475,16 @@ class ScreenerClient:
             except Exception as e:
                 logger.debug("Failed standalone fallback for %s: %s", symbol, e)
 
-        # Cache profile
+        # Cache profile. The TTL is stated here because this payload carries a price
+        # (`ratios.current_price`, `market_cap`) and a price cannot be cached for a day and still
+        # be a price. It used to pass no `ttl_hours` at all and inherited 24h from the cache
+        # default -- the only one of the five call sites that did, so the number nobody chose was
+        # also the one that shipped.
         if self.cache:
-            self.cache.set(cache_key, profile.model_dump(), category="profile")
+            self.cache.set(
+                cache_key, profile.model_dump(), category="profile",
+                ttl_hours=self.ttl_hours("profile"),
+            )
 
         return profile
 
@@ -442,7 +528,9 @@ class ScreenerClient:
                 raise UpstreamServiceError(f"Chart API error for '{symbol}' ({q_param}): {resp.status_code}")
             raw_json = resp.json()
             if self.cache:
-                self.cache.set(cache_key, raw_json, category="chart", ttl_hours=6.0)
+                self.cache.set(
+                    cache_key, raw_json, category="chart", ttl_hours=self.ttl_hours("chart")
+                )
 
         return ScreenerChartEngine.parse_chart_json_to_dataframe(raw_json)
 
@@ -525,7 +613,9 @@ class ScreenerClient:
             # re-parsing 99 KB of table is cheaper than inventing a frame serialiser that nobody
             # else in this package would use.
             if self.cache:
-                self.cache.set(cache_key, html, category="market", ttl_hours=24.0)
+                self.cache.set(
+                    cache_key, html, category="market", ttl_hours=self.ttl_hours("market_overview")
+                )
 
         frame = self.parser.parse_market_industries(html)
         frame.attrs["bfinance_source_url"] = url
@@ -652,7 +742,9 @@ class ScreenerClient:
                 )
             html = resp.text
             if self.cache:
-                self.cache.set(cache_key, html, category="market", ttl_hours=12.0)
+                self.cache.set(
+                    cache_key, html, category="market", ttl_hours=self.ttl_hours("market_leaf")
+                )
 
         peers, page_info = self.parser.parse_industry_constituents(html)
         frame = (

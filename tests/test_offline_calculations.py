@@ -4,6 +4,7 @@ import math
 import pathlib
 
 import pandas as pd
+import pytest
 
 import bfinance.market.ratios as ratios_mod
 from bfinance.market.ratios import CustomRatiosCalculator
@@ -281,11 +282,29 @@ def test_ev_cash_bank_balance_fallback_and_missing():
     bs2.loc["Cash and Bank Balance"] = [20.0, 40.0]
     out = CustomRatiosCalculator.calculate_all_custom_ratios(
         1000.0, 100.0, 10.0, 50.0, 10.0, pnl, bs2, cf)
+    # The second label in the cash hook is read, not just the first.
+    assert out["bfinance_cash_cr"] == pytest.approx(40.0)
     assert out["enterprise_value_cr"] == 1000.0 + 300.0 - 40.0
+
+    # DO NOT "RESTORE" `out3["enterprise_value_cr"] == 1300.0`.
+    #
+    # 1300.0 is 1000 (mcap) + 300 (debt) - 0, i.e. bare market cap plus debt. That is precisely
+    # the wrong number the fix removed: with no itemised cash row the cash leg is unsourceable,
+    # and assuming it is zero overstates EV by the entire cash balance for every net-cash company.
+    # The upstream screener.in balance sheet really has no cash row (ten rows, measured on all
+    # three fixtures in tests/fixtures/screener/), so this branch is the *common* case, not a rare
+    # one -- and this assertion demanded a large EV, which is exactly what a fabricated zero cash
+    # leg guarantees. It could not fail.
     bs3 = bs.drop(index=["Cash Equivalents"])
     out3 = CustomRatiosCalculator.calculate_all_custom_ratios(
         1000.0, 100.0, 10.0, 50.0, 10.0, pnl, bs3, cf)
-    assert out3["enterprise_value_cr"] == 1300.0
+    assert out3["enterprise_value_cr"] is None, (
+        "no itemised cash row -> the cash leg is unknown, not zero"
+    )
+    assert "cash" in out3["bfinance_enterprise_value_omitted"]
+    # The legs that are known are still published rather than discarded with the EV.
+    assert out3["bfinance_debt_cr"] == pytest.approx(300.0)
+    assert out3["bfinance_cash_cr"] is None
 
 
 def test_ebitda_adds_depreciation():

@@ -34,6 +34,14 @@ private ``_profile`` attribute that ``_ensure_profile()`` already short-circuits
 depends on the network is not a gate.
 """
 
+import ast
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
 import pandas as pd
 import pytest
 
@@ -50,6 +58,12 @@ from bfinance.ticker import Ticker
 # wrong for a yfinance-parity accessor. TTM is included deliberately: it is a non-date period
 # that has no DatetimeIndex representation, and it is the subtlest of the three order defects.
 _HEADERS = ["Mar 2022", "Mar 2023", "Mar 2024", "TTM"]
+
+#: A deliberately NON-ascending header order, so that "the library does not impose an
+#: order" is a claim with teeth: any implementation that sorted or reversed the
+#: caller's headers would reorder this and fail. ``TTM`` is kept in the list because
+#: moving it to the front is what breaks monotonicity most obviously.
+_UNSORTED_HEADERS = ["TTM", "Mar 2022", "Mar 2023", "Mar 2024"]
 
 
 def _statement() -> FinancialStatement:
@@ -100,7 +114,24 @@ def test_native_shape_is_still_reachable_and_unchanged():
 
     assert list(df.columns) == _HEADERS
     assert all(isinstance(c, str) for c in df.columns)
-    assert df.columns.is_monotonic_increasing is False or True  # order is caller-supplied
+
+    # "Order is caller-supplied" is a claim about what the library does *not* do, so it
+    # is asserted as a negative: feed a header list that is not in any natural order and
+    # require it back verbatim. A sorting or reversing implementation fails here.
+    #
+    # This replaces a line that read:
+    #     assert df.columns.is_monotonic_increasing is False or True
+    # `is` binds tighter than `or`, so that parsed as ``(x is False) or True`` -- True
+    # for every possible value of x, i.e. it could never fail. It was a live, offline
+    # no-op sitting in the one file that is supposed to make the 0.2.0 break loud.
+    reordered = FinancialStatement(
+        headers=list(_UNSORTED_HEADERS), rows={"Sales": [1.0, 2.0, 3.0, 4.0]}
+    )
+    got = list(reordered.to_dataframe().columns)
+    assert got == _UNSORTED_HEADERS, f"to_dataframe() imposed an order on caller headers: {got}"
+    # Guards the guard: if the fixture ever became ascending this check would be
+    # asserting something trivially true, so assert that it is not ascending.
+    assert not pd.Index(got).is_monotonic_increasing, f"fixture is no longer a real test: {got}"
 
     for label in ("Sales", "Net Profit", "Borrowings"):
         assert label in df.index
@@ -300,3 +331,116 @@ def test_to_yfinance_is_what_the_accessor_returns():
     from_serializer = _statement().to_yfinance()
     assert list(from_accessor.columns) == list(from_serializer.columns)
     assert list(from_accessor.index) == list(from_serializer.index)
+
+
+# --------------------------------------------------------------- the alarm itself
+#
+# Everything above assumes the alarms are still armed. Two ways they can stop being
+# armed, both of which have to be loud:
+#
+#   1. a marker loses ``strict=True`` -- then XPASS is reported as a *pass*, so the
+#      0.2.0 break lands silently and the file reports green;
+#   2. an xfail starts passing -- then the break has already landed and the file
+#      reports red (or green, if strict was dropped).
+#
+# Neither is observable from inside the file it guards, so both are checked from here.
+
+#: The number of alarms this file must always carry. Lowering it to make a run green
+#: defeats the only tripwire between 0.1.3 and the 0.2.0 statement-order break.
+_EXPECTED_XFAIL_COUNT = 7
+
+#: Set on the child process spawned below so the guard does not guard itself forever.
+_NESTED_GUARD_ENV = "BFINANCE_XFAIL_GUARD_CHILD"
+
+
+def test_every_alarm_is_a_strict_xfail():
+    """
+    Every xfail in this file must be ``strict=True``, and there must be all 7 of them.
+
+    Read out of this file's source with ``ast`` rather than from the marks pytest
+    collects: a non-strict xfail that XPASSes leaves no trace in the collected marks, so
+    by the time you could observe it from the collection side it has already done the
+    one thing it existed to prevent.
+    """
+    tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8-sig"))
+
+    marks: list[tuple[str, object]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)):
+                continue
+            if dec.func.attr != "xfail":
+                continue
+            strict = [kw.value for kw in dec.keywords if kw.arg == "strict"]
+            marks.append((node.name, ast.literal_eval(strict[0]) if strict else None))
+
+    assert len(marks) == _EXPECTED_XFAIL_COUNT, (
+        f"expected {_EXPECTED_XFAIL_COUNT} xfail alarms, found {len(marks)}: "
+        f"{[name for name, _ in marks]}. Deleting an alarm to get a green run defeats "
+        f"the only tripwire on the 0.2.0 statement-order break."
+    )
+    non_strict = [name for name, strict in marks if strict is not True]
+    assert non_strict == [], (
+        f"xfail without strict=True is a silent alarm -- XPASS would report as a pass: "
+        f"{non_strict}"
+    )
+
+
+def test_the_alarms_still_xfail_and_none_has_started_passing():
+    """
+    Zero XPASS: the seven alarms are still armed, and none of them is spent.
+
+    The only honest way to see an XPASS is to run the file, so this shells out to pytest
+    and reads a JUnit XML report. Two reasons for XML rather than the stdout summary:
+    the counts line is not reliably emitted in this environment, and parsing prose is
+    fragile in a way a machine-readable report is not.
+
+    Under ``strict=True`` pytest reports an XPASS as a **failure**, so:
+
+        errors=0, failures=0   ->  no alarm has XPASSed
+        7 xfail-typed skips     ->  all seven still armed
+
+    Offline: every test in the file runs on an injected synthetic profile.
+    """
+    if os.environ.get(_NESTED_GUARD_ENV) == "1":
+        pytest.skip("this process is the child of the xfail alarm guard")
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as tmp:
+        report = pathlib.Path(tmp) / "xfail_guard.xml"
+        proc = subprocess.run(
+            [
+                sys.executable, "-m", "pytest",
+                "tests/test_stmt_accessor_contract.py",
+                "-p", "no:cacheprovider", "-q", "--color=no",
+                f"--junitxml={report}",
+            ],
+            cwd=root,
+            env={**os.environ, _NESTED_GUARD_ENV: "1"},
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, (
+            "the guarded file did not run clean -- an alarm may have XPASSed.\n"
+            f"stdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-2000:]}"
+        )
+        suite = ET.fromstring(report.read_text(encoding="utf-8")).find("testsuite")
+
+    assert suite is not None, "no <testsuite> element in the JUnit report"
+    assert suite.get("errors") == "0", f"errors reported: {suite.get('errors')}"
+    assert suite.get("failures") == "0", (
+        f"{suite.get('failures')} failure(s) in the guarded file. Under strict=True the "
+        f"only way a test fails there is by XPASSing, i.e. the alarm is defeated."
+    )
+    armed = [
+        case.get("name")
+        for case in suite.findall("testcase")
+        for skip in case.findall("skipped")
+        if skip.get("type") == "pytest.xfail"
+    ]
+    assert len(armed) == _EXPECTED_XFAIL_COUNT, (
+        f"{len(armed)} of {_EXPECTED_XFAIL_COUNT} alarms still armed: {armed}"
+    )

@@ -69,16 +69,20 @@ def test_raise_errors_is_an_explicit_parameter():
     assert sig.parameters["raise_errors"].default is False
 
 
-@pytest.mark.live
-def test_unknown_kwargs_are_logged_not_silently_ignored(caplog):
-    """A misspelled argument must be visible, which is how raise_errors went missing for so long."""
-    with caplog.at_level(logging.WARNING, logger="bfinance.download"):
-        download("RELIANCE", period="1mo", raise_errorz=True)
+def test_unknown_kwargs_are_rejected_not_just_reported():
+    """A misspelled argument must be refused, which is how raise_errors went missing for so long.
 
-    assert any("raise_errorz" in r.getMessage() for r in caplog.records), (
-        "unsupported kwargs should be reported; got: "
-        + "; ".join(r.getMessage() for r in caplog.records)
-    )
+    It used to be a WARNING plus a normal frame: the argument vanished, the caller got a different
+    window than the one they asked for, and the evidence was a line on a logger nobody reads.
+    ``TypeError`` is what Python raises for this and what yfinance 1.7.0 raises (its
+    ``download()`` signature is closed), and it puts the mistake at the call site.
+
+    Un-marked ``live``: the refusal happens before any ticker is constructed, so this is now
+    network-free. ``tests/test_silent_fallbacks.py::test_download_rejects_before_doing_any_work``
+    pins the "before any work" half that makes that true.
+    """
+    with pytest.raises(TypeError, match="raise_errorz"):
+        download("RELIANCE", period="1mo", raise_errorz=True)
 
 
 class _StubTicker:

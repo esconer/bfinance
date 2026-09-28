@@ -18,9 +18,33 @@ from bfinance.market.ohlcv import OHLCVEngine
 from bfinance.market.quotes import QuoteEngine, build_history_metadata
 from bfinance.models.company import CompanyProfile, Concall
 from bfinance.models.options import OptionChain
+from bfinance.models.statements import FinancialStatement
 from bfinance.screener.client import ScreenerClient
 from bfinance.utils.exceptions import BFinanceError, TickerNotFoundError, UpstreamServiceError
 from bfinance.utils.symbols import resolve_exchange_and_symbol
+
+#: Row labels that would carry cash if the upstream balance sheet itemised it. It does not --
+#: measured on the two real screener.in fixtures, the balance-sheet table has exactly ten rows,
+#: in this order and no others:
+#:
+#:     Equity Capital, Reserves, Borrowings, Other Liabilities, Total Liabilities,
+#:     Fixed Assets, CWIP, Investments, Other Assets, Total Assets
+#:
+#: (``tests/fixtures/screener/company_itc.html:904-1218`` and ``company_tcs.html:904-1218``,
+#: read through ``ScreenerHTMLParser._parse_table_element``.) Cash is inside the undifferentiated
+#: "Other Assets" bucket. So these names are a *hook*, not a lookup that works today: nothing in
+#: a real response ever matches, which is exactly why
+#: ``market/ratios.py:438,443`` has always read ``cash_hold = 0.0``.
+#:
+#: They are read anyway, because the day the source does itemise cash, the EV gate in
+#: :attr:`Ticker.valuation_measures` should start producing a real number with no further edit --
+#: and because a synthetic/alternate source that does carry the row must not be silently ignored.
+#: Canonical definition is ``market.ratios._CASH_ROW_LABELS``; the two are kept in sync by
+#: ``tests/test_ratios_honesty.py::test_the_cash_hook_is_the_same_hook_in_both_modules``.
+#: Duplicated rather than imported because this module deliberately lazy-imports
+#: ``market.ratios`` inside the properties that need it, and a module-level import here would
+#: change the import graph for every consumer of ``bfinance.ticker``.
+_CASH_ROW_LABELS: Tuple[str, ...] = ("Cash Equivalents", "Cash and Bank Balance")
 
 
 class Ticker:
@@ -59,6 +83,32 @@ class Ticker:
         # True while the last profile load failed and produced only the empty fallback.
         # Without it, one cached fallback latches _info/_fast_info shut for good.
         self._profile_degraded: bool = False
+        # One sentence per non-fatal degradation, naming what is missing and why. Exposed through
+        # `data_warnings` so a caller holding a missing field can read the reason instead of
+        # having to guess -- a 52-week range that is absent because history failed used to be
+        # indistinguishable from a company that has none.
+        self._degradations: List[str] = []
+
+    # --------------------------------------------------- Observability
+    def _degrade(self, what: str, cause: str) -> None:
+        """Record and log one non-fatal degradation: `what` is unavailable because of `cause`."""
+        message = f"{self.ticker}: {what} is unavailable ({cause})"
+        self._degradations.append(message)
+        logger.warning(message)
+
+    @property
+    def data_warnings(self) -> Tuple[str, ...]:
+        """
+        Every non-fatal degradation recorded on this Ticker, oldest first.
+
+        A missing field with no recorded reason is indistinguishable from a field that is
+        genuinely not published; this is where the difference is written down. Empty on the
+        common path -- a Ticker that served everything it was asked for records nothing.
+
+        Setting ``raise_errors=True`` at construction makes the degradations raise instead of
+        being recorded, so this stays empty there.
+        """
+        return tuple(self._degradations)
 
     # ------------------------------------------------------------- Internal loader
     def _run_async(self, coro):
@@ -99,6 +149,33 @@ class Ticker:
                 )
         return self._profile
 
+    def _read_statement(
+        self, statement: FinancialStatement, label: str
+    ) -> Tuple[pd.DataFrame, Optional[str]]:
+        """
+        Materialise a statement, or say why it could not be read. Returns ``(frame, error)``.
+
+        ``error`` is ``None`` **only** when ``frame`` is the real statement. A ``BFinanceError``
+        from :meth:`FinancialStatement.to_dataframe` -- a ragged row, which is precisely what
+        that method exists to refuse -- is *not* converted into an empty frame, because every
+        reader downstream asks a frame a question ("what are the borrowings?") and an empty frame
+        answers "zero". That is how a failed parse became a confident 80%-wrong EnterpriseValue:
+        ``Borrowings`` read ``0.0``, cash read ``0.0``, and the result was bare market cap.
+
+        The message is returned and recorded on :attr:`data_warnings`, so "this company has no
+        borrowings" stays distinguishable from "this statement did not parse".
+
+        A non-``BFinanceError`` propagates. That is a bug in this package, not bad upstream data,
+        and quietly turning it into an empty frame is what made the original defect invisible.
+        """
+        try:
+            return statement.to_dataframe(orient="columns"), None
+        except BFinanceError as e:
+            if self.raise_errors:
+                raise
+            self._degrade(f"{label} (statement unreadable)", str(e))
+            return pd.DataFrame(), str(e)
+
     async def get_profile_async(self, force_refresh: bool = False) -> CompanyProfile:
         """Async variant of profile getter."""
         if self._profile is None or force_refresh:
@@ -136,7 +213,19 @@ class Ticker:
                 hist = self.history(period="1y")
                 if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
                     latest_p = float(hist["Close"].iloc[-1])
-            except Exception:
+            except (BFinanceError, RuntimeError) as e:
+                # Narrowed from `except Exception`. The whole point of this call is the 52-week
+                # range, previous close and the 50/200d averages, so swallowing its failure is not
+                # a harmless fallback -- it hands back a FastInfo that is indistinguishable from
+                # a company which has none of them. Everything history() raises is typed
+                # (`RealOHLCUnavailableError`, `TickerNotFoundError`, `UpstreamServiceError`,
+                # `ParsingError` are all BFinanceError subclasses), plus a RuntimeError out of
+                # `asyncio.run`; anything else is a bug here and propagates.
+                if self.raise_errors:
+                    raise
+                self._degrade(
+                    "52-week range, previous close and moving averages (history failed)", str(e)
+                )
                 hist = None
             self._fast_info = FastInfo(profile, latest_price=latest_p, history=hist)
         return self._fast_info
@@ -154,7 +243,15 @@ class Ticker:
                 hist = self.history(period="1y")
                 if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
                     latest_p = float(hist["Close"].iloc[-1])
-            except Exception:
+            except (BFinanceError, RuntimeError) as e:
+                # Narrowed from `except Exception`; see `fast_info` for the same reasoning. The
+                # consequence here is that `info` and `history_metadata` are built without a
+                # previous close, which used to be indistinguishable from "no history exists".
+                if self.raise_errors:
+                    raise
+                self._degrade(
+                    "previous close and history-derived fields in info (history failed)", str(e)
+                )
                 hist = None
             self._history_for_metadata = hist
             self._info = QuoteEngine.build_info_dict(profile, latest_price=latest_p, history=hist)
@@ -526,7 +623,21 @@ class Ticker:
 
     @property
     def custom_ratios(self) -> Dict[str, Any]:
-        """Complete dictionary of advanced institutional ratios (Piotroski, Graham, EV, EBITDA, etc.)."""
+        """Complete dictionary of advanced institutional ratios (Piotroski, Graham, EV, EBITDA, etc.).
+
+        Provenance keys travel with the result, so a caller can tell a computed metric from an
+        omitted one without inferring it from the value:
+
+        ``bfinance_enterprise_value_omitted``
+            Why EV is absent -- typically that the cash leg is unsourceable (see
+            ``_CASH_ROW_LABELS``). The key is present with value ``None``; it is not omitted.
+        ``bfinance_debt_cr`` / ``bfinance_cash_cr``
+            The EV legs on their own, so a caller can assemble its own definition.
+        ``bfinance_omitted_metrics``
+            Per-metric ledger of what could not be computed and why.
+
+        :attr:`valuation_measures` publishes the same names on its ``attrs``.
+        """
         from bfinance.market.ratios import CustomRatiosCalculator
         profile = self._ensure_profile()
         r = profile.ratios
@@ -552,8 +663,27 @@ class Ticker:
         return self.custom_ratios.get("graham_number")
 
     @property
-    def enterprise_value(self) -> float:
-        """Enterprise Value (Market Cap + Debt - Cash) in ₹ Cr."""
+    def enterprise_value(self) -> Optional[float]:
+        """Enterprise Value (Market Cap + Debt - Cash) in ₹ Cr, or ``None`` when a leg is unknown.
+
+        ``None`` is the common case for Indian equities and is **not** an error: the screener.in
+        balance sheet itemises only ten rows and none of them is cash - it sits inside the
+        undifferentiated ``Other Assets`` bucket - so the cash leg is normally unsourceable. Rather
+        than assume ``cash = 0`` and publish an EV overstated by the whole cash balance for every
+        net-cash company, the leg is treated as unknown and EV is withheld.
+
+        The reason is on ``custom_ratios()["bfinance_enterprise_value_omitted"]``, alongside
+        ``bfinance_debt_cr`` and ``bfinance_cash_cr`` for the legs individually. If a balance sheet
+        does carry a cash row, it is read and EV is computed normally.
+
+        :attr:`valuation_measures` applies the same gate and publishes the same keys on its
+        ``attrs``, so the two surfaces cannot drift.
+        """
+        # The ``0.0`` default is load-bearing and must NOT be tidied into a real fallback.
+        # ``custom_ratios`` sets ``enterprise_value_cr`` to ``None`` when a leg is unknown rather
+        # than omitting the key -- precisely so that this ``.get`` yields ``None`` and a caller
+        # cannot mistake "not computable" for "zero". Omitting the key would hand every caller
+        # a fabricated 0.0 and move the defect here instead of fixing it.
         return self.custom_ratios.get("enterprise_value_cr", 0.0)
 
     @property
@@ -622,20 +752,31 @@ class Ticker:
     def valuation_measures(self) -> pd.DataFrame:
         """
         Key valuation metrics history table matching yfinance 1.3.0+ `ticker.valuation_measures`.
+
+        **Enterprise Value is reported only when every leg of ``mcap + debt - cash`` is actually
+        in hand.** Any missing leg makes ``EnterpriseValue``, ``EVToRevenue`` and ``EVToEBITDA``
+        ``None``, and ``df.attrs["bfinance_enterprise_value_omitted"]`` names the leg that is
+        missing. Returning nothing is the honest answer; the previous version returned a number
+        that was wrong in two ways at once:
+
+        * ``cash_cr`` was hardcoded ``0.0``. The upstream balance sheet does not itemise cash --
+          see :data:`_CASH_ROW_LABELS` -- so the cash term was an assumption, and for every
+          net-cash company it overstated EV by the whole cash balance, permanently and silently.
+        * A ragged statement row raised ``ParsingError``, the bare handler substituted an empty
+          frame, and the empty frame made ``Borrowings`` read ``0.0`` too. EV then collapsed to
+          bare market cap and was returned as a real number: an 80% understatement on the
+          measured case, with no flag and no ``None``.
+
+        Provenance keys, always present: ``bfinance_enterprise_value_omitted`` (``str | None``),
+        ``bfinance_balance_sheet_error`` and ``bfinance_profit_loss_error`` (``str | None``),
+        ``bfinance_debt_cr`` (``float | None``).
         """
         r = self.info
         profile = self._ensure_profile()
-        mcap = r.get("marketCap") or 0.0
-        try:
-            bs = profile.balance_sheet.to_dataframe(orient="columns")
-        except Exception:
-            bs = pd.DataFrame()
-        try:
-            pnl = profile.profit_loss.to_dataframe(orient="columns")
-        except Exception:
-            pnl = pd.DataFrame()
+        bs, bs_error = self._read_statement(profile.balance_sheet, "balance sheet")
+        pnl, pnl_error = self._read_statement(profile.profit_loss, "profit and loss")
 
-        def _latest(df: pd.DataFrame, row: str) -> Optional[float]:
+        def _latest(df: pd.DataFrame, row: str, stmt_label: str) -> Optional[float]:
             try:
                 if df.empty or row not in df.index:
                     return None
@@ -643,17 +784,53 @@ class Ticker:
                 if v is None or pd.isna(v):
                     return None
                 return float(v)
-            except Exception:
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                # Narrowed from `except Exception`. These four are what a per-cell read can
+                # actually raise: a duplicate index label makes `df.loc[row]` a DataFrame so
+                # `float()` is a TypeError; a non-scalar NaN check is a ValueError; a label that
+                # vanished between the guard and the lookup is a KeyError. None is the right
+                # answer for all of them -- it is a missing number, not a wrong one -- but it is
+                # now said out loud instead of passing as "the company reported zero".
+                self._degrade(f"{stmt_label} row {row!r}", str(e))
                 return None
 
-        borrow_cr = _latest(bs, "Borrowings") or 0.0
-        # No cash row in balance-sheet model; use 0.
-        cash_cr = 0.0
-        ev = mcap + borrow_cr * 1e7 - cash_cr * 1e7
-        rev_cr = _latest(pnl, "Sales")
-        op_cr = _latest(pnl, "Operating Profit")
-        ev_to_rev = ev / (rev_cr * 1e7) if rev_cr and rev_cr > 0 else None
-        ev_to_ebitda = ev / (op_cr * 1e7) if op_cr and op_cr > 0 else None
+        mcap = r.get("marketCap")
+        # Explicit `is None`, not truthiness: a market cap that failed to parse must not read as
+        # a market cap of zero, which is the same defect as `or 0.0` was.
+        equity_leg = mcap if (mcap is not None and mcap > 0) else None
+        debt_cr = _latest(bs, "Borrowings", "balance sheet")
+        cash_cr = next(
+            (
+                v
+                for v in (_latest(bs, label, "balance sheet") for label in _CASH_ROW_LABELS)
+                if v is not None
+            ),
+            None,
+        )
+
+        ev: Optional[float] = None
+        ev_omitted: Optional[str] = None
+        if bs_error is not None:
+            ev_omitted = f"balance sheet unreadable: {bs_error}"
+        elif cash_cr is None:
+            ev_omitted = (
+                "the upstream balance sheet has no itemised cash row ("
+                f"{' / '.join(_CASH_ROW_LABELS)}), so the cash leg of mcap + debt - cash is unknown"
+            )
+        elif debt_cr is None:
+            ev_omitted = (
+                "no readable Borrowings figure (the upstream prints '-' for a company with no "
+                "borrowings, and an absent row is a different problem again; neither is read as 0)"
+            )
+        elif equity_leg is None:
+            ev_omitted = "no marketCap in info, so the equity leg is unknown"
+        else:
+            ev = equity_leg + debt_cr * 1e7 - cash_cr * 1e7
+
+        rev_cr = _latest(pnl, "Sales", "profit and loss")
+        op_cr = _latest(pnl, "Operating Profit", "profit and loss")
+        ev_to_rev = ev / (rev_cr * 1e7) if (ev is not None and rev_cr and rev_cr > 0) else None
+        ev_to_ebitda = ev / (op_cr * 1e7) if (ev is not None and op_cr and op_cr > 0) else None
         metrics = {
             "MarketCap": r.get("marketCap"),
             "EnterpriseValue": ev,
@@ -665,7 +842,20 @@ class Ticker:
             "EVToRevenue": ev_to_rev,
             "EVToEBITDA": ev_to_ebitda,
         }
-        df = pd.DataFrame(list(metrics.items()), columns=["Metric", "Value"])
+        # `dtype=object` is load-bearing. A plain `pd.DataFrame(list(metrics.items()))` infers
+        # float64 for the Value column, which turns every absent metric into a float NaN --
+        # and a NaN is a *number*: it propagates silently through arithmetic, prints as a
+        # plausible cell, and is indistinguishable from a metric that was computed. `None` is
+        # the whole point of the gate above, so it has to survive into the frame as `None`.
+        df = pd.DataFrame(
+            {"Metric": list(metrics), "Value": pd.Series(list(metrics.values()), dtype=object)}
+        )
+        # Machine-readable provenance, so a caller never has to read `None` as "zero cash" --
+        # which is exactly what the removed hardcoded `cash_cr = 0.0` asserted, silently.
+        df.attrs["bfinance_enterprise_value_omitted"] = ev_omitted
+        df.attrs["bfinance_balance_sheet_error"] = bs_error
+        df.attrs["bfinance_profit_loss_error"] = pnl_error
+        df.attrs["bfinance_debt_cr"] = debt_cr
         return df
 
     # ----------------------------------------------- Document & Financial Exporters

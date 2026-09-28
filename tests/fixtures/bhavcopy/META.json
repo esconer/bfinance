@@ -28,5 +28,45 @@
     "full_row_count": 2427,
     "trimmed_row_count": 6,
     "notes": "Uppercase legacy schema, TIMESTAMP='15-MAY-2023'. SYMBOL is a numeric scrip code on non-EQ rows."
+  },
+  "udiff_cm_20260925_full": {
+    "url": "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260925_F_0000.csv.zip",
+    "captured": "2026-09-28",
+    "schema": "udiff",
+    "header_fields": 34,
+    "data_row_fields": 34,
+    "full_row_count": 3654,
+    "untrimmed": true,
+    "notes": "WHOLE file, untrimmed. Tail columns Rsvd1..Rsvd4. 57 distinct SctySrs. VWAP identity TtlTrfVal/TtlTradgVol inside [LwPric,HghPric] holds on 3654/3654 rows within 1e-9; an exact comparison rejects 12, all IEEE-754 noise on rows where Low==High. 3 duplicate (Date,Symbol) rows, all from BL (ADANIENT, DALBHARAT), which are also EQ rows the same day."
+  },
+  "udiff_cm_20260924_full": {
+    "url": "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260924_F_0000.csv.zip",
+    "captured": "2026-09-28",
+    "schema": "udiff",
+    "header_fields": 34,
+    "data_row_fields": 34,
+    "full_row_count": 3637,
+    "untrimmed": true,
+    "notes": "WHOLE file, untrimmed. Second consecutive session, captured to test that the SctySrs roster is NOT stable: 60 distinct here vs 57 on 2026-09-25, union 71, 25 codes day-specific. 3 duplicate (Date,Symbol) rows: 2 from BL (SANOFI, SEDEMAC, both also EQ) and 1 from IMC1 filed under both N1 and N3."
+  },
+  "udiff_fo_20260925_full": {
+    "url": "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20260925_F_0000.csv.zip",
+    "captured": "2026-09-28",
+    "schema": "udiff",
+    "header_fields": 34,
+    "data_row_fields": 34,
+    "full_row_count": 37165,
+    "untrimmed": true,
+    "notes": "WHOLE F&O file, untrimmed. THE UNIT MEASUREMENT: SctySrs is blank on all 37,165 rows. TtlTradgVol is positive on 18,072 of them, and TtlTrfVal/TtlTradgVol falls inside [LwPric,HghPric] on 0 of 18,072 - every one is ABOVE the range, none below. Reason: TtlTradgVol counts LOTS while TtlTrfVal is in units of the UNDERLYING, so the ratio is the underlying share price, not the premium. Measured row: ABCAPITAL26OCT450CE, lot size 3100, LwPric 0.45, HghPric 0.80, TtlTradgVol 85, TtlTrfVal 118724575.00 -> 1396759.71. Consequence: the CM VWAP identity does not hold for F&O, so the turnover unit is segment-dependent and is reported per file rather than asserted."
+  },
+  "legacy_cm_20230515_full": {
+    "url": "https://nsearchives.nseindia.com/content/historical/EQUITIES/2023/MAY/cm15MAY2023bhav.csv.zip",
+    "captured": "2026-09-28",
+    "schema": "legacy",
+    "header_fields": 14,
+    "data_row_fields": 14,
+    "full_row_count": 2427,
+    "untrimmed": true,
+    "notes": "WHOLE pre-cutover file, untrimmed. THE LEGACY TURNOVER ANSWER: the 14-column schema carries TOTTRDVAL, so traded value is NOT unavailable before the UDiFF cutover. TOTTRDVAL/TOTTRDQTY inside [LOW,HIGH] on 2427/2427 within 1e-9. 70 distinct SERIES. 121 rows are dropped by the (Date,Symbol) dedup (2427 -> 2306 distinct pairs), and 153 rows sit in a colliding group: tickers like BRITANNIA and CHOLAFIN appear under both EQ and a debt series, so a legacy series=None read loses real equity rows. This schema has no FinInstrmNm column, which is why the equity/debt classification reads names and is measured on the UDiFF captures."
   }
 }

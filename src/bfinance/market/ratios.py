@@ -3,12 +3,43 @@ Custom Ratios Engine: Screener.in Ratio Search, Piotroski 9-Point Score,
 Altman Z-Score, Graham Number, Enterprise Value, and Quantitative Ratio Calculations.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import math
 import httpx
 import pandas as pd
 
 from bfinance.utils.exceptions import UpstreamServiceError
+
+#: Row labels that would carry cash if the upstream balance sheet itemised it. It does not.
+#: Measured on all three committed screener.in fixtures (``company_itc.html``,
+#: ``company_tcs.html`` and ``company_itc_full_columns.html``, each read through
+#: ``ScreenerHTMLParser._parse_table_section``), the balance-sheet table has exactly ten rows:
+#:
+#:     Equity Capital, Reserves, Borrowings, Other Liabilities, Total Liabilities,
+#:     Fixed Assets, CWIP, Investments, Other Assets, Total Assets
+#:
+#: Cash is inside the undifferentiated "Other Assets" bucket, and
+#: ``models.statements.INDIAN_TO_YFINANCE_LABELS`` has no cash entry either. So this is a *hook*,
+#: not a lookup that works today: no real response ever matches it.
+#:
+#: It is still read, and it used to be *branched on* at module scope with a ``0.0`` fallback --
+#: which is why the cash leg of every Enterprise Value this engine produced was an assumption and
+#: not a measurement, and why the code read as though it handled a case the data never produces.
+#: When no label matches, the cash leg is now reported as unknown and Enterprise Value is omitted;
+#: when one does match, it is subtracted. See :func:`_cell`.
+#:
+#: This mirrors ``ticker._CASH_ROW_LABELS``. The duplicate is deliberate: ``bfinance.ticker`` is the
+#: facade over this engine and must not be a dependency of it, and the two tuples are pinned equal
+#: by ``tests/test_ratios_honesty.py::test_the_cash_hook_is_the_same_hook_in_both_modules``.
+_CASH_ROW_LABELS: Tuple[str, ...] = ("Cash Equivalents", "Cash and Bank Balance")
+
+#: The exceptions a single-cell statement read can actually raise. Narrowed from
+#: ``except Exception`` -- see :func:`_cell` for which is which. A ``BFinanceError`` cannot appear
+#: here: statement frames are materialised by the caller (see
+#: :meth:`bfinance.models.statements.FinancialStatement.to_dataframe`, which raises
+#: ``ParsingError`` on a ragged row) and a failure there propagates into the caller of
+#: :meth:`CustomRatiosCalculator.calculate_all_custom_ratios` rather than reaching a cell read.
+_CELL_READ_ERRORS: Tuple[type, ...] = (KeyError, IndexError, TypeError, ValueError)
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -71,6 +102,47 @@ def latest_pair(df: pd.DataFrame):
     if len(cols) >= 3 and cols[-1] == "TTM":
         return (cols[-2], cols[-3])
     return (cols[-1], cols[-2])
+
+
+def _cell(df: Any, row: str) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Read the latest value of one statement row. Returns ``(value, reason)``.
+
+    ``value`` is ``None`` **if and only if** ``reason`` is not ``None``. The pair is kept
+    together for the reason the whole EV block exists: ``0.0`` and ``None`` are different
+    facts, and a single return slot cannot tell them apart.
+
+    * ``0.0`` -- the company reported zero. A debt-free company really is debt-free.
+    * ``None`` -- the number is not in hand, and ``reason`` says why: the frame is empty, the
+      row is absent, or the cell is not a number.
+
+    That last case matters. The upstream prints ``-`` for a company with no borrowings, and
+    ``_safe_float(..., default=0.0)`` turned it into ``0.0`` -- so "no borrowings" and "the
+    borrowings figure could not be read" produced the same number, and a broken statement was
+    indistinguishable from a clean one.
+
+    The handler is narrowed from ``except Exception`` to :data:`_CELL_READ_ERRORS`: a label that
+    vanished between the guard and the lookup is a ``KeyError``; an empty column selection is an
+    ``IndexError``; a duplicate index label makes ``df.loc[row]`` a DataFrame rather than a
+    Series, which is a ``TypeError`` at the coercion; a non-scalar ``pd.isna`` inside
+    :func:`_safe_float` is a ``ValueError``. All four mean *this number is missing*, which is
+    ``None`` plus a reason. Anything else is a bug in this package, and it propagates -- a
+    swallowed ``AttributeError`` is how a wrong number once outlived the code that caused it.
+    """
+    if df is None:
+        return None, f"no {row!r} row: the statement frame is None"
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None, f"no {row!r} row: the statement frame is empty"
+    if row not in df.index:
+        return None, f"no {row!r} row in the statement"
+    try:
+        raw = df.loc[row].iloc[-1]
+    except _CELL_READ_ERRORS as exc:
+        return None, f"{row!r} row could not be read: {exc}"
+    value = _safe_float(raw, default=float("nan"))
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None, f"{row!r} latest value {raw!r} is not a number"
+    return float(value), None
 
 
 class ScreenerRatioSearch:
@@ -391,8 +463,41 @@ class CustomRatiosCalculator:
     ) -> Dict[str, Any]:
         """
         Compile complete dictionary of custom investment ratios.
+
+        **Enterprise Value is reported only when every leg of ``mcap + debt - cash`` is actually
+        in hand.** A missing leg makes ``enterprise_value_cr`` and ``ev_to_ebitda`` ``None``, and
+        ``bfinance_enterprise_value_omitted`` names the leg that is missing. The key is present
+        with the value ``None`` rather than absent, because ``Ticker.enterprise_value`` reads it
+        with ``.get("enterprise_value_cr", 0.0)`` -- omitting the key would hand that caller a
+        fabricated ``0.0``, which is the defect in a different place.
+
+        Returning nothing is the honest answer. The previous version returned ``mcap + debt``,
+        with the cash leg hardcoded ``0.0``, and that number was wrong in two ways at once:
+
+        * the cash leg was an assumption. The upstream balance sheet does not itemise cash (see
+          :data:`_CASH_ROW_LABELS`), so for every net-cash company EV came back overstated by the
+          entire cash balance, permanently and with no exception ever raised; and
+        * the debt leg used ``_safe_float(..., default=0.0)``, so the upstream's ``-`` for a
+          debt-free company and an unreadable borrowings row were the same ``0.0``.
+
+        Wording and key names are matched to :attr:`bfinance.ticker.Ticker.valuation_measures`, so
+        a caller reads one behaviour across the two surfaces rather than two.
+
+        Provenance keys, always present: ``bfinance_enterprise_value_omitted`` (``str | None``),
+        ``bfinance_debt_cr`` (``float | None``), ``bfinance_cash_cr`` (``float | None``) and
+        ``bfinance_omitted_metrics`` (``List[str]``) -- one line per metric that was left out and
+        why, so a key that is absent is never a mystery.
+
+        A statement that failed to parse is *not* reported here. It raises
+        :class:`~bfinance.utils.exceptions.ParsingError` out of ``Ticker.custom_ratios`` before
+        this method is entered, because the frames arrive already materialised; that channel is
+        :attr:`bfinance.ticker.Ticker.valuation_measures`'s ``bfinance_balance_sheet_error``.
         """
         ratios: Dict[str, Any] = {}
+        # One line per metric that was left out and why, published as `bfinance_omitted_metrics`.
+        # Collected from the first block onward so a reader of any ratio can find out why the
+        # ones that are missing are missing.
+        omitted: List[str] = []
 
         # 1. Piotroski F-Score
         piot = cls.calculate_piotroski_score(pnl, bs, cf)
@@ -403,19 +508,18 @@ class CustomRatiosCalculator:
 
         # 2. Graham Number
         effective_eps = _safe_float(eps, default=0.0) if eps is not None else None
-        try:
-            if pd.isna(effective_eps):
-                effective_eps = None
-        except Exception:
-            pass
-        if (effective_eps is None or effective_eps <= 0) and not pnl.empty and "EPS in Rs" in pnl.index:
-            try:
-                raw_eps = pnl.loc["EPS in Rs"].iloc[-1]
-                v = _safe_float(raw_eps, default=0.0)
-                if v > 0:
-                    effective_eps = v
-            except Exception:
-                pass
+        # `effective_eps` is a float or None by construction (`_safe_float` returns a float or the
+        # default it was given), so the NaN test is a plain `isinstance` check. It used to be a
+        # `pd.isna` inside `try/except Exception: pass` guarding against a failure that cannot
+        # happen -- a bare handler over an impossible case is still a bare handler.
+        if effective_eps is not None and math.isnan(float(effective_eps)):
+            effective_eps = None
+        if (effective_eps is None or effective_eps <= 0) and "EPS in Rs" in pnl.index:
+            raw_eps, eps_reason = _cell(pnl, "EPS in Rs")
+            if raw_eps is not None and raw_eps > 0:
+                effective_eps = raw_eps
+            else:
+                omitted.append(f"graham_number: EPS in Rs {eps_reason or 'is not positive'}")
         cp_safe = _safe_float(current_price, default=0.0) if current_price is not None else 0.0
         tp_safe = _safe_float(trailing_pe, default=0.0) if trailing_pe is not None else 0.0
         if (effective_eps is None or effective_eps <= 0) and cp_safe > 0 and tp_safe > 0:
@@ -426,91 +530,160 @@ class CustomRatiosCalculator:
             ratios["graham_upside_%"] = round(((ratios["graham_number"] - cp_safe) / cp_safe) * 100, 2)
 
         # 3. Enterprise Value
-        latest_debt = 0.0
-        if not bs.empty and "Borrowings" in bs.index:
-            try:
-                latest_debt = _safe_float(bs.loc["Borrowings"].iloc[-1], default=0.0)
-            except Exception:
-                latest_debt = 0.0
+        #
+        # Every leg is read through `_cell`, which returns a value only when the number is
+        # actually in hand. No leg is defaulted to 0.0: an unmeasured leg is not a zero leg.
+        # Each `_cell` reason is collected and published, so a caller can see *which* input was
+        # missing instead of receiving a plausible number.
 
-        cash_hold = 0.0
-        if not bs.empty:
-            if "Cash Equivalents" in bs.index:
-                try:
-                    cash_hold = _safe_float(bs.loc["Cash Equivalents"].iloc[-1], default=0.0)
-                except Exception:
-                    cash_hold = 0.0
-            elif "Cash and Bank Balance" in bs.index:
-                try:
-                    cash_hold = _safe_float(bs.loc["Cash and Bank Balance"].iloc[-1], default=0.0)
-                except Exception:
-                    cash_hold = 0.0
-            # cash stays zero when neither cash row is present
+        debt_cr, debt_reason = _cell(bs, "Borrowings")
+        if debt_reason is not None:
+            omitted.append(f"debt leg: {debt_reason}")
 
-        mcap = _safe_float(market_cap_cr, default=0.0) if market_cap_cr is not None else 0.0
-        ev = mcap + latest_debt - cash_hold
-        ratios["enterprise_value_cr"] = round(ev, 2)
-        ratios["cash_and_equivalents_cr"] = round(cash_hold, 2)
+        # Cash: the first label in the hook that is actually present. One note for all of them,
+        # because "the source itemises no cash" is a single fact, not one per label tried.
+        cash_cr: Optional[float] = None
+        cash_reason: Optional[str] = (
+            "cash leg: the upstream balance sheet has no itemised cash row (tried "
+            f"{' / '.join(_CASH_ROW_LABELS)}); cash sits inside 'Other Assets', so the cash leg "
+            "of mcap + debt - cash is unknown"
+        )
+        for label in _CASH_ROW_LABELS:
+            value, _label_reason = _cell(bs, label)
+            if value is not None:
+                cash_cr, cash_reason = value, None
+                break
+        if cash_reason is not None:
+            omitted.append(cash_reason)
 
-        # 4. EV / EBITDA
-        if not pnl.empty and "Operating Profit" in pnl.index:
-            try:
-                op_val = _safe_float(pnl.loc["Operating Profit"].iloc[-1], default=0.0)
+        # Explicit `is not None and > 0`, not truthiness: a market cap that failed to parse must
+        # not read as a market cap of zero, which is the same defect as `or 0.0` was.
+        equity_leg: Optional[float] = None
+        mcap = _safe_float(market_cap_cr, default=float("nan")) if market_cap_cr is not None else float("nan")
+        if not (isinstance(mcap, float) and math.isnan(mcap)) and mcap > 0:
+            equity_leg = float(mcap)
+        else:
+            omitted.append(f"equity leg: no usable market cap (got {market_cap_cr!r})")
+
+        ev: Optional[float] = None
+        ev_omitted: Optional[str] = None
+        if cash_cr is None:
+            ev_omitted = cash_reason
+        elif debt_cr is None:
+            ev_omitted = f"debt leg: no readable Borrowings figure ({debt_reason})"
+        elif equity_leg is None:
+            ev_omitted = "equity leg: no market cap in the profile, so the equity leg is unknown"
+        else:
+            ev = equity_leg + debt_cr - cash_cr
+
+        ratios["enterprise_value_cr"] = round(ev, 2) if ev is not None else None
+        ratios["cash_and_equivalents_cr"] = round(cash_cr, 2) if cash_cr is not None else None
+
+        # 4. EV / EBITDA. Follows the same gate as EV: a ratio built on an omitted EV is omitted
+        # too, rather than being computed from a value this function just declined to publish.
+        op_val, op_reason = _cell(pnl, "Operating Profit")
+        if op_val is None:
+            omitted.append(f"ev_to_ebitda: {op_reason}")
+        else:
+            dep_val, dep_reason = _cell(pnl, "Depreciation")
+            if dep_val is None:
+                # add back depreciation; when absent use operating profit alone, and say so
                 dep_val = 0.0
-                if "Depreciation" in pnl.index:
-                    dep_val = _safe_float(pnl.loc["Depreciation"].iloc[-1], default=0.0)
-                # add back depreciation; when absent use operating profit alone
-                ebitda = op_val + dep_val
-                if ebitda > 0:
-                    ratios["ev_to_ebitda"] = round(ev / ebitda, 2)
-            except Exception:
-                pass
+                omitted.append(f"ev_to_ebitda: {dep_reason}; using operating profit alone")
+            ebitda = op_val + dep_val
+            if ebitda <= 0:
+                omitted.append(
+                    f"ev_to_ebitda: operating profit plus depreciation is {ebitda}, not a positive "
+                    f"denominator"
+                )
+            elif ev is None:
+                omitted.append(f"ev_to_ebitda: {ev_omitted}")
+            else:
+                ratios["ev_to_ebitda"] = round(ev / ebitda, 2)
 
         # 5. Interest Coverage Ratio
-        if not pnl.empty and "Operating Profit" in pnl.index and "Interest" in pnl.index:
-            try:
-                op2 = _safe_float(pnl.loc["Operating Profit"].iloc[-1], default=0.0)
-                oi2 = _safe_float(pnl.loc["Other Income"].iloc[-1], default=0.0) if "Other Income" in pnl.index else 0.0
-                # EBIT adds other income to operating profit
-                ebit = op2 + oi2
-                interest = _safe_float(pnl.loc["Interest"].iloc[-1], default=0.0)
-                if interest > 0:
-                    ratios["interest_coverage"] = round(ebit / interest, 2)
-                # omit key when interest is zero or negative
-            except Exception:
-                pass
+        op2, ic_op_reason = _cell(pnl, "Operating Profit")
+        interest, interest_reason = _cell(pnl, "Interest")
+        if op2 is None:
+            omitted.append(f"interest_coverage: {ic_op_reason}")
+        elif interest is None:
+            omitted.append(f"interest_coverage: {interest_reason}")
+        elif interest <= 0:
+            # omit key when interest is zero or negative -- and say so, which the old
+            # `except Exception: pass` never did.
+            omitted.append(
+                f"interest_coverage: interest expense is {interest}, so EBIT / Interest has no "
+                f"meaning (a company with no debt has no coverage ratio, not an infinite one)"
+            )
+        else:
+            # Other Income is optional: absent means "no other income", which is a modelling
+            # choice rather than a missing input, so it does not withhold the ratio -- but it is
+            # still recorded, because the reader deserves to know EBIT excluded it.
+            oi2, oi_reason = _cell(pnl, "Other Income")
+            if oi2 is None:
+                oi2 = 0.0
+                omitted.append(f"interest_coverage: {oi_reason}; using operating profit alone")
+            # EBIT adds other income to operating profit
+            ebit = op2 + oi2
+            ratios["interest_coverage"] = round(ebit / interest, 2)
 
         # 6. Debt to Equity
-        if not bs.empty and "Borrowings" in bs.index and "Reserves" in bs.index and "Equity Capital" in bs.index:
-            try:
-                debt = _safe_float(bs.loc["Borrowings"].iloc[-1], default=0.0)
-                res = _safe_float(bs.loc["Reserves"].iloc[-1], default=0.0)
-                eqc = _safe_float(bs.loc["Equity Capital"].iloc[-1], default=0.0)
-                net_worth = res + eqc
-                if net_worth > 0:
-                    ratios["debt_to_equity"] = round(debt / net_worth, 2)
-            except Exception:
-                pass
+        de_debt, de_debt_reason = _cell(bs, "Borrowings")
+        de_res, de_res_reason = _cell(bs, "Reserves")
+        de_eqc, de_eqc_reason = _cell(bs, "Equity Capital")
+        if de_debt is None or de_res is None or de_eqc is None:
+            omitted.append(
+                f"debt_to_equity: {de_debt_reason or de_res_reason or de_eqc_reason}"
+            )
+        else:
+            net_worth = de_res + de_eqc
+            if net_worth > 0:
+                ratios["debt_to_equity"] = round(de_debt / net_worth, 2)
+            else:
+                omitted.append(f"debt_to_equity: net worth is {net_worth}, not a positive base")
 
         # 7. Quality of Earnings (CFO / PAT)
-        if not cf.empty and not pnl.empty and "Cash from Operating Activity" in cf.index and "Net Profit" in pnl.index:
-            try:
-                cfo = _safe_float(cf.loc["Cash from Operating Activity"].iloc[-1], default=0.0)
-                pat = _safe_float(pnl.loc["Net Profit"].iloc[-1], default=0.0)
-                if pat > 0:
-                    ratios["cfo_to_pat"] = round(cfo / pat, 2)
-            except Exception:
-                pass
+        cfo, cfo_reason = _cell(cf, "Cash from Operating Activity")
+        pat, pat_reason = _cell(pnl, "Net Profit")
+        if cfo is None:
+            omitted.append(f"cfo_to_pat: {cfo_reason}")
+        elif pat is None:
+            omitted.append(f"cfo_to_pat: {pat_reason}")
+        elif pat <= 0:
+            omitted.append(
+                f"cfo_to_pat: net profit is {pat}, so a quality-of-earnings ratio is meaningless"
+            )
+        else:
+            ratios["cfo_to_pat"] = round(cfo / pat, 2)
 
         # 8. Free Cash Flow (CFO - Capex)
-        if not cf.empty and "Cash from Operating Activity" in cf.index and "Cash from Investing Activity" in cf.index:
-            try:
-                cfo2 = _safe_float(cf.loc["Cash from Operating Activity"].iloc[-1], default=0.0)
-                cfi2 = _safe_float(cf.loc["Cash from Investing Activity"].iloc[-1], default=0.0)
-                # keep only outflows; positive inflows such as asset sales are ignored
-                fcf = cfo2 + min(cfi2, 0.0)
-                ratios["free_cash_flow_cr"] = round(fcf, 2)
-            except Exception:
-                pass
+        cfo2, fcf_cfo_reason = _cell(cf, "Cash from Operating Activity")
+        cfi2, fcf_cfi_reason = _cell(cf, "Cash from Investing Activity")
+        if cfo2 is None or cfi2 is None:
+            omitted.append(f"free_cash_flow_cr: {fcf_cfo_reason or fcf_cfi_reason}")
+        else:
+            # keep only outflows; positive inflows such as asset sales are ignored
+            fcf = cfo2 + min(cfi2, 0.0)
+            ratios["free_cash_flow_cr"] = round(fcf, 2)
+
+        ratios["bfinance_enterprise_value_omitted"] = ev_omitted
+        ratios["bfinance_debt_cr"] = debt_cr
+        ratios["bfinance_cash_cr"] = cash_cr
+        ratios["bfinance_omitted_metrics"] = omitted
+
+        # Nothing leaves here as NaN, provenance keys included. This is the dict-side twin of
+        # `dtype=object` in `Ticker.valuation_measures`: there, an inferred float64 column turned
+        # every absent metric into a float NaN; here a stray NaN from any arithmetic would do the
+        # same thing, because NaN is a *number* -- it propagates silently through arithmetic,
+        # prints as a plausible cell, and satisfies `is not None`. None is the answer the rest of
+        # this function is built to give, so it is enforced here rather than trusted.
+        #
+        # This runs last, over the whole dict. An earlier version swept only the ratios and left
+        # the provenance keys behind, so `bfinance_cash_cr` could still come back as NaN -- the
+        # tests in `tests/test_ratios_honesty.py` caught exactly that.
+        for key, value in ratios.items():
+            if isinstance(value, float) and math.isnan(value):
+                ratios[key] = None
+                omitted.append(f"{key}: computed to NaN and is reported as None")
 
         return ratios

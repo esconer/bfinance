@@ -174,6 +174,27 @@ def _row_containing(md: str, text: str) -> list:
     raise AssertionError(f"no table row containing {text!r} in dossier")
 
 
+#: A GFM table's delimiter row: every cell is dashes, optionally colon-anchored. Locating
+#: table blocks this way needs no Markdown parser, which matters because the assertion
+#: below is deliberately a precondition check and must not pretend to parse anything.
+_GFM_DELIMITER = re.compile(r"^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$")
+
+#: How many tables the full synthetic dossier is expected to contain. Pinned so that a
+#: table silently going missing fails here instead of quietly reducing the coverage of
+#: the orphan check below.
+EXPECTED_TABLE_COUNT = 7
+
+
+def _gfm_table_header_lines(md: str) -> list[int]:
+    """Index of the header line of each GFM table in `md` (a pipe row above a delimiter)."""
+    lines = md.splitlines()
+    return [
+        i - 1
+        for i, line in enumerate(lines)
+        if _GFM_DELIMITER.match(line) and i > 0 and lines[i - 1].lstrip().startswith("|")
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Defect 1 — a missing value rendered as the bare token "nan"
 # --------------------------------------------------------------------------- #
@@ -345,3 +366,69 @@ def test_section_scoped_dossiers_are_also_clean(section):
     assert re.findall(r"(?i)\bnan\b", md) == []
     assert re.findall(r"\d(?:\.\d+)?e[+-]\d+", md) == []
     assert re.findall(r"\w+::", md) == []
+
+
+# --------------------------------------------------------------------------- #
+# Defect 5 — every table was glued to its own heading
+# --------------------------------------------------------------------------- #
+
+def test_table_precondition_every_table_is_preceded_by_a_blank_line():
+    """
+    **This is a precondition test. It does not assert that tables render.**
+
+    A GFM table is a *leaf* block: a renderer only begins one when the table is its own
+    block, so a table glued directly onto the ``##`` heading above it is not a table.
+    python-markdown's ``tables`` extension puts the requirement plainly -- "tables must be
+    separated from surrounding text by blank lines" -- and renders the glued form as a
+    paragraph of literal pipe characters. No such parser is installed in this repo and
+    none may be fetched, so the honest thing to assert is the input condition this module
+    can actually guarantee: the blank line is there. Claiming a rendering outcome here
+    would be the same mistake as the docstrings fixed alongside it.
+
+    How it broke: the section headings carried their separating newline *inside* the
+    heading string (``f"\\n## Heading"``), so that newline survived and produced the blank
+    line *before* each heading. The gap the renderer actually needs -- between a heading
+    and its table -- was a standalone ``""`` entry, and the join-time filter
+    (``line.strip() != ""``) deleted every one of them. That is why 11 blank lines
+    survived while all 7 table gaps vanished.
+
+    Measured on this exact profile before the fix: 7 tables, 7 with no preceding blank
+    line. After: 7 tables, 0 without one.
+    """
+    md = AIContextBuilder.build_markdown_context(_synthetic_profile())
+    lines = md.splitlines()
+    headers = _gfm_table_header_lines(md)
+
+    assert len(headers) == EXPECTED_TABLE_COUNT, (
+        f"expected {EXPECTED_TABLE_COUNT} tables in the full dossier, found "
+        f"{len(headers)}. A table going missing would silently weaken the check below."
+    )
+    orphans = [h for h in headers if h == 0 or lines[h - 1].strip() != ""]
+    assert orphans == [], (
+        "table(s) not preceded by a blank line, at line(s) "
+        f"{[h + 1 for h in orphans]}; each is glued to the line above it: "
+        f"{[lines[h - 1][:40] for h in orphans]}"
+    )
+
+
+@pytest.mark.parametrize(
+    "section",
+    ["income_stmt", "quarters", "balance_sheet", "cash_flow", "shareholding", "ratios", "peers"],
+)
+def test_table_precondition_holds_for_section_scoped_dossiers(section):
+    """
+    A single-section dossier is what a token-budgeted caller actually asks for, and it
+    takes the same code path, so the gap has to be closed there too.
+    """
+    md = AIContextBuilder.build_markdown_context(
+        _synthetic_profile(), include_sections={section}
+    )
+    lines = md.splitlines()
+    headers = _gfm_table_header_lines(md)
+
+    assert headers, f"section {section!r} was expected to emit a table"
+    orphans = [h for h in headers if h == 0 or lines[h - 1].strip() != ""]
+    assert orphans == [], (
+        f"section {section!r}: table(s) glued to the line above, at line(s) "
+        f"{[h + 1 for h in orphans]}"
+    )

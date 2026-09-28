@@ -389,6 +389,18 @@ class OHLCVEngine:
     :data:`VOLUME_COLUMN` demonstrates. ``attrs["price_basis"]`` states the result on every frame.
     """
 
+    #: The closed vocabulary of ``period`` values, and their lookback in calendar days.
+    #:
+    #: Keys are matched case-insensitively, and the vocabulary is deliberately closed: anything
+    #: not in here raises rather than falling back to the default, because a period that silently
+    #: becomes "five years" is indistinguishable, in the returned frame, from a period that
+    #: silently became the bhavcopy archive floor (2024-01-01) -- both are "all the data there is".
+    #: A caller asking for ``'2w'`` or ``'1M'`` used to get the whole archive; they now get a
+    #: ``ValueError`` naming the valid values. ``None`` / ``''`` is the one non-value that is
+    #: accepted, and it means "no period given, use the default lookback" (1825 days, widened by
+    #: ``start`` if one is passed). ``'1mo'`` is one month; ``'1m'`` is deliberately absent, since
+    #: yfinance reads it as one *minute* and a human reads it as one month, and this module's bar
+    #: source is daily.
     PERIOD_DAYS_MAP = {
         "1d": 2,
         "5d": 7,
@@ -451,6 +463,12 @@ class OHLCVEngine:
         Index: pd.DatetimeIndex localized to Asia/Kolkata (yfinance NSE convention).
 
         Args:
+            period: Lookback window, from the closed vocabulary in :data:`PERIOD_DAYS_MAP`
+                (``'1d'``, ``'5d'``, ``'1mo'``, ``'3mo'``, ``'6mo'``, ``'1y'``, ``'2y'``,
+                ``'3y'``, ``'5y'``, ``'10y'``, ``'ytd'``, ``'max'``), case-insensitive.
+                ``''``/``None`` means "no period given" and takes the 5-year default lookback.
+                Anything else raises -- see the note on the map for why an unrecognised period
+                must not quietly become the longest window bfinance has.
             ohlc: Bar source. ``"bhavcopy"`` (default) returns real published O/H/L from the
                 NSE bhavcopy archive and reports ``attrs["bfinance_synthetic_ohlc"] = False``.
                 ``"synthetic"`` is the explicit opt-in for the legacy close-only Screener path
@@ -513,7 +531,9 @@ class OHLCVEngine:
                 window. Never answered with fabricated bars.
             TickerNotFoundError: the archive answered but holds no rows for this symbol and
                 ``raise_errors=True``.
-            ValueError: unknown ``ohlc`` source.
+            ValueError: unknown ``ohlc`` source, or a ``period`` that is not in
+                :data:`PERIOD_DAYS_MAP`. Both are caller bugs, decided locally, before any
+                request is spent learning something knowable.
         """
         if repair:
             raise NotImplementedError("repair=True is not supported by bfinance")
@@ -548,6 +568,26 @@ class OHLCVEngine:
             resample = "monthly"
         else:
             raise NotImplementedError(f"interval={interval!r} is not supported by bfinance")
+
+        # A period the caller NAMED but bfinance does not know is a caller bug, and it used to be
+        # invisible. `days` defaulted to 1825 and anything not in the map was skipped, so every
+        # unrecognised period requested five years, which the archive clamp then pinned to
+        # 2024-01-01. Measured through to the requested window before this fix (today = 2026-09-28):
+        # '1mo' -> 2026-08-29, '1d' -> 2026-09-26, and 'BANANA', '2w', '1M' and '' all -> 2024-01-01
+        # -- four different questions, one answer, no raise and no warning. '1M' is the sharpest:
+        # a human types it meaning one month, it lowercases to '1m', and the map key is '1mo'.
+        if period:
+            key = str(period).lower()
+            if key not in self.PERIOD_DAYS_MAP:
+                raise ValueError(
+                    f"period={period!r} is not a period bfinance knows, and answering it with a "
+                    f"different window would be a silent lie. Valid periods (case-insensitive): "
+                    f"{', '.join(sorted(self.PERIOD_DAYS_MAP))}. One month is '1mo' -- '1m' is not "
+                    f"accepted here, because it reads as one minute to yfinance and one month to a "
+                    f"human while bfinance's bars are daily. For a window of your own, pass "
+                    f"start=/end=; for the default lookback, pass period='' or period=None."
+                )
+
         if prepost:
             logger.debug("%s: prepost=True is a no-op for NSE daily bars.", symbol)
         if back_adjust:
@@ -555,10 +595,12 @@ class OHLCVEngine:
 
         clean_symbol = normalize_symbol(symbol)
 
-        # Calculate lookback days
+        # No period given (None or ""): 1825 days, widened below by `start` if one was passed.
+        # That is a stated default, not a fallback for a value we failed to understand -- an
+        # unrecognised value raised above and never reaches this line.
         days = 1825
-        if period and period.lower() in self.PERIOD_DAYS_MAP:
-            days = self.PERIOD_DAYS_MAP[period.lower()]
+        if period:
+            days = self.PERIOD_DAYS_MAP[str(period).lower()]
 
         # If start date provided, calculate days from today
         if start:
