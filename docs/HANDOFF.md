@@ -94,7 +94,7 @@ Isolation is enforced **by test**, not convention: an AST scan proves no module 
 ## Open decisions
 
 1. **Demerger — Option C is DEAD, do not implement it.** Measured: the mechanically correct factor is
-   **1.047332195**; yfinance applies 1.038513 (−0.84%), **screener.in applies 1.066766 (+1.86%)**, and
+   **1.047332195**; yfinance applies 1.038513 (−0.84%), **screener.in applies 1.066785 (+1.86%)**, and
    bfinance applies 1.0 (**−4.52%** — worse than either vendor). Applying 1.0 is a wrong claim, not a
    principled one. Replace with **Option D** in `UPSTREAM_SOURCES.md` §6: a curated ~123-row
    structural-event table + a bhavcopy child mark + `F = P_pre/(P_ex + r x P_child)` + full labelling

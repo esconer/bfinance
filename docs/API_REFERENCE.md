@@ -214,18 +214,34 @@ Dictionary containing all computed advanced ratios:
 * `piotroski_breakdown`: Boolean map of the 9 Piotroski criteria
 * `graham_number`: Fair value in ₹
 * `graham_upside_%`: Percentage upside/downside to Graham number
-* `enterprise_value_cr`: EV in ₹ Crores
-* `ev_to_ebitda`: Enterprise Value / Operating Profit
+* `enterprise_value_cr`: EV in ₹ Crores, or **`None`** when a leg of `mcap + debt - cash` is not
+  in hand. The screener.in balance sheet does not itemise cash — it reports cash inside an
+  undifferentiated `Other Assets` bucket — so the cash leg is normally unsourceable and this key
+  is normally `None` rather than a number. It is not computed from an assumed zero.
+* `cash_and_equivalents_cr`: itemised cash in ₹ Crores, or `None` for the same reason
+* `ev_to_ebitda`: Enterprise Value / EBITDA, or `None` — it follows the same omission as
+  `enterprise_value_cr`, and is never computed from an EV that was withheld
 * `interest_coverage`: EBIT / Interest Expense
 * `debt_to_equity`: Debt / Net Worth
 * `cfo_to_pat`: Quality of earnings ratio (Operating Cash Flow / Net Profit)
 * `free_cash_flow_cr`: CFO minus Capex in ₹ Crores
 
+**Provenance keys**, always present in the returned dict, whether or not anything was omitted:
+
+* `bfinance_enterprise_value_omitted` (`str | None`): why EV is `None` — names the missing leg
+* `bfinance_debt_cr` (`float | None`): the debt leg on its own
+* `bfinance_cash_cr` (`float | None`): the cash leg on its own
+* `bfinance_omitted_metrics` (`List[str]`): one line per metric that was left out and why
+
+`ticker.valuation_measures` publishes the same key names on `df.attrs`, so the omission reason is
+spelled identically across both Enterprise Value surfaces.
+
 #### Scalar Properties:
 * `ticker.piotroski_score` -> `int` (0 to 9)
 * `ticker.graham_number` -> `Optional[float]` (in ₹)
-* `ticker.enterprise_value` -> `float` (in ₹ Cr)
-* `ticker.ev_to_ebitda` -> `Optional[float]`
+* `ticker.enterprise_value` -> `Optional[float]` (in ₹ Cr). `None` when a leg of
+  `mcap + debt - cash` is not in hand; see `custom_ratios` above for why the cash leg normally is
+* `ticker.ev_to_ebitda` -> `Optional[float]`, `None` whenever `enterprise_value` is
 * `ticker.interest_coverage` -> `Optional[float]`
 
 ---

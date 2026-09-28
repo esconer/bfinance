@@ -423,7 +423,34 @@ Six sections, every metric `{val, insight, color, categoryAvg, category}`: `retu
 
 ---
 
-## 5. Pocketful — close/volume only, never O/H/L
+## 5. Pocketful - RETIRED: the host forbids all automated access
+
+**`https://dev-trade.pocketful.in/robots.txt` returns, in full:**
+
+```
+User-Agent: *
+Disallow: /
+```
+
+A **full-host prohibition.** Every route under that host is off-limits to an automated client, so
+this section records a source that must not be used, and a measurement that **should not have been
+taken**.
+
+### The measurement below was performed in violation
+
+The reliability study that follows - 495 sessions across four symbols - was run against
+`/api/cardinal/v1/chart-data`, a path this host's own `robots.txt` forbids outright. It is retained
+because deleting it would delete the finding, and the finding stands on its own: the O/H/L are
+structurally unusable, independent of the compliance question. But it must not be re-run, and
+nothing in this package may depend on it.
+
+No compliant substitute is needed, because **NSE bhavcopy (`nse/bhavcopy.py`) and MarketLens
+(`nse/marketlens.py`) already cover close and volume from official, key-free, robots-permitted
+sources - and bhavcopy carries real O/H/L.** The cross-check this source was kept for is better
+served by those two than by the source itself.
+
+### What the (unauthorised) study found, for the record
+
 
 ```
 https://dev-trade.pocketful.in/api/cardinal/v1/chart-data?slug={full-name-slug}&exchange=NSE
@@ -435,11 +462,14 @@ No auth. `data.candles` = `[timestamp, O, H, L, C, V]`, ISO timestamps with `+05
 `reliance-industries-ltd` works, `tata-consultancy-services-limited` does not, and there is no
 resolver. Bare symbols 404.
 
-**O/H/L are unusable.** Across RELIANCE / INFY / SBIN / MOTHERSON over 495 sessions:
+**O/H/L are unusable.** *(study run in violation of the host's robots.txt - retained as
+evidence, not as permission)* Across RELIANCE / INFY / SBIN / MOTHERSON over 495 sessions:
 Open matched 346–416/495, High 388–435, Low 377–436, max relative error **1.08–3.98%**.
 **68 rows violate the basic OHLC invariant** (close outside the high–low band, up to 8.16%),
 clustered 2022(28) / 2023(39) / 2024(1) — the fingerprint of O/H/L adjusted for corporate actions
-while close was not. Close is 96–99% and volume ~99% good. **Use for close/volume cross-check only.**
+while close was not. Close is 96–99% and volume ~99% good. ~~**Use for close/volume cross-check only.**~~ **RETIRED - do not use.** The O/H/L finding
+stands as evidence the vendor is unusable; the recommendation to cross-check against it does
+not, because cross-checking requires access this host refuses.
 
 ---
 
@@ -567,7 +597,7 @@ The published closes for the last session before the ex-date, all five sources:
 | **NSE bhavcopy** (exchange) | **481.60** | 1.000000 | −4.52% | the actual print |
 | **Trendlyne** | **481.60** | 1.000000 | −4.52% | byte-identical to bhavcopy |
 | yfinance | 463.74 | 1.038513 | **−0.84%** | undocumented constant |
-| **mechanically correct** | **459.85** | **1.047332** | — | derived from exchange data |
+| **mechanically correct** | **459.835** | **1.047332** | — | derived from exchange data |
 | TradingView | 454.60 | 1.059393 | +1.15% | **unexplained** |
 | screener.in | 451.45 | 1.066785 | +1.86% | **unexplained** |
 

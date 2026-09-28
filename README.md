@@ -145,9 +145,16 @@ print("Piotroski Score:", stock.piotroski_score, "/ 9")
 print("Graham Number: ₹", stock.graham_number)
 
 # 3. Enterprise Value & Multiples
+# enterprise_value is Optional[float]: it is None when a leg of mcap + debt - cash is not in
+# hand, which is the normal case -- the upstream balance sheet does not itemise cash (it sits
+# inside an undifferentiated "Other Assets" bucket), so the cash leg is unsourceable and is
+# omitted rather than assumed to be zero. bfinance_enterprise_value_omitted says which leg is
+# missing. ev_to_ebitda follows the same omission.
 print("Enterprise Value: ₹", stock.enterprise_value, "Cr")
 print("EV / EBITDA:", stock.ev_to_ebitda, "x")
 print("Interest Coverage Ratio:", stock.interest_coverage, "x")
+if stock.enterprise_value is None:
+    print("  (omitted:", stock.custom_ratios["bfinance_enterprise_value_omitted"] + ")")
 
 # 4. Search Screener's 500+ ratio catalog
 results = bf.ratios.search("graham")
