@@ -374,6 +374,18 @@ SITEMAP_PATH = "/equity-sitemap-stocks.xml"
 #: Query-string endpoint, so it is kept out of :data:`ENDPOINTS` (those are path templates
 #: validated by :func:`build_path`). A miss answers ``[{"headline": "No matches found"}]``, which is
 #: a result, not an error.
+def _normalise_symbol_query(value: str) -> str:
+    """
+    Reduce a typed symbol to the form a match can be judged on: upper case, alphanumerics only.
+
+    A user types ``nifty bees`` and ``NIFTYBEES``; both must reduce to the same string, or the
+    one legitimate reading of that query is indistinguishable from a typo. Separators go
+    because a space, a dot and a hyphen are all things people type inside a name and none of
+    them is part of a ticker.
+    """
+    return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
+
+
 _SYMBOL_SEARCH_PATH = "/member/api/ac_snames/?term={query}"
 
 #: Paths this package will not request unless a caller opts in, mapped to the robots.txt rule that
@@ -1892,12 +1904,37 @@ class TrendlyneClient:
 
         matches = await self.search_remote_async(symbol, limit=5, allow_member_search=True)
         if matches:
-            self.symbol_resolution = "member_search"
-            return matches[0]
+            # trendlyne's search is FUZZY and RANKED, so `matches[0]` is not an answer to the
+            # question that was asked -- it is the vendor's best guess. Taking it blind is
+            # how `nifty bees` came to return BANKBEES: the spaced query matches five BEES
+            # ETFs and the vendor ranks BANKBEES first, while the instrument the user meant,
+            # NIFTYBEES, is fifth in the same list. A plausible-looking frame for the wrong
+            # instrument is the worst outcome this package can produce, because nothing about
+            # it looks wrong downstream.
+            #
+            # So a hit is accepted only when it IS the thing asked for, judged after
+            # normalisation. `nifty bees` -> NIFTYBEES is defensible; `nifty bees` ->
+            # BANKBEES is not, and no ranking can make it so.
+            wanted = _normalise_symbol_query(symbol)
+            exact = [m for m in matches if _normalise_symbol_query(m.symbol) == wanted]
+            if len(exact) == 1:
+                self.symbol_resolution = "member_search"
+                return exact[0]
+            offered = ", ".join(f"{m.symbol} ({m.stock_id})" for m in matches)
+            self.symbol_resolution = "member_search_ambiguous"
+            raise TrendlyneSymbolNotFoundError(
+                f"{symbol!r} is not in trendlyne's equity sitemap ({self.index_size} entries), "
+                f"and trendlyne's own search returned {len(matches)} candidate(s) of which NONE is "
+                f"the instrument asked for: {offered}. Choosing one of those would hand you a "
+                f"different security's prices with no error, so this package refuses instead. "
+                f"If one of them is what you meant, pass its exact ticker. A bare prefix such as "
+                f"{symbol!r} is not enough to pick between them."
+            )
         self.symbol_resolution = "sitemap"
         raise TrendlyneSymbolNotFoundError(
             f"{symbol!r} resolved by neither route: not in the equity sitemap "
-            f"({self.index_size} entries) and trendlyne's own search returned no match. "
+            f"({self.index_size} entries) and trendlyne's own search returned no match, which is "
+            f"what a misspelling looks like -- this search is not typo-tolerant. "
             f"Mutual funds are a separate namespace (/mutual-fund/nav/{{id}}/) and are not "
             f"reachable from here."
         )
