@@ -152,6 +152,7 @@ from .registry import (
     DEFAULT,
     OWNERSHIP_PROVIDER,
     STATEMENTS_PROVIDER,
+    TRENDLYNE_OHLC_PROVIDER,
     UNAVAILABLE,
     UNWIRED_NOTE,
     Registry,
@@ -205,6 +206,7 @@ __all__ = [
     "STATEMENTS_PROVIDER",
     "COSTS_PROVIDER",
     "OWNERSHIP_PROVIDER",
+    "TRENDLYNE_OHLC_PROVIDER",
     "build_default",
     "default_registry",
     # health

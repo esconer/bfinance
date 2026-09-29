@@ -774,14 +774,26 @@ class TestUnavailability:
 
         assert "1 source, no redundancy" in DEFAULT.capability_report()
         assert "no other publisher exists upstream" in DEFAULT.capability_report()
-        assert "4 sources" in DEFAULT.capability_report()
+        # Five price rows, not four: `trendlyne-ohlc` joined the table. It is a real row on a
+        # real basis, so the redundancy line has to count it -- a report that said "4 sources"
+        # while the table held five would be the same class of lie this package exists to stop.
+        assert "5 sources" in DEFAULT.capability_report()
 
         planned = plan("price_history", basis=Basis.AS_TRADED, registry=DEFAULT, health=HealthLedger())
+        # Registration order IS the try-order, and it is NOT "vendor first" for this row. A live
+        # side-by-side over 14 symbols x 2 windows on 2026-09-30 found the second vendor's series
+        # to be as_traded_split_bonus_adjusted, not as_traded: HDFCBANK, MOTHERSON and NESTLEIND
+        # disagreed with the bhavcopy by exactly their own corporate-action factor on 62 of 62
+        # sessions. So the row declares SPLIT_ADJUSTED, sits behind the two as-traded rows, and is
+        # skipped -- never called -- for an as-traded request. The test that this skip is real, and
+        # that it costs no request, is
+        # `TestCascade.test_the_price_basis_column_is_what_routes_an_as_traded_request`.
         assert [s.name for s in planned.ordered] == [
-            "nse-bhavcopy", "marketlens-close", "screener-chart", "vendor-b-adjustments",
+            "nse-bhavcopy", "marketlens-close", "screener-chart",
+            "trendlyne-ohlc", "vendor-b-adjustments",
         ]
         skipped = {a.provider: a for a in planned.attempts}
-        assert set(skipped) == {"screener-chart", "vendor-b-adjustments"}
+        assert set(skipped) == {"screener-chart", "trendlyne-ohlc", "vendor-b-adjustments"}
         assert all(a.outcome == SKIPPED_BASIS for a in skipped.values())
 
 

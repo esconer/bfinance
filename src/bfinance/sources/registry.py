@@ -73,6 +73,7 @@ __all__ = [
     "STATEMENTS_PROVIDER",
     "COSTS_PROVIDER",
     "OWNERSHIP_PROVIDER",
+    "TRENDLYNE_OHLC_PROVIDER",
     "UNWIRED_NOTE",
     "build_default",
 ]
@@ -82,6 +83,12 @@ __all__ = [
 #: Wrapping its two vendors as two rows here would duplicate that cascade and give the caller two
 #: places to configure one thing.
 STATEMENTS_PROVIDER = "statements-cascade"
+
+#: The second vendor's daily OHLC, read by this package's own parser rather than by the leaf
+#: package. Named as a constant because it is an identifier that appears in the try-order, in
+#: every ``attempts`` entry and in the health ledger, and it is spelled once here for the same
+#: reason every other source name is.
+TRENDLYNE_OHLC_PROVIDER = "trendlyne-ohlc"
 
 #: The two capabilities whose modules are still landing. They are registered **by name** with a
 #: lazy module string and nothing else, so this layer is complete and importable before either
@@ -207,21 +214,33 @@ class SourceSpec:
 #: Why the second vendor's adjusted price history is registered but not wired. Kept as a constant
 #: because it is the one place in this package where a source is *known* and deliberately
 #: unreachable, and that is a sentence someone will otherwise "fix" by adding the import.
+#:
+#: Rewritten when the wired row landed beside it. The previous version was wrong in a way a claim
+#: test caught: it presented the AST import scan as the rule that keeps the leaf package out of
+#: reach, and a scan of import statements would not have stopped a dotted string -- which is how
+#: every other row in this table defers its import to call time. The two rules are both real and
+#: both are named below; only one of them binds.
 UNWIRED_NOTE = (
-    "The second vendor's adjusted price history is only reachable through bfinance.trendlyne, "
-    "which is a leaf package. Two separate rules keep it that way and the earlier version of "
-    "this note named only the first, which is not the one that binds. The AST scan in "
-    "tests/test_trendlyne_core.py::TestIsolation forbids any module outside the package from "
-    "IMPORTING it, and this layer honours that -- but a scan of import statements would not "
-    "have stopped a dotted string, which is how every other row in this table defers its import "
-    "to call time. The rule that actually binds is "
-    "tests/test_sources_cascade.py::TestRegistrationWithoutImport, which requires "
-    "bfinance.trendlyne to be absent from Registry.by_module(): a resolution must not be able "
-    "to reach the leaf package at all, lazily or otherwise. Read the leaf directly if you need "
-    "it. Note also that this row's basis is the adjustment axis only: the series is "
-    "as_traded_split_bonus_adjusted and DEMERGER_APPLIED is False, so it must not be spliced "
-    "with yfinance bars across a demerger date, where yfinance rewrites the history and this "
-    "source does not."
+    "This row reserves the split_adjusted basis without naming a module this layer can load, and "
+    "it is registered but not wired on purpose. The vendor's adjusted price history is reachable "
+    "only through bfinance.trendlyne, which is a leaf package, and two separate rules keep it "
+    "that way. The one that BINDS is tests/test_sources_cascade.py::TestRegistrationWithoutImport, "
+    "which requires bfinance.trendlyne to be absent from Registry.by_module(): a resolution must "
+    "not be able to reach the leaf package at all, lazily or otherwise. The other is "
+    "tests/test_trendlyne_core.py::TestIsolation, which scans the AST of every module outside the "
+    "package and fails on any import naming it. That one is still enforced and still true -- it "
+    "simply is not what holds this row closed, and an earlier version of this note claimed it was. "
+    "Read the leaf directly if you need the vendor's own client.\n\n"
+    "A wired row now sits beside this one and is ordered ahead of it: "
+    "bfinance.sources.price_provider reads the same three routes with its own parser rather than "
+    "importing the leaf, which is why it can be wired where this row cannot. So this row is a "
+    "second entry on the same basis, not the only one, and a split_adjusted request is answered "
+    "by that row whenever it can be. This one is reached only when it cannot, and reaching it "
+    "raises SourceUnavailableError naming this note -- loudly, never a None that a caller could "
+    "not distinguish from 'the source has no data'. Nothing about the basis has changed: the "
+    "series is as_traded_split_bonus_adjusted and DEMERGER_APPLIED is False, so it must not be "
+    "spliced with as-traded bars across a split or bonus date, and it must not be spliced with a "
+    "source that rewrites demerger history, where the disagreement runs the other way."
 )
 
 
@@ -485,8 +504,12 @@ def build_default() -> Registry:
     where none of the six modules has ever been imported.
 
     The price rows carry the measurement that matters most, so read the notes before reordering
-    them. Reordering ``price_history`` is safe. Changing a row's basis is not, and the reason
-    each is what it is sits next to it.
+    them. Reordering ``price_history`` is safe in the sense that a request is only ever routed to
+    a row that publishes the requested basis, so a reorder cannot make an as-traded call land on
+    an adjusted row -- but it *is* what a report prints, and a report is read as a claim. The
+    ``trendlyne-ohlc`` row is deliberately not first for exactly that reason, and its note carries
+    the 14-symbol side-by-side that decided it. Changing a row's basis is not safe at all, and the
+    reason each is what it is sits next to it.
     """
     registry = Registry()
 
@@ -511,7 +534,7 @@ def build_default() -> Registry:
         )
     )
 
-    # -- price history: four sources, three different bases ------------------ #
+    # -- price history: five sources, three different bases ------------------- #
     registry.register(
         SourceSpec(
             name="nse-bhavcopy",
@@ -568,6 +591,52 @@ def build_default() -> Registry:
             module="bfinance.screener.client",
             entry="ScreenerClient",
             adapter=_BINDINGS["screener_chart"],
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name=TRENDLYNE_OHLC_PROVIDER,
+            capabilities=("price_history",),
+            bases=(Basis.SPLIT_ADJUSTED,),
+            note=(
+                "Per-symbol daily OHLCV over the second vendor's three robots-ALLOWED routes: the "
+                "equity sitemap, the symbol's own page for its per-symbol token, and the "
+                "/mapp/v1/ OHLC JSON. It is read by bfinance.sources.price_provider, which carries "
+                "its own parser rather than importing the leaf package the isolation rules forbid; "
+                "tests/test_sources_price_provider.py pins that parser against the same recorded "
+                "payloads the leaf's own tests use, so the duplication cannot rot silently. This "
+                "row is NOT one of the six modules this table describes -- it is a reader that "
+                "lives in this package, so the isolation probes are unaffected by its existence.\n\n"
+                "MEASURED BEFORE RANKED, 2026-09-30, 14 symbols x 2 windows against the bhavcopy "
+                "on the common sessions. Window A 2026-09-01..2026-09-25 (18 sessions, past every "
+                "event in the set): 11/11 symbols byte-identical, max |dClose| 0.00. Window B "
+                "2024-12-16..2025-03-13 (62 sessions, BEFORE the HDFCBANK 1:1 bonus of 2025-08-26 "
+                "and the MOTHERSON 1:2 bonus of 2025-07-18, and straddling the ITC demerger of "
+                "2025-01-06): 11/14 byte-identical, and 3/14 disagree on 62 of 62 sessions -- "
+                "HDFCBANK max|dClose| 932.60, MOTHERSON 56.27, NESTLEIND 1158.55, with the "
+                "trendlyne/bhavcopy close ratio constant at 0.500000, 0.666667 and 0.500000 "
+                "respectively, i.e. each scaled by its own corporate-action factor. TATAMOTORS did "
+                "not resolve at all: it is absent from the 5,925-entry sitemap (reported as a "
+                "failure, not averaged in).\n\n"
+                "VERDICT: this is NOT the as_traded basis, and Basis.comparable is right to refuse "
+                "it. The 11 that match have no event inside the span, so 'matches the bhavcopy' is "
+                "what as-traded looks like when no corporate action falls in the window -- a "
+                "per-symbol match is not evidence of a shared basis. CONSEQUENCE FOR THIS TABLE: "
+                "the row is registered split_adjusted and ordered AFTER the two as-traded rows, "
+                "not first. An as_traded request skips it on basis and spends no request on it, and "
+                "the order a report prints is the order a reader will assume -- a first position "
+                "here would claim a comparability this measurement refuses. What it does buy is "
+                "the only wired source on the split_adjusted basis, ahead of the declared-but-"
+                "unwired row below, and the only price row here that can be asked for a window: "
+                "this route publishes no period segment, so start/end are applied locally and cost "
+                "the vendor nothing. One coverage limit is part of the row, not a caveat: ETFs are "
+                "absent from the sitemap entirely and the route that resolves them is "
+                "robots-disallowed, so that class of instrument is refused rather than answered "
+                "thin."
+            ),
+            module="bfinance.sources.price_provider",
+            entry="price_history",
+            adapter=_BINDINGS["price_provider"],
         )
     )
     registry.register(

@@ -15,10 +15,11 @@ TestIsolation`` matches the *substring* ``trendlyne`` in any module name an ``Im
 references, and it has already caught a module that was merely *named*
 ``trendlyne_provider`` and imported nothing at all. So the files in this package are named for
 what they do — ``bindings``, ``registry``, ``cascade``, ``series``, ``model``, ``errors``,
-``health`` — and this one, which is the only file that would want to say the vendor's name, does
-not need to: it does not import that package. The second vendor's adjusted price history is
-declared-but-unwired in the registry, with the reason recorded, rather than imported past the
-test. See :data:`~bfinance.sources.registry.UNWIRED_NOTE`.
+``health``, ``price_provider`` — and this one, which is the only file that would want to say the
+vendor's name, does not need to: the second vendor's adjusted price history is read through
+:mod:`bfinance.sources.price_provider`, which duplicates the payload parser rather than importing
+the leaf package, and the declared-but-unwired row beside it stays unwired with the reason
+recorded. See :data:`~bfinance.sources.registry.UNWIRED_NOTE`.
 
 What an adapter is for
 ----------------------
@@ -107,6 +108,7 @@ __all__ = [
     "statements_cascade",
     "nse_bhavcopy_range",
     "marketlens_history",
+    "price_provider_history",
     "screener_chart_history",
     "macro_index_series",
     "participant_flows",
@@ -164,6 +166,7 @@ PATH: Dict[str, str] = {
     "statements": f"{__name__}.statements_cascade",
     "bhavcopy": f"{__name__}.nse_bhavcopy_range",
     "marketlens": f"{__name__}.marketlens_history",
+    "price_provider": f"{__name__}.price_provider_history",
     "screener_chart": f"{__name__}.screener_chart_history",
     "macro": f"{__name__}.macro_index_series",
     "participant_flows": f"{__name__}.participant_flows",
@@ -305,6 +308,29 @@ def marketlens_history(entry: Any, request: Mapping[str, Any]) -> Any:
     """
     given = _require(request, "symbol")
     return _resolved(entry(**given))
+
+
+@_register("bfinance.sources.bindings.price_provider_history")
+def price_provider_history(entry: Any, request: Mapping[str, Any]) -> Any:
+    """Read one symbol's daily OHLCV from the second vendor's own routes.
+
+    The signature is ``price_history(symbol, *, start=None, end=None, include_last_week=True)``.
+    ``symbol`` is required and the window is not, for the same reason the bhavcopy adapter does
+    not default its dates: this route publishes **no** period segment, so the whole history comes
+    back in one request and the window is applied locally. Forwarding a defaulted date would not
+    be the same request as omitting it, so ``None`` is dropped rather than passed.
+
+    The entry is this package's own reader rather than a vendor package, and that is the whole
+    point of the adapter existing at all: :mod:`bfinance.sources.price_provider` carries a parser
+    for the payload because the isolation rules forbid reaching the leaf package that holds the
+    other one. The registry row's note carries the basis measurement that decided which requests
+    may reach this row.
+    """
+    kwargs: Dict[str, Any] = dict(_require(request, "symbol"))
+    for optional in ("start", "end"):
+        if request.get(optional) is not None:
+            kwargs[optional] = request[optional]
+    return _resolved(entry(**kwargs))
 
 
 @_register("bfinance.sources.bindings.screener_chart_history")
