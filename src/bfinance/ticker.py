@@ -370,6 +370,15 @@ class Ticker:
         )
 
     # --------------------------------------------------- Financial Statements API
+    #
+    # The four ``get_*`` methods below and the twelve properties that delegate to them are
+    # named after yfinance methods and claim yfinance parity, so they return the yfinance
+    # shape -- ``FinancialStatement.to_yfinance()``: DatetimeIndex columns newest-first,
+    # absolute rupees, generic row labels. They did not until now; they returned the native
+    # Indian-label Rs-Cr frame that ``models/statements.py`` documents as "do not change".
+    # The native shape is still reachable, still unchanged, via
+    # ``FinancialStatement.to_dataframe()`` on ``Ticker._ensure_profile()``, which is where
+    # finengine reads it and where the Indian-label contract is pinned.
     def get_income_stmt(
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
@@ -378,7 +387,7 @@ class Ticker:
         table = profile.quarters if freq.lower() == "quarterly" else profile.profit_loss
         if freq.lower() == "quarterly" and table.empty:
             raise NotImplementedError("quarterly statements not supported")
-        df = table.to_dataframe(orient="columns")
+        df = table.to_yfinance()
         if as_dict:
             return df.to_dict()
         return df
@@ -390,7 +399,7 @@ class Ticker:
         if (freq or "yearly").lower() != "yearly":
             raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
-        df = profile.balance_sheet.to_dataframe(orient="columns")
+        df = profile.balance_sheet.to_yfinance()
         if as_dict:
             return df.to_dict()
         return df
@@ -402,7 +411,7 @@ class Ticker:
         if (freq or "yearly").lower() != "yearly":
             raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
-        df = profile.cash_flow.to_dataframe(orient="columns")
+        df = profile.cash_flow.to_yfinance()
         if as_dict:
             return df.to_dict()
         return df
@@ -641,15 +650,21 @@ class Ticker:
         from bfinance.market.ratios import CustomRatiosCalculator
         profile = self._ensure_profile()
         r = profile.ratios
+        # The NATIVE frames, not ``self.financials`` / ``self.balance_sheet`` /
+        # ``self.cash_flow``. Those now return the yfinance shape (generic row labels,
+        # absolute rupees, newest-first), and ``CustomRatiosCalculator`` reads the Indian
+        # labels ("Net Profit", "Borrowings", "Cash from Operating Activity") and reports
+        # Rs Cr. Reading it through the yfinance accessors would leave every leg absent and
+        # publish zeros; it used to work only because the two shapes were the same frame.
         return CustomRatiosCalculator.calculate_all_custom_ratios(
             market_cap_cr=r.market_cap,
             current_price=r.current_price,
             trailing_pe=r.stock_pe,
             book_value=r.book_value,
             eps=r.eps_ttm,
-            pnl=self.financials,
-            bs=self.balance_sheet,
-            cf=self.cash_flow,
+            pnl=profile.profit_loss.to_dataframe(orient="columns"),
+            bs=profile.balance_sheet.to_dataframe(orient="columns"),
+            cf=profile.cash_flow.to_dataframe(orient="columns"),
         )
 
     @property

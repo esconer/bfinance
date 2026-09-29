@@ -1,16 +1,20 @@
 """
 Financial statement models and DataFrame serializers.
 
-Native shape (downstream finengine reads this — do not change):
+Native shape (downstream finengine reads this â€” do not change):
   orientation: metric rows x period-string columns (e.g. "Mar 2024").
   row labels: TitleCase Indian labels ("Sales", "Net Profit", "Borrowings").
   units: values in Rs Cr (1 Cr = 1e7 Rs).
 
 YFinance shape via ``FinancialStatement.to_yfinance()``:
   same orientation (metric rows x period columns), columns parsed to
-  DatetimeIndex (month-end dates), values scaled x1e7 to absolute Rs,
-  Indian labels renamed to generic yfinance labels where a mapping exists
-  (unmapped rows kept as-is).
+  DatetimeIndex (month-end dates) and ordered NEWEST FIRST as yfinance orders them,
+  values scaled x1e7 to absolute Rs, Indian labels renamed to generic yfinance labels
+  where a mapping exists (unmapped rows kept as-is).
+
+``to_dataframe()`` is the native shape and stays the contract finengine reads; it imposes
+no order on the caller's headers. ``to_yfinance()`` is the yfinance shape and imposes the
+yfinance period order. The two are deliberately not the same thing.
 """
 
 from typing import Dict, List, Optional
@@ -49,6 +53,28 @@ INDIAN_TO_YFINANCE_LABELS: Dict[str, str] = {
     "Net Cash Flow": "Net Cash Flow",
 }
 
+#: Rs Cr -> absolute Rs. Applied to every row of :meth:`FinancialStatement.to_yfinance`
+#: except the per-share rows below.
+CR_TO_RS = 1e7
+
+#: yfinance row labels that are **per-share quantities**, not Rs Cr, and so are exempt from
+#: the :data:`CR_TO_RS` scale. yfinance's ``Diluted EPS`` is rupees per share, so multiplying
+#: it by 1e7 turns ITC's reported 16.51 into 165,100,000 -- a number in no unit at all, and
+#: one that also makes a P/E computed from this frame wrong by a factor of 1e7. screener.in
+#: prints the row as ``EPS in Rs``, i.e. already rupees; only the other rows are in Cr.
+#: Keyed on the *output* label, because that is the row a caller reads.
+PER_SHARE_LABELS = frozenset({"Diluted EPS"})
+
+#: Non-date period headers that :meth:`FinancialStatement.to_yfinance` refuses to guess at.
+#: ``screener.in`` appends ``TTM`` to the annual P&L table; a trailing-twelve-months total
+#: is not a fiscal period, has no month-end date, and cannot be placed in a
+#: ``DatetimeIndex``. Guessing one would fabricate a column date. Dropping it is therefore
+#: a decision, not a fallback, and it is recorded in the returned frame's ``attrs`` under
+#: ``bfinance_dropped_period_columns`` so the caller can see it rather than infer it from a
+#: column that is not there. The TTM values stay reachable on the native shape
+#: (:meth:`FinancialStatement.to_dataframe`), which is unchanged.
+NON_DATE_PERIOD_HEADERS = frozenset({"TTM"})
+
 
 class FinancialStatement(BaseModel):
     """
@@ -72,7 +98,7 @@ class FinancialStatement(BaseModel):
             ParsingError: a row's cell count does not match ``len(headers)``. pandas
                 would raise a bare ``ValueError("Length of values (2) does not match
                 length of index (3)")``, which is not a BFinanceError and therefore
-                escapes the typed handlers in ``Ticker`` — and which names neither the
+                escapes the typed handlers in ``Ticker`` â€” and which names neither the
                 metric nor the statement. The check is here, at the single point where
                 rows and headers are joined, because a ragged row can enter from the HTML
                 parser or from a cache round-trip alike.
@@ -106,13 +132,47 @@ class FinancialStatement(BaseModel):
         return dict(zip(self.headers, self.rows[metric_name]))
 
     def to_yfinance(self) -> pd.DataFrame:
-        """Return yfinance-shaped copy: DatetimeIndex cols, absolute Rs, generic labels."""
+        """
+        Return the yfinance-shaped copy: ``DatetimeIndex`` columns **newest first**, absolute
+        rupees, generic row labels.
+
+        This is the shape ``Ticker.get_income_stmt()`` and friends return, so the four
+        differences from :meth:`to_dataframe` are load-bearing rather than cosmetic:
+
+        1. **Alias de-duplication.** ``INDIAN_TO_YFINANCE_LABELS`` maps two spellings
+           (``"EPS in Rs"`` on the annual P&L, ``"EPS"`` on the ratios table) onto one
+           yfinance label. ``rename`` therefore emits the *same* index label twice, and
+           ``df.loc["Diluted EPS"]`` returns a DataFrame where every other row returns a
+           Series -- silently changing the type of every downstream arithmetic operation.
+           Aliased rows are coalesced here, first non-null winning per period so a spelling
+           that is blank in one period does not erase what the other carries for it. The
+           merge is published in ``attrs["bfinance_merged_row_labels"]``.
+        2. **Newest-first columns.** yfinance's statement frames read
+           ``df.columns[0]`` as the latest period. Reproducing screener's oldest-first order
+           would make every "latest period" lookup silently return the oldest one.
+        3. **Per-share rows are not scaled.** See :data:`PER_SHARE_LABELS`.
+        4. **Non-date periods are dropped and said so.** See
+           :data:`NON_DATE_PERIOD_HEADERS`; the dropped header names are in
+           ``attrs["bfinance_dropped_period_columns"]``.
+
+        The native statement is not mutated, and ``to_dataframe()`` is untouched by any of
+        this: the Indian-label Rs-Cr frame is still the contract finengine reads.
+
+        Raises:
+            ParsingError: propagated from :meth:`to_dataframe` for a ragged row.
+        """
         if not self.headers or not self.rows:
             return pd.DataFrame()
         df = self.to_dataframe(orient="columns")
         df = df.rename(index=INDIAN_TO_YFINANCE_LABELS)
-        dates, keep = [], []
+        dates, keep, dropped = [], [], []
         for col in df.columns:
+            if col in NON_DATE_PERIOD_HEADERS:
+                # Named, so the drop is a decision this function makes on purpose. Any other
+                # unparseable header is still skipped, but only the recognised non-periods
+                # are reported -- see the attrs block below.
+                dropped.append(col)
+                continue
             try:
                 dt = pd.to_datetime(f"01 {col}", format="%d %b %Y") + pd.offsets.MonthEnd(1)
             except Exception:
@@ -124,10 +184,31 @@ class FinancialStatement(BaseModel):
         df = df[keep].copy()
         df.columns = pd.DatetimeIndex(dates)
         df = df.apply(pd.to_numeric, errors="coerce").dropna(how="all")
-        df = df * 1e7
+
+        merged = {}
+        if df.index.has_duplicates:
+            merged = {
+                str(label): [str(i) for i in group.index]
+                for label, group in df.groupby(level=0, sort=False)
+                if len(group) > 1
+            }
+            # ``first`` on a row group runs *along periods* and skips NaN, so the coalesce is
+            # per period rather than a whole-row winner-take-all: a spelling that is blank in
+            # one period does not erase what the other spelling carries for that period.
+            # ``sort=False`` keeps first-appearance order, so the surviving row sits where the
+            # caller put it and the frame does not silently reorder itself.
+            df = df.groupby(level=0, sort=False).first()
+
+        scaled = [label for label in df.index if label not in PER_SHARE_LABELS]
+        if scaled:
+            df.loc[scaled] = df.loc[scaled] * CR_TO_RS
+
+        df = df.sort_index(axis=1, ascending=False)
         for alias in ("Net Income Including Noncontrolling Interests", "Net Income Continuous Operations"):
             if alias not in df.index and "Net Income" in df.index:
                 df.loc[alias] = df.loc["Net Income"]
+        df.attrs["bfinance_dropped_period_columns"] = dropped
+        df.attrs["bfinance_merged_row_labels"] = merged
         return df
 
     def __repr__(self) -> str:

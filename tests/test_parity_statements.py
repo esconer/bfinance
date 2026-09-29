@@ -96,8 +96,9 @@ def test_live_annual_income_statement():
     Which makes them worse than no test at all, because they make the 0.2.0 break look like a
     regression when it lands.
 
-    The real contract now lives in ``tests/test_stmt_accessor_contract.py``, offline and xfail-
-    strict, where it can fail today without reddening the suite.
+    The real contract now lives in ``tests/test_stmt_accessor_contract.py``, offline, where
+    the accessors return the yfinance shape and the seven properties that define it are
+    asserted directly rather than xfailed.
     """
     from bfinance.ticker import Ticker
 
@@ -112,6 +113,17 @@ def test_live_annual_income_statement():
 
 @pytest.mark.live
 def test_live_quarterly_income_data_or_raise():
+    """Live, and **updated when the yfinance shape shipped (0.2.0)**.
+
+    The accessor used to return the native frame, so this asserted ``"Sales" in qdf.index``.
+    That is the defect, not the contract: the method is named after yfinance's
+    ``get_income_stmt`` and its docstring claims parity, and ``"Sales"`` is a screener.in
+    label that appears nowhere in a yfinance statement frame. It now asserts the generic
+    label, and additionally checks the two properties that used to be false and were the
+    actual reason the break was needed -- ``DatetimeIndex`` columns and newest-first.
+
+    The last assertion, that quarterly differs from yearly, is unchanged.
+    """
     from bfinance.ticker import Ticker
 
     t = Ticker("RELIANCE.NS")
@@ -122,6 +134,9 @@ def test_live_quarterly_income_data_or_raise():
     ydf = t.get_income_stmt(freq="yearly")
     assert isinstance(qdf, pd.DataFrame)
     assert not qdf.empty, "quarterly returned empty; must raise NotImplementedError instead"
-    assert "Sales" in qdf.index
+    assert "Total Revenue" in qdf.index, "the yfinance shape, not the Indian label"
+    assert "Sales" not in qdf.index
+    assert isinstance(qdf.columns, pd.DatetimeIndex), f"got {type(qdf.columns).__name__}"
+    assert qdf.columns.is_monotonic_decreasing, f"columns are {list(qdf.columns)}"
     # fail on silent-yearly: quarterly must differ from yearly
     assert list(qdf.columns) != list(ydf.columns) or not qdf.equals(ydf)

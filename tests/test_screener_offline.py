@@ -595,19 +595,69 @@ class TestYfinanceLabelMapping:
         yf = parse("itc").balance_sheet.to_yfinance()
         assert {"Common Stock", "Retained Earnings", "Total Debt", "Net PPE",
                 "Capital Work In Progress", "Total Assets"} <= set(yf.index)
-        assert yf.loc["Total Debt"].iloc[-1] == pytest.approx(2399.0 * 1e7)
+        # Select by date, not by position. **Updated when the yfinance shape shipped (0.2.0).**
+        # This read ``iloc[-1]``, which against screener's oldest-first column order was the
+        # *newest* period. The yfinance contract is newest-first, so that same position now
+        # holds the *oldest* year and the assertion would have silently moved from
+        # 2399.0 Cr (Mar 2026) to 285.0 Cr (Mar 2025) -- still a passing test with a
+        # plausible-looking number, asserting a different company-year than it read before.
+        # Both years are named below, so a future order change is a loud failure rather than
+        # a quiet change of subject.
+        newest, oldest = yf.columns[0], yf.columns[-1]
+        assert newest == pd.Timestamp("2026-03-31"), f"newest first, got {list(yf.columns)}"
+        assert yf.loc["Total Debt", newest] == pytest.approx(2399.0 * 1e7)
+        assert yf.loc["Total Debt", oldest] == pytest.approx(285.0 * 1e7)
 
     def test_the_ttm_column_is_dropped_because_it_is_not_a_date(self):
-        """screener's 'TTM' is not parseable as '01 TTM'; to_yfinance must drop it, not guess."""
+        """screener's 'TTM' is not parseable as '01 TTM'; to_yfinance must drop it, not guess.
+
+        **Updated when the yfinance shape shipped (0.2.0).** The recorded ITC page is trimmed
+        to the trailing two columns, so the surviving frame has exactly one dated column --
+        which means ``assert list(yf.columns) == [...]`` could not tell the *decision* to drop
+        TTM apart from the incidental parse failure that used to make it. Two things were
+        added, and the old assertion is kept only because it is still true:
+
+        * the drop is now made **by name** (``NON_DATE_PERIOD_HEADERS``) and published on the
+          frame as ``attrs["bfinance_dropped_period_columns"]``, so it is a stated decision
+          rather than a side effect;
+        * the balance sheet, which carries two dated columns and no TTM, is asserted to be
+          newest-first -- so a frame that dropped *every* column and returned an empty one
+          could not satisfy this test.
+
+        The alternative -- keeping TTM -- was rejected: it puts a string back into a
+        ``DatetimeIndex``. The values are not lost; they stay on the native shape.
+        """
+        from bfinance.models.statements import NON_DATE_PERIOD_HEADERS
+
         native = parse("itc").profit_loss
         assert "TTM" in native.headers
+        assert "TTM" in NON_DATE_PERIOD_HEADERS
         yf = native.to_yfinance()
         assert list(yf.columns) == [pd.Timestamp("2026-03-31")]
+        assert yf.attrs["bfinance_dropped_period_columns"] == ["TTM"]
+        # ...and the values were dropped, not relocated, on both shapes.
+        ttm_values = set(native.to_dataframe()["TTM"].dropna().tolist())
+        assert ttm_values, "the recorded ITC page must carry TTM values for this to mean anything"
+        assert not ttm_values & set(yf.to_numpy().ravel())
+        assert ttm_values <= set(native.to_dataframe().to_numpy().ravel())
+        # The negative control: a page with no TTM reports an empty drop list, so the attr
+        # above is carrying the decision and not always reporting something.
+        bs = parse("itc").balance_sheet
+        assert "TTM" not in bs.headers
+        assert bs.to_yfinance().attrs["bfinance_dropped_period_columns"] == []
+        assert bs.to_yfinance().columns.is_monotonic_decreasing
 
     def test_unmapped_labels_are_kept_as_they_are(self):
         yf = parse("itc").profit_loss.to_yfinance()
         assert "OPM %" in yf.index, "an unmapped row must survive rather than be dropped"
         assert yf.index.is_unique
+        # KNOWN ADJACENT DEFECT, deliberately not asserted here: ``OPM %`` is a percentage and
+        # is scaled x1e7 like every other row, so it reads 350000000.0 for a reported 35.0.
+        # The 0.2.0 work exempted *per-share* rows from the Cr->Rs scale
+        # (``models/statements.PER_SHARE_LABELS``); it did not exempt *percentage* rows, and
+        # widening the exemption is a separate decision with its own fixture evidence. No
+        # assertion is written on the current value, because writing one would state the
+        # defect as if it were the contract.
 
     def test_the_mapping_table_covers_every_label_the_recorded_page_emits(self):
         """A recorded screener row with no yfinance equivalent is fine; a *missing* mapping for a

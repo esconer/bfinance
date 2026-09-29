@@ -69,29 +69,47 @@ call. They now return a `DataFrame`. Any caller that had wrapped the old return 
 `history(period="2y")` and `period="5y"` deliver **weekly** bars and did not say so; now they
 do. This is additive, but a caller doing strict attribute comparison will see new keys.
 
-### 6. The statement accessor changes shape when issue 04 lands (pending, and armed)
+### 6. The statement accessors change shape (landed)
 
-`get_*_stmt` currently returns the package's native shape. The contract is that it must
-return the **yfinance** shape instead: one row per statement, newest first, de-duplicated
-labels, a plain `DatetimeIndex` with no date-period column, absolute rupee values rather than
-crore, and generic row labels.
+`get_*_stmt` returned the package's native shape. It now returns the **yfinance** shape
+instead: one row per statement, newest first, de-duplicated labels, a plain `DatetimeIndex`
+with no date-period column, absolute rupee values rather than crore, and generic row labels.
 
-This has not landed yet, and the repository has made sure of that in a way worth recording.
-`tests/test_stmt_accessor_contract.py` carries **7 `xfail(strict=True)` markers**, and the file
-documents exactly what they are for:
+`FinancialStatement.to_dataframe()` -- the native Indian-label Rs-Cr frame -- is unchanged
+and is still what finengine reads.
+
+This landed with the seven ``xfail(strict=True)`` markers that guarded it now converted to
+real passes. `tests/test_stmt_accessor_contract.py` had carried **7 `xfail(strict=True)`
+markers**, one per property, and the file documented exactly what they were for:
 
 > Each of these fails against 0.1.3. `strict=True` means that when issue 04 lands and they
 > start passing, pytest reports XPASS as a *failure*, which is the signal to delete the
 > marker. That turns the 0.2.0 break into something that cannot land silently.
 
-There is also a self-check, `_EXPECTED_XFAIL_COUNT = 7`, whose comment reads:
+There was also a self-check, `_EXPECTED_XFAIL_COUNT = 7`, whose comment read:
 
 > Lowering it to make a run green defeats the only tripwire between 0.1.3 and the 0.2.0
 > statement-order break.
 
-So the break is guarded in both directions: it cannot land quietly, and the guard cannot be
-quietly removed to make a run pass. Anyone who "fixes" a red run by deleting xfail markers
-breaks that protection, which is why the count is asserted rather than trusted.
+Both were replaced rather than deleted, because a strict xfail is *self-arming* and a plain
+assertion is not. In their place the file now carries
+`test_the_seven_named_tests_are_still_present_in_this_file` (an `ast` check that all seven
+named property tests still exist) and `test_the_seven_yfinance_properties_all_hold` (all
+seven properties re-asserted together, against a real `Ticker`, independently of the tests
+above). Deleting any one of the seven is now a failure rather than a quiet loss.
+
+Two decisions inside the converter, both recorded rather than inferred:
+
+- **`TTM` is still dropped, deliberately.** A trailing-twelve-months total is not a fiscal
+  period and has no month-end date, so it cannot occupy a `DatetimeIndex` without a date
+  being invented for it. The drop is now made *by name* and published on the frame as
+  `attrs["bfinance_dropped_period_columns"]`. The values are not lost: they stay on the
+  native shape.
+- **Per-share rows are exempt from the crore scale.** yfinance's `Diluted EPS` is rupees per
+  share, so the `1e7` scale that every other row gets turned screener's reported `16.51`
+  into `165,100,000` -- a per-share number in absolute-rupee units. `models/statements.py`
+  now carries `PER_SHARE_LABELS` for this. Known adjacent defect, **not** fixed here: the
+  percentage rows (`OPM %`, `Tax Rate`, `Dividend Payout %`) are still scaled the same way.
 
 ## Data honesty changes worth stating plainly
 

@@ -229,10 +229,12 @@ libraries (`pytest -m live`). Measured on RELIANCE.NS:
 * history Close within 0.6% (1mo/1y), tz `Asia/Kolkata`, weekly intervals resampled,
   `auto_adjust`/`actions` flags honored like yfinance 1.7 defaults
 * info values within 2.5% (price, mcap, EPS, float, 50d/200d averages, prev close exact)
-* statements self-consistent (Assets ≈ Liab+Equity ≤5%); `to_yfinance()` bridges
-  orientation/units (₹Cr → absolute, Mar-YYYY → DatetimeIndex)
+* statements self-consistent (Assets ≈ Liab+Equity ≤5%); the accessors return the yfinance
+  shape (metric-row, generic labels, newest-first `DatetimeIndex`, absolute ₹ rather than
+  ₹Cr), and `to_dataframe()` remains the native metric-row/₹Cr frame
 * dividends amounts within 3% (FY-end vs ex-date conventions differ — see table)
 
 Deliberate extras (never silent): `freq="quarterly"` on income uses real quarterly
-P&L; native statement orientation stays metric-row/₹Cr; `Ticker("X", True)` bool
+P&L; the native ₹Cr statement is reached through `FinancialStatement.to_dataframe()`,
+not through the accessors; `Ticker("X", True)` bool
 second positional is treated as yfinance's `multi_level_index`.
