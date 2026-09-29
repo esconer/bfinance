@@ -252,11 +252,13 @@ Pacing, retries and caching
 Pacing is the package's existing global-slot scheme, ported verbatim from
 ``bfinance.screener.client`` and ``bfinance.nse.bhavcopy`` (``_GLOBAL_PACING_LOCK``,
 ``_GLOBAL_LAST_REQUEST_TIME``, ``_throttle_pacing``) — the same algorithm, not a second private
-one. The default interval is **750 ms**, deliberately far above the 100-150 ms used for
-screener.in and MarketLens: this is a commercial site serving a heavy page per symbol, two
-requests to the chart, and nothing here is worth being impatient with. Retry covers 429, 5xx and
-transport failures only, with exponential backoff that honours ``Retry-After`` (capped at 30 s);
-every 4xx is terminal.
+one. The default interval is **1000 ms**, and that number is a **compliance floor** rather than a
+tuning choice: trendlyne's ``robots.txt`` states ``Crawl-delay: 1`` in its ``User-agent: *`` group,
+read live on 2026-09-30 alongside 28 ``Disallow`` rules in the same group. The 750 ms this package
+used to ship was 1.33 requests per second, a 250 ms per-request violation of a published floor. The
+``Crawl-delay: 10`` that also appears in that file is scoped to ``GPTBot``/``ClaudeBot`` and does
+not apply to this client. Retry covers 429, 5xx and transport failures only, with exponential
+backoff that honours ``Retry-After`` (capped at 30 s); every 4xx is terminal.
 
 Caching is opt-in on disk. The sitemap index and the tokens live in memory with a TTL. Passing
 ``cache=SQLiteCache(...)`` additionally persists the index; the default is ``None``, so importing
@@ -307,6 +309,51 @@ from .sectors import (
 )
 from .tables import PROVENANCE, extract_ohlc_token
 
+
+#: Public surface of this module. Without it, ``from bfinance.trendlyne.client import *`` binds
+#: the module's own imports as well as its API -- ``asyncio``, ``httpx``, ``logging``,
+#: ``dataclasses``, ``datetime``, ``html`` and ``re`` all land in the caller's namespace. The
+#: package __init__ curates a subset of these for ``bfinance.trendlyne`` itself; this list
+#: describes the module. ``logger`` is deliberately absent: it is a getLogger() assignment, not
+#: an API anyone should be reaching for.
+__all__ = [
+    "BASE_URL",
+    "COLUMNS",
+    "DEFAULT_MIN_REQUEST_INTERVAL_MS",
+    "DEMERGER_APPLIED",
+    "DEMERGER_APPLIED_ATTR",
+    "ENDPOINTS",
+    "GROUP_ENDPOINTS",
+    "LISTING_DATE_ATTR",
+    "MEMBER_SEARCH_FLAG",
+    "METRICS",
+    "NOTE_ATTR",
+    "PRICE_BASIS",
+    "PRICE_BASIS_ATTR",
+    "RETRIEVED_AT_ATTR",
+    "ROBOTS_DISALLOWED_ROUTES",
+    "ROWS_BEFORE_LISTING_ATTR",
+    "SITEMAP_PATH",
+    "SNAPSHOT_ONLY_ATTR",
+    "SNAPSHOT_PERIOD",
+    "SOURCE_ATTR",
+    "TrendlyneClient",
+    "TrendlyneSymbol",
+    "USER_AGENTS",
+    "VOLUME_BEFORE_LISTING_ATTR",
+    "WINDOW_ATTR",
+    "build_attrs",
+    "build_path",
+    "ohlc",
+    "ohlc_async",
+    "parse_envelope",
+    "parse_ohlc",
+    "parse_sitemap",
+    "redact",
+    "resolve",
+    "symbol_index",
+    "validate_period",
+]
 logger = logging.getLogger("bfinance")
 
 #: Provenance tag on every frame. Re-exported from :mod:`bfinance.trendlyne.tables`, which owns it.
@@ -480,9 +527,27 @@ _OHLC_REQUIRED: Tuple[str, ...] = (
 #: ``close_price`` on most bars; the count of disagreeing rows is recorded in ``attrs``.
 _OHLC_EXTRA: Tuple[str, ...] = ("last_price",)
 
-#: Conservative by design. The 100-150 ms used for screener.in and MarketLens is too aggressive
-#: for a commercial site serving a 292 KB page per symbol.
-DEFAULT_MIN_REQUEST_INTERVAL_MS = 750.0
+#: The pacing floor in milliseconds, and a **compliance** number rather than a tuning knob.
+#: trendlyne's ``robots.txt``, fetched live on 2026-09-30, carries ``Crawl-delay: 1`` in its
+#: ``User-agent: *`` group (the group this client falls under) and comments that line "Wait 1
+#: second between successive requests". One second is 1000 ms, which is one request per second, so
+#: that is the value. It was 750 ms: 1.33 requests per second, 250 ms per request under a
+#: published floor, bought for no reason and in contradiction of the measurement this module had
+#: already recorded. The 28 ``Disallow`` rules in that same ``*`` group are what
+#: :data:`ROBOTS_DISALLOWED_ROUTES` encodes; the ``Crawl-delay`` is what this constant is.
+#:
+#: The 10 s figure that circulates for this site is **not** the number to use: it sits in the
+#: ``GPTBot``/``ClaudeBot`` group, which is scoped to those named crawlers rather than to ``*``,
+#: and adopting it would make bulk scraping ~10x slower for no compliance reason. The old
+#: justification for 750 ms was page weight (a 292 KB page per symbol, against 100-150 ms for
+#: screener.in and MarketLens), which is a real observation but is not a robots-derived argument:
+#: a heavy page does not lower a stated crawl-delay, so it is not the reason for this value.
+#:
+#: A caller who wants a different posture -- tests, a mirror, a private quota -- passes
+#: ``min_request_interval_ms=``, and ``0.0`` disables pacing outright. Anything *below* this
+#: default is a decision to outrun the site's stated crawl-delay, and
+#: ``tests/test_trendlyne_pacing.py`` fails if this number is quietly tidied.
+DEFAULT_MIN_REQUEST_INTERVAL_MS = 1000.0
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1187,7 +1252,8 @@ class TrendlyneClient:
             retried.
         proxy: Proxy URL. Falls back to ``HTTPS_PROXY``/``HTTP_PROXY``, as elsewhere in bfinance.
         min_request_interval_ms: Global pacing slot. See
-            :data:`DEFAULT_MIN_REQUEST_INTERVAL_MS` for why the default is deliberately slow.
+            :data:`DEFAULT_MIN_REQUEST_INTERVAL_MS` for the robots-derived 1 s floor this default
+            matches. ``0.0`` disables pacing, which is how the offline tests run.
         index_ttl_hours: How long the parsed sitemap is reused.
         token_ttl_hours: How long a per-symbol token is reused. Tokens were observed to be stable
             across page loads, so this is a safety net rather than a necessity — and
