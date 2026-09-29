@@ -209,10 +209,19 @@ class SourceSpec:
 #: unreachable, and that is a sentence someone will otherwise "fix" by adding the import.
 UNWIRED_NOTE = (
     "The second vendor's adjusted price history is only reachable through bfinance.trendlyne, "
-    "which is a leaf package: tests/test_trendlyne_core.py::TestIsolation scans the AST of every "
-    "other module under src/ and fails on any reference to it, and this layer is not exempt. The "
-    "row is registered anyway, because its basis declaration is what stops an as-traded request "
-    "from being answered with split-adjusted prices. Read the leaf directly if you need it."
+    "which is a leaf package. Two separate rules keep it that way and the earlier version of "
+    "this note named only the first, which is not the one that binds. The AST scan in "
+    "tests/test_trendlyne_core.py::TestIsolation forbids any module outside the package from "
+    "IMPORTING it, and this layer honours that -- but a scan of import statements would not "
+    "have stopped a dotted string, which is how every other row in this table defers its import "
+    "to call time. The rule that actually binds is "
+    "tests/test_sources_cascade.py::TestRegistrationWithoutImport, which requires "
+    "bfinance.trendlyne to be absent from Registry.by_module(): a resolution must not be able "
+    "to reach the leaf package at all, lazily or otherwise. Read the leaf directly if you need "
+    "it. Note also that this row's basis is the adjustment axis only: the series is "
+    "as_traded_split_bonus_adjusted and DEMERGER_APPLIED is False, so it must not be spliced "
+    "with yfinance bars across a demerger date, where yfinance rewrites the history and this "
+    "source does not."
 )
 
 

@@ -20,8 +20,19 @@ So both hold at once::
     except TrendlyneError:            # everything from this package
     except UpstreamServiceError:      # anything upstream, including trendlyne
 
-The mixins are advisory, not load-bearing: nothing in :mod:`bfinance.trendlyne` catches
-:class:`BFinanceError`, and no class here is raised by any other bfinance module.
+The mixins are advisory, not load-bearing, and it is worth being precise about why, because
+the precise version is weaker than the obvious one. No ``except BFinanceError`` clause exists
+anywhere in :mod:`bfinance.trendlyne`, and no class here is raised by any other bfinance module
+-- so a Trendlyne failure cannot be swallowed by a handler that did not mean to catch it.
+
+There are exactly two broad handlers in the package, both around the sitemap cache
+(``client.py``, one on read and one on write). They catch ``Exception``, which includes
+:class:`BFinanceError`, and that is deliberate: a broken or unwritable cache must not be able
+to fail a data call, and a cache backend that raised the package base would otherwise turn a
+performance problem into a spurious refusal. The cost is that a genuine
+:class:`BFinanceError` raised *by the cache backend itself* would be absorbed as a cache miss
+rather than surfaced. That is a real, accepted trade rather than an oversight, and it is why
+the two sites log at ``warning`` with ``exc_info`` rather than silently.
 
 The failure taxonomy, and why 444 is not what it looks like
 -----------------------------------------------------------
