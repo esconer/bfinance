@@ -1040,7 +1040,12 @@ class BhavcopyClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         proxy: Optional[str] = None,
-        min_request_interval_ms: float = 250.0,
+        # 350 ms is about 2.86 requests per second, deliberately under the 3 req/s that
+        # NSE is documented to throttle at (1000/3 = 333.3 ms). The previous 250 ms
+        # allowed 4 req/s, so a caller walking a range sat above the documented limit.
+        # The margin is thin on purpose: the alternative is being throttled mid-walk,
+        # which costs a retry and a backoff on every request that follows it.
+        min_request_interval_ms: float = 350.0,
     ) -> None:
         self.timeout = timeout
         self.max_retries = max(1, int(max_retries))

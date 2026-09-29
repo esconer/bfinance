@@ -532,6 +532,26 @@ def test_archive_requests_carry_the_documented_headers(monkeypatch):
     assert "cookie" not in sent
 
 
-def test_pacing_floor_is_untouched():
-    """The 250 ms floor is a separate, deliberate question and is not changed here."""
-    assert bc.BhavcopyClient().min_request_interval_ms == 250.0
+def test_the_default_pacing_floor_sits_under_the_documented_throttle():
+    """3 req/s is 333.3 ms. The floor must be at or above that, not below it.
+
+    The default was 250 ms, which is 4 req/s -- above the rate NSE is documented to
+    throttle at, so a caller walking a long range sat over the limit and risked a retry
+    plus a backoff on every request after the first throttle. 350 ms is about 2.86 req/s.
+
+    This is pinned rather than left to drift, because the number looks arbitrary and the
+    next person to tidy it would have no way of knowing it encodes an external limit
+    rather than a preference.
+    """
+    floor_ms = bc.BhavcopyClient().min_request_interval_ms
+    assert floor_ms == 350.0
+    requests_per_second = 1000.0 / floor_ms
+    assert requests_per_second < 3.0, (
+        f"{requests_per_second:.2f} req/s is at or above the 3 req/s NSE throttles at"
+    )
+
+
+def test_the_floor_is_overridable_and_zero_disables_pacing():
+    """Tests and deliberate bulk callers must still be able to opt out entirely."""
+    assert bc.BhavcopyClient(min_request_interval_ms=0.0).min_request_interval_ms == 0.0
+    assert bc.BhavcopyClient(min_request_interval_ms=5000.0).min_request_interval_ms == 5000.0

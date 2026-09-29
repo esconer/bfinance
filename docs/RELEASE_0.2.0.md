@@ -110,9 +110,9 @@ breaks that protection, which is why the count is asserted rather than trusted.
 
 | gate | state |
 |---|---|
-| offline suite green | 2029 passed, 0 failed, 8 xfailed |
-| `ruff check --select E9,F` | clean |
-| version bumped in `pyproject.toml` | **not yet -- this is the gate** |
+| offline suite green | 2126 tests, 0 failures, 0 errors, 8 xfailed |
+| `ruff check --select E9,F` on every file this release touched | clean |
+| version bumped in `pyproject.toml` **and** `__init__.py` | done -- `0.2.0` in both, asserted to agree |
 | breaking changes documented | this file |
 | `bfinance.sector` removal documented | this file, section 1 |
 | push authorised by the maintainer | **no -- do not push** |

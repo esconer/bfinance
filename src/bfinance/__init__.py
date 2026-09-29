@@ -68,7 +68,7 @@ from .nse import marketlens
 
 ratios = ScreenerRatioSearch()
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 __author__ = "bfinance contributors"
 
 __all__ = [
