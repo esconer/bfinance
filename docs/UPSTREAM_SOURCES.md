@@ -306,6 +306,64 @@ Search   https://trendlyne.com/member/api/ac_snames/?term={SYMBOL}   (needs X-Re
 Use sitemap first (one bulk request, 5,922 instruments), search as fallback. **Neither covers
 mutual funds** — those are a separate namespace.
 
+### The richer search — a SECOND route, 22 fields, and a category vocabulary
+
+```
+Full     https://trendlyne.com/member/api/ac_snames/all/?term={q}&all-results=true
+         (needs X-Requested-With, same as the plain route)
+```
+
+Same robots rule as the plain search — `Disallow: */member/` covers `/member/api/ac_snames/all/`
+too, so it is not a cleaner path. It is a second path, not a permitted one, and the package gates it
+behind a **second** opt-in (`allow_full_search` on top of `allow_member_search`).
+
+It returns **22 fields** where the plain route returns 4. One real record, verbatim:
+
+```json
+{"id": "NIFTYBEES", "label": "Nippon India ETF Nifty 50 BeES(NIFTYBEES)", "value": "NIFTYBEES",
+ "k": 1588, "slugname": "nippon-india-etf-nifty-50-bees", "country": "IND",
+ "defaultExchange": "NSE", "stock_code": "NIFTYBEES", "UIcode": "NIFTYBEES", "category": "ETF",
+ "pageType": 10, "NSEcode": "NIFTYBEES", "BSEcode": "590103", "isCfd": false,
+ "currentPrice": 259.47, "day_change": -1.0, "day_changeP": -0.38, "day_high": 260.49,
+ "day_low": 257.9, "sectorName": "Others", "industry": {},
+ "nexturl": "https://trendlyne.com/equity/1588/NIFTYBEES/...",
+ "urls": [["Overview", "https://trendlyne.com/equity/1588/NIFTYBEES/..."]]}
+```
+
+**The top level is a bare JSON list**, not an object with a `data` key. Handled both ways, as the
+plain route is.
+
+**The category vocabulary, measured across 136 distinct (category, symbol) pairs from 8 queries on
+2026-09-30. Six strings, and two of them are traps:**
+
+| category | n | pageType | can this package fetch OHLC for it? |
+|---|---|---|---|
+| `Equity` | 73 | 2 | yes |
+| `Index` | 26 | 24 | yes |
+| `ETF` | 12 | 10 | yes (and absent from the equity sitemap entirely) |
+| `Mutual Funds` | 11 | 12 | **NO** — separate namespace, NAV not OHLC |
+| `Not Traded` | 9 | 2 | **NO** — delisted or suspended |
+| `Superstars` | 5 | *(absent)* | unknown — a vendor grouping, not an instrument class |
+
+This is the part that is **not decoration**. A `Mutual Funds` hit has no OHLC route on this package
+at all — the package's own not-found message already says mutual funds are a separate namespace at
+`/mutual-fund/nav/{id}/` — and a `Not Traded` hit is delisted. Resolving to either and returning a
+price history would be a **wrong** answer rather than a thin one. So the category is *carried on the
+result* (`SymbolCategory`, `parse_symbol_category`, `SymbolCategory.has_ohlc()`) and **never used to
+filter silently**: a filtered list would drop 9-11 of ~20 ranked rows and still look exhaustive,
+and only the caller knows whether they asked for a fund. An unrecognised string maps to `other` and
+is reported as unknown, never guessed into `equity`.
+
+**`label` is the display name with the ticker appended in parentheses**, and a company name may
+legitimately contain its own — so only a **trailing** group that *equals* the ticker is stripped. A
+blind `rsplit("(", 1)` truncates `"Tata Elxsi (India) Ltd"` to `"Tata Elxsi "`. Absent `label`
+falls back to the slug, then the symbol.
+
+**Not a resolver.** trendlyne's search is fuzzy and ranked (`"nifty bees"` → BANKBEES, …, NIFTYBEES
+fifth), and taking its first hit is what made `ohlc("nifty bees")` return a different security's
+bars with nothing to notice it by. The plain route already resolves a ticker correctly, so this one
+is for *discovery* and is deliberately not wired into `resolve_any`.
+
 ### Per-symbol token
 
 `https://trendlyne.com/equity/{id}/{SYMBOL}/{slug}/` contains a URL matching

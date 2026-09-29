@@ -116,6 +116,60 @@ resolver. It is 831 KB, hence the in-memory TTL cache (24 h default) and the opt
 ``1216``. Lookup is exact-match on that segment; :meth:`TrendlyneClient.search` is the escape
 hatch, because the slug carries the human-readable name.
 
+The richer search route, and why it categorises instead of filtering
+-------------------------------------------------------------------
+``GET /member/api/ac_snames/all/?term={q}&all-results=true`` is a **second** autocomplete, and it
+returns **22 fields** where the plain one at :data:`_SYMBOL_SEARCH_PATH` returns 4. One real record,
+verbatim::
+
+    {"id": "NIFTYBEES", "label": "Nippon India ETF Nifty 50 BeES(NIFTYBEES)",
+     "value": "NIFTYBEES", "k": 1588, "slugname": "nippon-india-etf-nifty-50-bees",
+     "country": "IND", "defaultExchange": "NSE", "stock_code": "NIFTYBEES",
+     "UIcode": "NIFTYBEES", "category": "ETF", "pageType": 10, "NSEcode": "NIFTYBEES",
+     "BSEcode": "590103", "isCfd": false, "currentPrice": 259.47, "day_change": -1.0,
+     "day_changeP": -0.38, "day_high": 260.49, "day_low": 257.9, "sectorName": "Others",
+     "industry": {}, "nexturl": "https://trendlyne.com/equity/1588/NIFTYBEES/...",
+     "urls": [["Overview", "https://trendlyne.com/equity/1588/NIFTYBEES/..."]]}
+
+The top level is a **bare JSON list**, not an object with a ``data`` key, so the unwrapping is the
+same ``payload.get("data") or payload.get("results") or []`` the plain route does, applied only when
+the payload is a dict. Measured across **136 distinct (category, symbol) pairs from 8 queries** on
+2026-09-30, the vendor's category vocabulary is exactly six strings, and they are not decoration:
+
+    ============  ===  ===========  ===========================================
+    category        n   pageType    what resolving to it would mean
+    ============  ===  ===========  ===========================================
+    Equity          73           2  a normal listed share, OHLC available
+    Index           26          24  an index series, OHLC available
+    ETF             12          10  an exchange-traded fund, OHLC available
+    Mutual Funds    11          12  **no OHLC route exists at all**
+    Not Traded       9           2  delisted or suspended
+    Superstars        5     absent  a vendor-side grouping, not an instrument type
+    ============  ===  ===========  ===========================================
+
+**A ``Mutual Funds`` hit has no OHLC route whatsoever** -- mutual funds are a separate namespace at
+``/mutual-fund/nav/{id}/``, which this package already says so in its own not-found message -- and a
+``Not Traded`` hit is delisted. Either one handed back as a price history would be a **wrong** answer
+rather than a thin one. So the category is carried on the result (:attr:`SymbolCategory`,
+:func:`parse_symbol_category`, :meth:`SymbolCategory.has_ohlc`) and **never used to filter
+silently**: dropping the 20 unfetchable rows out of a ranked list would make the list look
+exhaustive when it is not, and the caller is the only one who knows whether a fund or a delisted
+line is what they asked for. An unrecognised vendor string maps to
+:attr:`SymbolCategory.OTHER` and is reported as unknown, never guessed into ``equity``.
+
+``label`` is the display name with the ticker appended in parentheses, and the parentheses are the
+trap: a company name may legitimately contain its own, so only a **trailing** group that equals the
+ticker is stripped. See :func:`_display_name`.
+
+This route is **not** wired into :meth:`TrendlyneClient.resolve_any_async`, and the reason is the
+one recorded in commit ``06f6c7c``: trendlyne's search is fuzzy and ranked, so it answers a question
+with 20 candidates and the first is the vendor's guess rather than an answer. ``ohlc("nifty bees")``
+returning BANKBEES -- a plausible frame for the wrong security, indistinguishable downstream -- is the
+worst outcome this package can produce. Discovery and resolution are different questions, so they get
+different methods. It is also gated **twice**: it needs :data:`MEMBER_SEARCH_FLAG` *and*
+:data:`FULL_SEARCH_FLAG`, because it is a second route into the same robots-disallowed namespace, and
+a second opt-in is the cheapest honest signal that a caller meant it.
+
 The per-symbol token, and what 444 actually means
 --------------------------------------------------
 The OHLC route needs an opaque per-symbol token that exists **only** inside the symbol's own page,
@@ -277,6 +331,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import quote_plus, unquote
 
@@ -323,6 +378,7 @@ __all__ = [
     "DEMERGER_APPLIED",
     "DEMERGER_APPLIED_ATTR",
     "ENDPOINTS",
+    "FULL_SEARCH_FLAG",
     "GROUP_ENDPOINTS",
     "LISTING_DATE_ATTR",
     "MEMBER_SEARCH_FLAG",
@@ -337,6 +393,7 @@ __all__ = [
     "SNAPSHOT_ONLY_ATTR",
     "SNAPSHOT_PERIOD",
     "SOURCE_ATTR",
+    "SymbolCategory",
     "TrendlyneClient",
     "TrendlyneSymbol",
     "USER_AGENTS",
@@ -349,6 +406,7 @@ __all__ = [
     "parse_envelope",
     "parse_ohlc",
     "parse_sitemap",
+    "parse_symbol_category",
     "redact",
     "resolve",
     "symbol_index",
@@ -388,24 +446,39 @@ def _normalise_symbol_query(value: str) -> str:
 
 _SYMBOL_SEARCH_PATH = "/member/api/ac_snames/?term={query}"
 
+#: The same autocomplete, told to return everything. 22 fields instead of 4 -- it carries ``label``,
+#: ``category``, ``pageType``, ``defaultExchange`` and a live price, which is why it can say what an
+#: instrument *is* rather than only what it is called. Same robots rule, same namespace, and therefore
+#: a second opt-in (:data:`FULL_SEARCH_FLAG`) on top of :data:`MEMBER_SEARCH_FLAG`. Discovery only:
+#: it is deliberately not a fallback for :meth:`TrendlyneClient.resolve_any_async`, because it is
+#: fuzzy and ranked, which is the defect commit ``06f6c7c`` fixed. See the module docstring.
+_SYMBOL_SEARCH_FULL_PATH = "/member/api/ac_snames/all/?term={query}&all-results=true"
+
 #: Paths this package will not request unless a caller opts in, mapped to the robots.txt rule that
 #: forbids them. **Read from the live ``robots.txt`` on 2026-09-27**, whose ``User-agent: *`` block
 #: carries 28 ``Disallow`` rules and a ``Crawl-delay: 1``. (The 10 s figure that circulates for
 #: this site is scoped to ``GPTBot``/``ClaudeBot``, not to everybody.)
 #:
-#: One entry, and it is the one this package used to violate in shipped code:
+#: Two entries, both in the one namespace this package used to violate in shipped code:
 #:
-#: ==========================  =============================================================
-#: path                       covering rule
-#: ==========================  =============================================================
-#: ``/member/api/ac_snames/``  ``Disallow: */member/``
-#: ==========================  =============================================================
+#: ===============================  =============================================================
+#: path                            covering rule
+#: ===============================  =============================================================
+#: ``/member/api/ac_snames/``       ``Disallow: */member/``
+#: ``/member/api/ac_snames/all/``   ``Disallow: */member/``
+#: ===============================  =============================================================
 #:
 #: The rule is the **broad** ``*/member/``. robots.txt has a second, narrower member rule
 #: (``*/member/api/ac_snames/stock/``) which this package's path does *not* match — the specific
 #: one covers the ``/stock/`` sibling endpoint, not the ``?term=`` search this package called. The
 #: broad rule is what forbids it, and it was forbidding it while ``search_remote`` was a default
 #: part of :meth:`TrendlyneClient.resolve_any`. That is now opt-in and off.
+#:
+#: The ``/all/`` sub-path is covered by the same rule and is listed separately only so the table
+#: stays complete: a path is absent from this dict only when this package cannot build it. A
+#: robots matcher was run against the rule to check that, rather than assumed: ``*`` is a leading
+#: wildcard with no trailing ``$``, so ``*/member/`` matches any path containing ``/member/``, and
+#: ``/member/api/ac_snames/all/?term=`` contains it.
 #:
 #: Also disallowed, recorded so nobody re-derives it: ``*/onwards/``, ``*/edithistory/``,
 #: ``*/trendit/``, ``*/like/``, ``*/accounts/``, ``*/visitor/``, ``*/wholikes/``,
@@ -422,12 +495,26 @@ _SYMBOL_SEARCH_PATH = "/member/api/ac_snames/?term={query}"
 #: prefix, which a stock or group page never has.
 ROBOTS_DISALLOWED_ROUTES: Dict[str, str] = {
     "/member/api/ac_snames/": "Disallow: */member/",
+    "/member/api/ac_snames/all/": "Disallow: */member/",
 }
 
 #: The opt-in that permits a robots-disallowed route. ``False`` — off — is the default, and the
 #: only way to turn it on is to name it in the constructor or in the call. The name says which
 #: conflict is being overridden, because "allow_disallowed" would not.
 MEMBER_SEARCH_FLAG = "allow_member_search"
+
+#: The **second** opt-in, required by :meth:`TrendlyneClient.search_full` on top of
+#: :data:`MEMBER_SEARCH_FLAG`. ``False``, off, is the default, and it is checked *second*, so a
+#: caller who opens :data:`MEMBER_SEARCH_FLAG` and forgets this one still cannot reach the route.
+#:
+#: Why two switches rather than one. :data:`MEMBER_SEARCH_FLAG` is the standing decision that this
+#: package may ask a robots-disallowed path at all; the rich route is a *second* path into the same
+#: forbidden namespace, returns 20 ranked fuzzy candidates where the plain one resolves a ticker
+#: cleanly, and is the kind of call a caller reaches for by habit rather than by need. Each opt-in
+#: costs a second, explicit word at the call site, and the refusal names whichever of the two is
+#: actually missing. What this does **not** do is make the route compliant: both flags open a
+#: robots-disallowed path, and the default posture stays that neither is open.
+FULL_SEARCH_FLAG = "allow_full_search"
 
 #: Every route this package can address **today**, as ``str.format`` templates over
 #: ``stock_id``, ``symbol``, ``slug``, ``group_id``, ``group_slug``, ``period``, ``metric`` and
@@ -585,6 +672,100 @@ _SITEMAP_URL_RE = re.compile(r"/equity/(\d+)/([^/]+)/([^/?#]+)/?")
 # is matched strictly rather than case-insensitively.
 _PERIOD_RE = re.compile(r"^(?:latest|\d{4}|[A-Z][a-z]{2}-\d{4})$")
 _TOKEN_IN_URL_RE = re.compile(r"(/ohlc/\d+/)[A-Za-z0-9=]+/")
+#: A **trailing** parenthesised group at the end of a vendor ``label``, and only that. ``[^()]*``
+#: cannot cross a parenthesis, so the match is the last balanced group on the line and never a
+#: nested or internal one -- which is what keeps a company name's own parentheses intact.
+_LABEL_TICKER_RE = re.compile(r"\(([^()]*)\)\s*$")
+
+
+# ------------------------------------------------------- what a search hit actually is
+
+
+class SymbolCategory(str, Enum):
+    """What a search hit **is**, and whether this package can fetch a price history for it.
+
+    ``str``-valued on purpose: a category then serialises as its own value (``"etf"``, not
+    ``"SymbolCategory.ETF"``), so it drops into a frame's ``attrs`` or a JSON body without a
+    conversion step. :meth:`has_ohlc` is the reason the enumeration exists at all.
+
+    The vocabulary is **closed and measured**: :data:`_VENDOR_CATEGORIES` holds the six strings
+    trendlyne actually returned, counted across 136 distinct ``(category, symbol)`` pairs from 8
+    queries on 2026-09-30. Anything else is :attr:`OTHER`, which means *this package does not know
+    what this is*, not *it is an equity*. A guess there would be the wrong-instrument defect
+    commit ``06f6c7c`` fixed, wearing a category label.
+    """
+
+    #: A listed share. ``pageType`` 2 on every measured hit. OHLC is available.
+    EQUITY = "equity"
+    #: An exchange-traded fund. ``pageType`` 10. OHLC is available, and ETFs are absent from the
+    #: equity sitemap entirely, so this is the only route to them.
+    ETF = "etf"
+    #: An index series. ``pageType`` 24. OHLC is available.
+    INDEX = "index"
+    #: A mutual-fund scheme. ``pageType`` 12. **No OHLC route exists**: mutual funds live in a
+    #: separate namespace at ``/mutual-fund/nav/{id}/`` and carry NAV, not a price history.
+    MUTUAL_FUND = "mutual_fund"
+    #: Delisted or suspended. ``pageType`` 2, same as equity, which is why the *category* and not
+    #: the page type is the thing worth reading. **A price history is not the answer here.**
+    NOT_TRADED = "not_traded"
+    #: A category this package has not measured. See :func:`parse_symbol_category`.
+    OTHER = "other"
+
+    def has_ohlc(self) -> bool:
+        """Whether this package can fetch a price history for an instrument in this category.
+
+        ``True`` for :attr:`EQUITY`, :attr:`ETF` and :attr:`INDEX`: all three were measured
+        serving OHLC on this package's own route, with a per-symbol token.
+
+        ``False`` for :attr:`MUTUAL_FUND` and :attr:`NOT_TRADED`, and that is the assertion that
+        matters. A mutual fund has no OHLC route to fetch and a delisted line has no price, so a
+        caller that resolves to either and returns bars has returned a **wrong** answer rather than
+        an empty one. That is the reason the category is carried on the result at all.
+
+        ``False`` for :attr:`OTHER` too, and it is ``False`` rather than a third answer because this
+        method answers "can you fetch it", not "what is it": an unmeasured category has not earned
+        a ``True``. Read :attr:`OTHER` as unknown, and go and look: it is not evidence of an
+        equity.
+        """
+        return self in (SymbolCategory.EQUITY, SymbolCategory.ETF, SymbolCategory.INDEX)
+
+
+#: The vendor's own strings, verbatim, and nothing else. A key absent here maps to
+#: :attr:`SymbolCategory.OTHER`; it is never coerced to a neighbouring category, because a wrong
+#: category is worse than a missing one -- a caller reading ``OTHER`` knows to ask, while a caller
+#: reading ``EQUITY`` believes the vendor said so. ``"Superstars"`` is deliberately absent: it
+#: appeared on 5 measured pairs with no ``pageType``, and it describes a vendor-side grouping
+#: rather than an instrument class, so it is unmeasured here.
+_VENDOR_CATEGORIES: Dict[str, SymbolCategory] = {
+    "Equity": SymbolCategory.EQUITY,
+    "ETF": SymbolCategory.ETF,
+    "Index": SymbolCategory.INDEX,
+    "Mutual Funds": SymbolCategory.MUTUAL_FUND,
+    "Not Traded": SymbolCategory.NOT_TRADED,
+}
+
+
+def parse_symbol_category(value: Any) -> SymbolCategory:
+    """Map a vendor ``category`` string onto :class:`SymbolCategory`.
+
+    Args:
+        value: The ``category`` field off a search record. ``None``, a missing key and any
+            unrecognised string all return :attr:`SymbolCategory.OTHER`.
+
+    Returns:
+        The matching category, or :attr:`SymbolCategory.OTHER`. Never raises and never guesses:
+        the six measured strings are the whole vocabulary, so an eighth string is a vendor change
+        this package has not measured, and reporting it as unknown is the only honest answer. It
+        is a reported outcome, not a silent drop -- the caller can read
+        :attr:`SymbolCategory.OTHER` and decide.
+
+    Note:
+        Case-sensitive on purpose. ``"Mutual fund"`` and ``"mutual funds"`` are not in
+        :data:`_VENDOR_CATEGORIES`, so they return :attr:`SymbolCategory.OTHER` -- which is
+        visible rather than wrong, and is the direction a schema drift should fail in. A
+        case-insensitive lookup would be a guess about a vocabulary nobody has measured.
+    """
+    return _VENDOR_CATEGORIES.get(str(value or "").strip(), SymbolCategory.OTHER)
 
 
 # ------------------------------------------------------------------ symbol + paths
@@ -600,11 +781,31 @@ class TrendlyneSymbol:
             trendlyne's key, not guaranteed to equal the NSE ticker.
         stock_id: The integer path segment that identifies the stock to trendlyne.
         slug: The lowercase, hyphenated company name used in every URL.
+        name: The vendor's display name with the trailing ticker removed: ``Nippon India ETF
+            Nifty 50 BeES`` for a record labelled ``"Nippon India ETF Nifty 50 BeES(NIFTYBEES)"``.
+            ``""`` when the route that built this record carries no name, which is every sitemap
+            record; see :func:`_display_name` for the one rule that keeps a name containing its own
+            parentheses intact.
+        category: What the instrument is, from :func:`parse_symbol_category`. Defaults to
+            :attr:`SymbolCategory.OTHER` because a sitemap entry carries no category field; an
+            unstated category is not an equity, and a default of ``EQUITY`` would be a claim about
+            5,922 records that was never measured.
+        vendor_category: The vendor's raw ``category`` string, kept verbatim beside the mapped
+            :attr:`category`. It exists so :attr:`SymbolCategory.OTHER` is auditable: the caller can
+            see what trendlyne actually said instead of only this package's verdict on it.
     """
 
     symbol: str
     stock_id: int
     slug: str
+    # Appended after the original three, all defaulted: this dataclass is constructed positionally
+    # as TrendlyneSymbol(symbol, stock_id, slug) in parse_sitemap, in search_remote_async and in the
+    # tests. Adding a required field would break every one of those call sites, and the three above
+    # are the identity of the record while the three below are what one particular route knows
+    # extra about it.
+    name: str = ""
+    category: SymbolCategory = SymbolCategory.OTHER
+    vendor_category: str = ""
 
     @property
     def page_path(self) -> str:
@@ -617,6 +818,46 @@ class TrendlyneSymbol:
     def page_url(self) -> str:
         """Absolute URL of :attr:`page_path`."""
         return f"{BASE_URL}{self.page_path}"
+
+
+def _display_name(label: str, symbol: str, slug: str = "") -> str:
+    """The vendor's display name, with the trailing ticker removed **only when it is the ticker**.
+
+    A search record carries ``"Nippon India ETF Nifty 50 BeES(NIFTYBEES)"``: the display name with
+    the ticker appended in parentheses, which is how the site renders it in its own dropdown. The
+    ticker is the part already in :attr:`TrendlyneSymbol.symbol`, so what is wanted is the name.
+
+    A blind ``label.rsplit("(", 1)[0]`` is the obvious implementation and it is wrong, because a
+    company name may legitimately contain its own parentheses. Real ones do: ``"Tata Elxsi
+    (India) Ltd"`` is a name, not a wrapper. Two rules make it safe, and both are needed:
+
+    1. **Trailing only.** :data:`_LABEL_TICKER_RE` is anchored to the end of the string, so a
+       parenthetical that is part of the name is never a candidate.
+    2. **The group must be the ticker.** The captured text is compared to the symbol through
+       :func:`_normalise_symbol_query` before anything is removed, so a label whose last group is
+       something else is left whole. Nothing is stripped on a guess.
+
+    Args:
+        label: The vendor's ``label``, which may be absent or empty.
+        symbol: The record's symbol, used to decide whether the trailing group is the ticker.
+        slug: The record's slug, used when there is no usable label. **Not** title-cased or
+            otherwise prettified: a fallback is reported as the vendor wrote it, because a
+            fabricated name reads exactly like a measured one.
+
+    Returns:
+        The display name, or the slug, or the symbol -- whichever is the best thing actually on the
+        record. Never raises and never returns ``""`` for a record that has any of the three, so a
+        missing ``label`` degrades the field rather than the call.
+    """
+    text = (label or "").strip()
+    match = _LABEL_TICKER_RE.search(text)
+    if match and _normalise_symbol_query(match.group(1)) == _normalise_symbol_query(symbol):
+        # The group is the ticker, so it is the one that was added for the dropdown. Remove it and
+        # the name it was appended to is what remains.
+        text = text[: match.start()].strip()
+    if text:
+        return text
+    return (slug or symbol or "").strip()
 
 
 def _decoded(value: str) -> str:
@@ -1283,6 +1524,13 @@ class TrendlyneClient:
             :data:`MEMBER_SEARCH_FLAG`. Turning it on is the one thing in this package that
             knowingly requests a path the site asks crawlers not to fetch, so it is named
             explicitly and never inferred.
+        allow_full_search: Opt in to the **richer** search route
+            (``/member/api/ac_snames/all/``, 22 fields, categorised) used by :meth:`search_full`.
+            **Off by default, and it is a second gate rather than a wider one:** this route needs
+            ``allow_member_search=True`` *as well*, so opening one without the other still refuses.
+            See :data:`FULL_SEARCH_FLAG`. The two flags are separate because the two routes are
+            separate decisions: one resolves a ticker, the other lists ranked candidates for a
+            human to choose from.
     """
 
     #: Absolute base for every request. Exposed as a class attribute so a subclass can point at a
@@ -1300,6 +1548,7 @@ class TrendlyneClient:
         cache: Optional[Any] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
         allow_member_search: bool = False,
+        allow_full_search: bool = False,
     ) -> None:
         self.timeout = timeout
         self.max_retries = max(1, int(max_retries))
@@ -1310,6 +1559,9 @@ class TrendlyneClient:
         self.cache = cache
         self.transport = transport
         self.allow_member_search = bool(allow_member_search)
+        #: Second opt-in for :meth:`search_full`, and it is checked *after* ``allow_member_search``,
+        #: never instead of it. Read it; set it in the constructor or per call.
+        self.allow_full_search = bool(allow_full_search)
         self._last_request_time = 0.0
         # A threading.Lock, not asyncio.Lock: the sync wrappers call asyncio.run() per call, so
         # every call gets a fresh event loop and an asyncio primitive bound to an earlier one
@@ -1328,18 +1580,53 @@ class TrendlyneClient:
         #: it.
         self.symbol_resolution: Optional[str] = None
 
-    def _require_member_search(self, allowed: Optional[bool]) -> None:
+    def _require_member_search(
+        self,
+        allowed: Optional[bool],
+        *,
+        full: bool = False,
+        allow_full: Optional[bool] = None,
+    ) -> None:
         """Refuse a robots-disallowed request, naming the conflict and the switch.
 
+        One check for both search routes, because the reasoning is identical and the difference is
+        only **how many** flags it takes. :meth:`search_remote_async` calls it with ``full=False``
+        and needs :data:`MEMBER_SEARCH_FLAG`; :meth:`search_full_async` calls it with ``full=True``
+        and needs that flag **and** :data:`FULL_SEARCH_FLAG`. Duplicating the raise would have
+        produced two messages to keep in step, and they are the same message with a different number
+        of switches named.
+
         Args:
-            allowed: The per-call override, or ``None`` to use the constructor's setting.
+            allowed: The per-call override of :data:`MEMBER_SEARCH_FLAG`, or ``None`` to use the
+                constructor's setting.
+            full: ``True`` to apply the two-flag rule for :data:`_SYMBOL_SEARCH_FULL_PATH`. It is
+                checked **first**, so a caller who has not opened :data:`MEMBER_SEARCH_FLAG` is
+                told that, rather than being walked through a second flag they cannot use yet.
+            allow_full: The per-call override of :data:`FULL_SEARCH_FLAG`, or ``None``. Only read
+                when ``full`` is ``True``.
 
         Raises:
-            TrendlyneRobotsDisallowedError: The route is disallowed and the gate is closed. Raised
-                **before** any socket is opened, so honouring robots costs this package nothing.
+            TrendlyneRobotsDisallowedError: The route is disallowed and the gate it needs is
+                closed. Raised **before** any socket is opened, so honouring robots costs this
+                package nothing. The message names the **specific** missing flag by its constant
+                name, and for the two-flag route it says which of the two is missing rather than
+                listing both as if either would do.
         """
         if allowed if allowed is not None else self.allow_member_search:
-            return
+            if not full:
+                return
+            if allow_full if allow_full is not None else self.allow_full_search:
+                return
+            path = _SYMBOL_SEARCH_FULL_PATH.split("?")[0]
+            rule = ROBOTS_DISALLOWED_ROUTES.get(path, "Disallow")
+            raise TrendlyneRobotsDisallowedError(
+                f"{path} is disallowed by trendlyne's robots.txt ({rule}), so this request was "
+                f"not made. This route needs BOTH {MEMBER_SEARCH_FLAG}=True (which you have set) "
+                f"AND {FULL_SEARCH_FLAG}=True, and {FULL_SEARCH_FLAG} is the one that is closed. "
+                f"Pass {FULL_SEARCH_FLAG}=True to TrendlyneClient(...) or to search_full(...). "
+                f"Note that opening it changes nothing about the site's policy: this is still a "
+                f"robots-disallowed path, and the default stays that both flags are off."
+            )
         path = _SYMBOL_SEARCH_PATH.split("?")[0]
         rule = ROBOTS_DISALLOWED_ROUTES.get(path, "Disallow")
         raise TrendlyneRobotsDisallowedError(
@@ -1835,6 +2122,148 @@ class TrendlyneClient:
         """Sync variant of :meth:`search_remote_async`."""
         return _run_async(
             self.search_remote_async(query, limit=limit, allow_member_search=allow_member_search)
+        )
+
+    # -------------------------------------------- full search: the categorised route
+
+    async def search_full_async(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        allow_member_search: Optional[bool] = None,
+        allow_full_search: Optional[bool] = None,
+    ) -> List[TrendlyneSymbol]:
+        """Search trendlyne's **richer** autocomplete, which says what each hit *is*.
+        **Opt-in twice; off by default, because robots.txt disallows it.**
+
+        :data:`_SYMBOL_SEARCH_FULL_PATH` is a second route beside :meth:`search_remote_async`, and
+        it returns **22 fields** where that one returns 4. A real record, verbatim::
+
+            {"id": "NIFTYBEES", "label": "Nippon India ETF Nifty 50 BeES(NIFTYBEES)",
+             "value": "NIFTYBEES", "k": 1588, "slugname": "nippon-india-etf-nifty-50-bees",
+             "country": "IND", "defaultExchange": "NSE", "stock_code": "NIFTYBEES",
+             "UIcode": "NIFTYBEES", "category": "ETF", "pageType": 10, "NSEcode": "NIFTYBEES",
+             "BSEcode": "590103", "isCfd": false, "currentPrice": 259.47, "day_change": -1.0,
+             "day_changeP": -0.38, "day_high": 260.49, "day_low": 257.9, "sectorName": "Others",
+             "industry": {}, "nexturl": "https://trendlyne.com/equity/1588/NIFTYBEES/...",
+             "urls": [["Overview", "https://trendlyne.com/equity/1588/NIFTYBEES/..."]]}
+
+        Only three of those are surfaced, because only three belong on a resolver record: the symbol
+        and id (addressing), the slug (the URL), and the name and category (what it is). The rest --
+        a live price, a day's change -- are a snapshot with no date on them, and this package does
+        not publish an undated price.
+
+        **The category is the point of the method, and it is carried rather than filtered.** The
+        measured vocabulary across 136 distinct ``(category, symbol)`` pairs from 8 queries on
+        2026-09-30 is six strings: ``Equity`` (73, pageType 2), ``Index`` (26, pageType 24), ``ETF``
+        (12, pageType 10), ``Mutual Funds`` (11, pageType 12), ``Not Traded`` (9, pageType 2) and
+        ``Superstars`` (5, no pageType). Two of the six cannot be resolved to a price history at
+        all -- a mutual fund lives in a separate namespace at ``/mutual-fund/nav/{id}/`` and carries
+        NAV rather than OHLC, and a ``Not Traded`` line is delisted or suspended. Handing either
+        back with bars would be a **wrong** answer rather than a thin one, so
+        :attr:`TrendlyneSymbol.category` is set and :meth:`SymbolCategory.has_ohlc` is exposed for
+        the caller to branch on. Dropping them from the list instead would be wrong in a different
+        way: a 20-row ranked list with 9 rows missing looks like an exhaustive answer, and only the
+        caller knows whether they wanted a fund. ``Superstars`` and any string outside the six map
+        to :attr:`SymbolCategory.OTHER` and are reported as unknown rather than guessed into
+        ``equity``.
+
+        **This is not wired into :meth:`resolve_any_async`, deliberately.** That route is fuzzy and
+        ranked -- ``"nifty bees"`` returns five BEES ETFs with BANKBEES first and NIFTYBEES fifth --
+        and resolving to the first hit is what made ``ohlc("nifty bees")`` return a different
+        security's bars with nothing to notice it by (commit ``06f6c7c``). This method returns up to
+        20 ranked candidates for a human to choose from, and the plain route already resolves a
+        ticker correctly; feeding the fuzzy one into resolution would recreate that defect. Use it
+        to *discover* what exists, then resolve deliberately.
+
+        Args:
+            query: Symbol or company-name fragment, as for :meth:`search_remote_async`.
+            limit: Maximum records to return. The vendor's order is preserved, because the ranking
+                is the vendor's only claim about which candidate is most likely meant, and
+                re-sorting it here would assert a preference this package has not measured.
+            allow_member_search: Per-call override of :data:`MEMBER_SEARCH_FLAG`.
+            allow_full_search: Per-call override of :data:`FULL_SEARCH_FLAG`. **Both** this and
+                ``allow_member_search`` are required.
+
+        Returns:
+            Categorised records, best match first. Empty when trendlyne has no match, which is an
+            expected outcome of a fuzzy search rather than an error.
+
+        Raises:
+            TrendlyneRobotsDisallowedError: Either gate is closed. The message names the specific
+                missing flag by its constant name and the disallowed path with its covering rule.
+                Raised **before** the request, so a refusal costs zero requests.
+            TrendlyneSchemaError: The response was neither a list nor an object carrying one under
+                ``data``/``results``.
+            ValueError: ``query`` is empty.
+        """
+        clean = (query or "").strip()
+        if not clean:
+            raise ValueError("query must be a non-empty string")
+        self._require_member_search(
+            allow_member_search, full=True, allow_full=allow_full_search
+        )
+
+        path = _SYMBOL_SEARCH_FULL_PATH.format(query=quote_plus(clean))
+        payload = await self.fetch_json_async(path, xhr=True)
+        # The top level of this route is a BARE LIST, measured, while the plain route can answer
+        # with an object. Both are handled, the same way search_remote_async handles them, rather
+        # than one shape being assumed correct.
+        if isinstance(payload, dict):
+            payload = payload.get("data") or payload.get("results") or []
+        if not isinstance(payload, list):
+            raise TrendlyneSchemaError(
+                f"full symbol search returned {type(payload).__name__}, expected a list. "
+                f"First 200 chars: {str(payload)[:200]!r}"
+            )
+
+        out: List[TrendlyneSymbol] = []
+        for item in payload:
+            if not isinstance(item, dict) or "k" not in item:
+                # The no-match sentinel, or a record without an id. Skip rather than invent one.
+                continue
+            symbol = str(item.get("id") or item.get("value") or "").strip()
+            slug = str(item.get("slugname") or "").strip()
+            if not symbol or not slug:
+                continue
+            try:
+                stock_id = int(item["k"])
+            except (TypeError, ValueError):
+                continue
+            vendor_category = str(item.get("category") or "").strip()
+            out.append(
+                TrendlyneSymbol(
+                    symbol=symbol,
+                    stock_id=stock_id,
+                    slug=slug,
+                    name=_display_name(
+                        str(item.get("label") or ""), symbol, slug
+                    ),
+                    category=parse_symbol_category(vendor_category),
+                    vendor_category=vendor_category,
+                )
+            )
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
+    def search_full(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        allow_member_search: Optional[bool] = None,
+        allow_full_search: Optional[bool] = None,
+    ) -> List[TrendlyneSymbol]:
+        """Sync variant of :meth:`search_full_async`."""
+        return _run_async(
+            self.search_full_async(
+                query,
+                limit=limit,
+                allow_member_search=allow_member_search,
+                allow_full_search=allow_full_search,
+            )
         )
 
     async def resolve_any_async(

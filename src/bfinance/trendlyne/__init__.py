@@ -52,6 +52,27 @@ The consequence is stated rather than hidden: with the default configuration, ET
 reachable through this package. :data:`~bfinance.trendlyne.client.ROBOTS_DISALLOWED_ROUTES` holds
 the rules, and the 28 ``Disallow`` entries that were read to produce it are listed there.
 
+A second route behind a second opt-in
+-------------------------------
+trendlyne also serves a **richer** autocomplete at ``/member/api/ac_snames/all/``, which returns 22
+fields where the first returns 4, including a display name and the vendor's own ``category``.
+:meth:`~bfinance.trendlyne.client.TrendlyneClient.search_full` reads it, and needs
+**both** ``allow_member_search=True`` **and** ``allow_full_search=True`` (:data:`~bfinance.trendlyne.client.FULL_SEARCH_FLAG`).
+Opening one without the other still refuses, and the message names the one that is actually missing.
+
+It exists because the categories are not decoration. Measured across 136 distinct
+``(category, symbol)`` pairs on 2026-09-30, two of the six categories trendlyne returns **cannot** be
+resolved to a price history at all: ``Mutual Funds`` is a separate namespace carrying NAV, and
+``Not Traded`` is delisted. So :class:`~bfinance.trendlyne.client.SymbolCategory` is **carried on
+the result**, not used to filter (a filtered list would look exhaustive and would not be), and
+:meth:`~bfinance.trendlyne.client.SymbolCategory.has_ohlc` says plainly which categories this
+package can fetch bars for. An unrecognised category is reported as unknown, never guessed into
+``equity``.
+
+**It is not a resolver.** trendlyne's search is fuzzy and ranked, which is the defect commit
+``06f6c7c`` fixed; this method returns candidates for a human to choose from, and it is deliberately
+not wired into ``resolve_any``.
+
 Nothing is fabricated. A table that is absent raises, a value that is missing stays missing, and
 every returned frame carries its provenance and a note on what it does not contain.
 """
@@ -63,6 +84,7 @@ from .client import (
     DEMERGER_APPLIED,
     DEMERGER_APPLIED_ATTR,
     ENDPOINTS,
+    FULL_SEARCH_FLAG,
     GROUP_ENDPOINTS,
     LISTING_DATE_ATTR,
     MEMBER_SEARCH_FLAG,
@@ -78,6 +100,7 @@ from .client import (
     SNAPSHOT_ONLY_ATTR,
     SNAPSHOT_PERIOD,
     SOURCE_ATTR,
+    SymbolCategory,
     VOLUME_BEFORE_LISTING_ATTR,
     WINDOW_ATTR,
     TrendlyneClient,
@@ -89,6 +112,7 @@ from .client import (
     parse_envelope,
     parse_ohlc,
     parse_sitemap,
+    parse_symbol_category,
     redact,
     resolve,
     symbol_index,
@@ -148,6 +172,7 @@ __all__ = [
     "DEMERGER_APPLIED",
     "DEMERGER_APPLIED_ATTR",
     "ENDPOINTS",
+    "FULL_SEARCH_FLAG",
     "GROUP_ENDPOINTS",
     "LISTING_DATE_ATTR",
     "MEMBER_SEARCH_FLAG",
@@ -163,6 +188,7 @@ __all__ = [
     "SNAPSHOT_ONLY_ATTR",
     "SNAPSHOT_PERIOD",
     "SOURCE_ATTR",
+    "SymbolCategory",
     "VOLUME_BEFORE_LISTING_ATTR",
     "WINDOW_ATTR",
     "TrendlyneClient",
@@ -174,6 +200,7 @@ __all__ = [
     "parse_envelope",
     "parse_ohlc",
     "parse_sitemap",
+    "parse_symbol_category",
     "redact",
     "resolve",
     "symbol_index",
