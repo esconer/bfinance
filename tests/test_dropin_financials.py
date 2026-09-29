@@ -1,8 +1,30 @@
 """Drop-in financials parity vs live yfinance for RELIANCE.NS (yfinance 1.7.0).
 
-Native bfinance orientation/rows/units are the contract (metric rows x
-"Mar YYYY" cols, TitleCase Indian labels, Rs Cr) — this file asserts
-self-consistency + yfinance-bridge alignment, never native equality.
+bfinance orientation/rows/units are the contract (metric rows x period columns,
+TitleCase Indian labels, Rs Cr) -- this file asserts self-consistency +
+yfinance-bridge alignment, never native equality.
+
+**Row vocabulary, since the accessors were wired to the yfinance shape.**
+``get_income_stmt``, ``get_balance_sheet`` and ``get_cash_flow`` return
+``FinancialStatement.to_yfinance()``, so the row labels asserted here are the generic
+yfinance names from ``INDIAN_TO_YFINANCE_LABELS`` rather than screener.in's. Five tests
+in this file still spelled the Indian labels and were failing with ``KeyError`` on the
+rename; they have been migrated one label at a time and nothing else about them changed --
+same rows required, same arithmetic, same tolerances. The mapping used:
+
+    Sales                        -> Total Revenue
+    Expenses                     -> Total Expenses
+    Operating Profit             -> Operating Income
+    Net Profit                   -> Net Income
+    Cash from Operating Activity -> Operating Cash Flow
+    Cash from Investing Activity -> Investing Cash Flow
+    Cash from Financing Activity -> Financing Cash Flow
+    Net Cash Flow                -> Net Cash Flow   (unchanged)
+    Total Assets / Total Liabilities               (unchanged)
+
+A test that stops asserting anything is worse than a red one, so every migrated test kept
+every assertion it had -- only the vocabulary moved. The four ``to_yfinance_bridge_*`` tests
+and the balance-sheet tests already spoke the yfinance vocabulary and are untouched.
 """
 import pandas as pd
 import pytest
@@ -47,8 +69,10 @@ def test_annual_income_nonempty_and_coverage():
     df = Ticker(TICKER).get_income_stmt(freq="yearly")
     assert isinstance(df, pd.DataFrame) and not df.empty
     assert df.shape[1] >= 8
-    for r in ("Sales", "Net Profit"):
-        assert r in df.index
+    # "Sales"/"Net Profit" -> "Total Revenue"/"Net Income". Still two required rows, still
+    # the top and bottom line of the P&L.
+    for r in ("Total Revenue", "Net Income"):
+        assert r in df.index, f"missing yfinance row {r}: {list(df.index)}"
 
 
 @pytest.mark.live
@@ -69,8 +93,10 @@ def test_annual_cashflow_nonempty_and_coverage():
     df = Ticker(TICKER).get_cash_flow(freq="yearly")
     assert isinstance(df, pd.DataFrame) and not df.empty
     assert df.shape[1] >= 8
-    for r in ("Cash from Operating Activity", "Net Cash Flow"):
-        assert r in df.index
+    # "Cash from Operating Activity" -> "Operating Cash Flow". "Net Cash Flow" is unmapped,
+    # so it survives the rename under its own name and is asserted as such.
+    for r in ("Operating Cash Flow", "Net Cash Flow"):
+        assert r in df.index, f"missing yfinance row {r}: {list(df.index)}"
 
 
 @pytest.mark.live
@@ -83,7 +109,8 @@ def test_quarterly_income_nonempty_and_coverage():
         pytest.skip("quarterly income not supported by backend")
     assert isinstance(qdf, pd.DataFrame) and not qdf.empty
     assert qdf.shape[1] >= 8
-    assert "Sales" in qdf.index
+    # "Sales" -> "Total Revenue".
+    assert "Total Revenue" in qdf.index, f"missing yfinance row Total Revenue: {list(qdf.index)}"
 
 
 @pytest.mark.live
@@ -126,15 +153,23 @@ def test_cash_flow_totals_reconcile():
     from bfinance.ticker import Ticker
 
     df = Ticker(TICKER).get_cash_flow(freq="yearly")
+    # The three "Cash from <x> Activity" rows -> the three yfinance cash-flow rows.
     rows = (
-        "Cash from Operating Activity",
-        "Cash from Investing Activity",
-        "Cash from Financing Activity",
+        "Operating Cash Flow",
+        "Investing Cash Flow",
+        "Financing Cash Flow",
     )
+    for r in rows + ("Net Cash Flow",):
+        assert r in df.index, f"missing yfinance row {r}: {list(df.index)}"
+    # The arithmetic is unchanged; only the units of both sides moved together (Rs Cr -> Rs),
+    # so a relative tolerance still holds.
+    checked = 0
     for col in df.columns:
         expect = sum(float(df.loc[r, col]) for r in rows)
         got = float(df.loc["Net Cash Flow", col])
         assert _rel_close(got, expect, TOL_RECONCILE), f"{col}: net {got} vs sum {expect}"
+        checked += 1
+    assert checked >= 8, f"only {checked} period(s) reconciled; a one-column pass is not a check"
 
 
 @pytest.mark.live
@@ -142,11 +177,21 @@ def test_income_operating_profit_reconcile():
     from bfinance.ticker import Ticker
 
     df = Ticker(TICKER).get_income_stmt(freq="yearly")
-    cols = [c for c in df.columns if c != "TTM"]
+    # The old line was ``cols = [c for c in df.columns if c != "TTM"]``. On the yfinance shape
+    # every column is already a month-end Timestamp and the TTM column is dropped by name
+    # (``NON_DATE_PERIOD_HEADERS``), so the filter could only ever be dead code -- and would
+    # have passed while the frame quietly gained a junk column. Asserting its property
+    # directly is what keeps "reconcile every fiscal period" true rather than merely
+    # satisfied.
+    non_dates = [c for c in df.columns if not isinstance(c, pd.Timestamp)]
+    assert not non_dates, f"non-date period columns present, TTM among them: {non_dates}"
+    cols = list(df.columns)
     assert len(cols) >= 8
+    for r in ("Total Revenue", "Total Expenses", "Operating Income"):
+        assert r in df.index, f"missing yfinance row {r}: {list(df.index)}"
     for col in cols:
-        expect = float(df.loc["Sales", col]) - float(df.loc["Expenses", col])
-        got = float(df.loc["Operating Profit", col])
+        expect = float(df.loc["Total Revenue", col]) - float(df.loc["Total Expenses", col])
+        got = float(df.loc["Operating Income", col])
         assert _rel_close(got, expect, TOL_RECONCILE), f"{col}: op {got} vs {expect}"
 
 

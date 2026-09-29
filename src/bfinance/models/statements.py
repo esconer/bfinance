@@ -10,14 +10,16 @@ YFinance shape via ``FinancialStatement.to_yfinance()``:
   same orientation (metric rows x period columns), columns parsed to
   DatetimeIndex (month-end dates) and ordered NEWEST FIRST as yfinance orders them,
   values scaled x1e7 to absolute Rs, Indian labels renamed to generic yfinance labels
-  where a mapping exists (unmapped rows kept as-is).
+  where a mapping exists (unmapped rows kept as-is). The scale applies to the monetary
+  rows only: percentages, per-share quantities and ratios pass through unchanged --
+  see ``_rows_to_scale``.
 
 ``to_dataframe()`` is the native shape and stays the contract finengine reads; it imposes
 no order on the caller's headers. ``to_yfinance()`` is the yfinance shape and imposes the
 yfinance period order. The two are deliberately not the same thing.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 from pydantic import BaseModel, Field
 import pandas as pd
 
@@ -53,17 +55,88 @@ INDIAN_TO_YFINANCE_LABELS: Dict[str, str] = {
     "Net Cash Flow": "Net Cash Flow",
 }
 
-#: Rs Cr -> absolute Rs. Applied to every row of :meth:`FinancialStatement.to_yfinance`
-#: except the per-share rows below.
+#: Rs Cr -> absolute Rs. Applied only to the rows that are monetary amounts; see
+#: :func:`_rows_to_scale` for the rule and for the recorded evidence behind it.
 CR_TO_RS = 1e7
 
 #: yfinance row labels that are **per-share quantities**, not Rs Cr, and so are exempt from
 #: the :data:`CR_TO_RS` scale. yfinance's ``Diluted EPS`` is rupees per share, so multiplying
 #: it by 1e7 turns ITC's reported 16.51 into 165,100,000 -- a number in no unit at all, and
 #: one that also makes a P/E computed from this frame wrong by a factor of 1e7. screener.in
-#: prints the row as ``EPS in Rs``, i.e. already rupees; only the other rows are in Cr.
-#: Keyed on the *output* label, because that is the row a caller reads.
+#: prints the row as ``EPS in Rs``, i.e. already rupees. Keyed on the *output* label,
+#: because that is the row a caller reads.
 PER_SHARE_LABELS = frozenset({"Diluted EPS"})
+
+#: Row labels that are **dimensionless** -- ratios, day counts and share counts -- and are
+#: therefore not Rs Cr amounts either. Every entry is a row that one of the committed
+#: screener.in recordings (``tests/fixtures/screener``, captured 2026-09-27) actually emits,
+#: so this is a list of measured labels rather than of anticipated ones:
+#:
+#: * ``section#cash-flow`` -- ``CFO/OP`` 93.0, i.e. cash from operations as a share of
+#:   operating profit: a number near 100, not a rupee amount;
+#: * ``section#ratios`` -- ``Debtor Days`` 23.0, ``Inventory Days`` 178.0, ``Days Payable``
+#:   55.0, ``Cash Conversion Cycle`` 146.0, ``Working Capital Days`` 45.0;
+#: * ``section#shareholding`` -- ``Promoters`` 71.77, ``FIIs`` 34.83, ``DIIs`` 49.15,
+#:   ``Government`` 0.04 and ``Public`` 15.96 (percent of shares held, which screener.in
+#:   prints *without* a ``%``), plus ``No. of Shareholders`` 4041653.0, a plain count.
+#:
+#: None of these tables is served by ``Ticker.get_*_stmt`` -- those three accessors hand back
+#: the P&L, balance sheet and cash flow tables -- but :meth:`FinancialStatement.to_yfinance`
+#: is public and a profile's ``ratios_history``/``shareholding`` are ``FinancialStatement``
+#: like any other, so the same defect is reachable through them and is closed here rather
+#: than left for the first caller who tries.
+RATIO_LABELS = frozenset({
+    # section#cash-flow
+    "CFO/OP",
+    # section#ratios
+    "Debtor Days", "Inventory Days", "Days Payable",
+    "Cash Conversion Cycle", "Working Capital Days",
+    # section#shareholding: percent of shares held (no "%" marker) and one count
+    "Promoters", "FIIs", "DIIs", "Government", "Public", "No. of Shareholders",
+})
+
+
+def _rows_to_scale(source_labels: Iterable[str]) -> Set[str]:
+    """
+    The rows :data:`CR_TO_RS` may convert, named by the **output** label a caller reads.
+
+    The rule is one sentence: **the scale converts money, so only a row that screener.in
+    prints in Rs Cr may be scaled.** screener.in states each row's unit in the row label, and
+    all three non-monetary kinds are present in the committed recordings:
+
+    ===========================  =======================  =====================================
+    kind                         how it is recognised     recorded row and its reported value
+    ===========================  =======================  =====================================
+    percentage                   a ``%`` in the label     ``OPM %`` 35.0, ``Tax %`` 25.0,
+                                                           ``Dividend Payout %`` 88.0,
+                                                           ``ROCE %`` 39.0
+    per share                    :data:`PER_SHARE_LABELS`  ``EPS in Rs`` 16.51 -> ``Diluted EPS``
+    ratio / days / count         :data:`RATIO_LABELS`     ``CFO/OP`` 93.0, ``Debtor Days`` 23.0,
+                                                           ``No. of Shareholders`` 4041653.0
+    ===========================  =======================  =====================================
+
+    Measured against the code as it stood, ``OPM %`` came back as ``350000000.0`` for a
+    reported 35.0. That is fabricated magnitude on the primary return path, because
+    ``get_income_stmt``, ``get_balance_sheet`` and ``get_cash_flow`` all hand back this frame
+    -- and it is the class of error this package exists to prevent, arriving through the
+    yfinance-parity work rather than around it.
+
+    Two details are load-bearing:
+
+    * the decision is taken on the label **as screener.in printed it**, because that is the
+      only label that carries a unit, and it has to be taken **before** the rename: ``Tax %``
+      is a percentage and its yfinance name, ``Tax Rate``, no longer contains a ``%``.
+      Deciding after the rename scales it to 250,000,000 and reports nothing;
+    * :data:`PER_SHARE_LABELS` and :data:`RATIO_LABELS` are keyed on the *output* label,
+      because that is the row a caller reads.
+    """
+    named = PER_SHARE_LABELS | RATIO_LABELS
+    return {
+        INDIAN_TO_YFINANCE_LABELS.get(label, label)
+        for label in source_labels
+        if "%" not in label and INDIAN_TO_YFINANCE_LABELS.get(label, label) not in named
+    }
+
 
 #: Non-date period headers that :meth:`FinancialStatement.to_yfinance` refuses to guess at.
 #: ``screener.in`` appends ``TTM`` to the annual P&L table; a trailing-twelve-months total
@@ -150,7 +223,10 @@ class FinancialStatement(BaseModel):
         2. **Newest-first columns.** yfinance's statement frames read
            ``df.columns[0]`` as the latest period. Reproducing screener's oldest-first order
            would make every "latest period" lookup silently return the oldest one.
-        3. **Per-share rows are not scaled.** See :data:`PER_SHARE_LABELS`.
+        3. **Non-monetary rows are not scaled.** The Cr -> Rs scale converts money, so it is
+           applied only to the rows screener.in prints in Rs Cr; percentages, per-share
+           quantities and ratios pass through unchanged. See :func:`_rows_to_scale` for the
+           rule and the recorded evidence behind it.
         4. **Non-date periods are dropped and said so.** See
            :data:`NON_DATE_PERIOD_HEADERS`; the dropped header names are in
            ``attrs["bfinance_dropped_period_columns"]``.
@@ -164,6 +240,9 @@ class FinancialStatement(BaseModel):
         if not self.headers or not self.rows:
             return pd.DataFrame()
         df = self.to_dataframe(orient="columns")
+        # Decided on the screener.in labels, before the rename below hides the unit they
+        # carry ("Tax %" -> "Tax Rate"), and keyed by the output label the caller reads.
+        scalable = _rows_to_scale(df.index)
         df = df.rename(index=INDIAN_TO_YFINANCE_LABELS)
         dates, keep, dropped = [], [], []
         for col in df.columns:
@@ -199,7 +278,7 @@ class FinancialStatement(BaseModel):
             # caller put it and the frame does not silently reorder itself.
             df = df.groupby(level=0, sort=False).first()
 
-        scaled = [label for label in df.index if label not in PER_SHARE_LABELS]
+        scaled = [label for label in df.index if label in scalable]
         if scaled:
             df.loc[scaled] = df.loc[scaled] * CR_TO_RS
 
