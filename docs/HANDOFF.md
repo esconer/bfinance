@@ -6,6 +6,14 @@ This file is the **state**: what exists, what is green, what is undecided, and w
 Date: 2026-09-27. Spec/tracker: `C:\es\coding\finengine\.scratch\data-correctness-2026-09\`
 (108 tickets; **the statuses there are stale** — six tickets have code landed against them).
 
+> **This file is a dated snapshot, not a live status page.** The `Date:` line is the session it
+> describes, and its "Found, not yet fixed" table is what was true *on that date*. Where code has
+> since landed, the row is struck through and marked **FIXED** with a pointer, rather than rewritten
+> in place, so the record of what was believed is not destroyed. The live truth for the
+> trendlyne package is `docs/UPSTREAM_SOURCES.md` section 4 and the module docstrings; for the
+> removal of `bfinance.sector` it is `docs/RELEASE_0.2.0.md` section 1. **Corrected 2026-09-30:** two
+> rows below are now known to be stale and say so inline.
+
 ---
 
 ## Nothing is committed
@@ -72,7 +80,7 @@ When issue 04 lands they will XPASS-fail under `strict=True`, which is the signa
 | ~~**No `price_basis` on any bfinance frame**~~ **FIXED** | `attrs["price_basis"]` now set on every path: `as_traded` (bhavcopy unadjusted), `as_traded_share_count_adjusted` (adjusted), `screener_close_real_derived_ohlc_unadjusted` (synthetic), and on empty frames too. Deliberately **not** `yfinance_adjusted` — no demerger, buy-back or rights reaches it and no dividend reaches O/H/L/C, so parity would be a false claim. |
 | ~~**Volume never scaled**~~ **FIXED, and my stated test was wrong** | I specified "volume roughly doubles, price roughly halves" as the check. Neither happens: median Close ratio **0.446**, median Volume ratio **1.475** across RELIANCE's 1:1 bonus. The agent verified by **direction** instead — if volume were already on post-bonus shares it would have *fallen* ~2.2× with the price; it rose, so the column carries two share-count bases. Scaling is by the inverse factor and the test asserts the **invariant** (`price × volume` identical per bar, 21,476,020,636 on both sides), which is the only test that would survive a vendor changing its volume convention. Also asserted: `Dividends` and `Stock Splits` untouched, and 1.5 sub-divisions scale correctly (proving it is not hardcoded 2.0). |
 | **`history_metadata()["firstTradeDate"]` is not the listing date** | It is the first bar of the current fetch (`2025-09-29` for a 1y window), i.e. it changes with the requested range. Also note this property costs **~10 minutes** because it reads `info`, which walks ~250 daily bhavcopy archives. |
-| **`bfinance_trendlyne_price_basis` lies** | The attr is set unconditionally to `"yfinance_back_adjusted"` and is **wrong for the entire demerger class**. Measured: Trendlyne is byte-identical to bhavcopy on ITC 62/62 bars, and its ÷ yfinance ratio is exactly 1.038513 on 2017/2018/2020/2022/2024. It back-adjusts splits and bonuses (HDFCBANK 0/62, MOTHERSON 0/62 — the two names with post-window share events) and applies **no** demerger adjustment. Honest value: `as_traded_split_bonus_adjusted`. This is the third instance in this project of a field named after a derived quantity that is actually something else — and the first one in **our own** code. |
+| ~~**`bfinance_trendlyne_price_basis` lies**~~ **FIXED** (stale as of 2026-09-30) | The attr is set unconditionally to `"yfinance_back_adjusted"` and is **wrong for the entire demerger class**. Measured: Trendlyne is byte-identical to bhavcopy on ITC 62/62 bars, and its ÷ yfinance ratio is exactly 1.038513 on 2017/2018/2020/2022/2024. It back-adjusts splits and bonuses (HDFCBANK 0/62, MOTHERSON 0/62 — the two names with post-window share events) and applies **no** demerger adjustment. Honest value: `as_traded_split_bonus_adjusted`. This is the third instance in this project of a field named after a derived quantity that is actually something else — and the first one in **our own** code. **The measurement stands; the defect is closed.** The attr now reads `as_traded_split_bonus_adjusted` and a sibling `bfinance_trendlyne_demerger_applied` publishes `False` so a consumer can branch on the fact without parsing a label. Verified in this tree: `PRICE_BASIS == "as_traded_split_bonus_adjusted"`, `DEMERGER_APPLIED is False`. Basis keys are stamped by `parse_ohlc` only, not by `build_attrs`. See `docs/UPSTREAM_SOURCES.md` section 4. |
 | ~~**`_DIVIDEND_RE` drops multi-component dividends**~~ **FIXED** | Rewritten as a loose amount pattern plus explicit word-class guards, matching the file's existing house style. Over a live 43,788-row pull: **65 subjects gained, 19 changed, 0 lost**; dividend rows 25,572 → 25,638; declared rupees **149,589.86 → 150,364.44**. The real ITC 2011-06-10 case now returns **4.45**. The dangerous false positive was **not** the one predicted: a dividend-keyword-anywhere guard alone is insufficient, because **405 rows contain `div` via `Sub-Division`** and rights/premium rows can be fused with a real dividend. `div(?!ision)` is load-bearing — `Division` is the only `div`-initial non-dividend word and its amounts are face values. |
 | **Structural events are named, not lumped into `other`** | `structural_action_kinds()` + `structural_actions()` + `attrs["bfinance_structural_action_rows"]`. **255 rows / 202 symbols** measured, 1996→2026. Demergers deliberately stay `Action="other"`, `SplitRatio=None` — of 255 rows exactly **one** carries a factor and it is a genuine bonus (`Bonus 4:5 Pursuant To Scheme Of Amalgamation` → 1.8). `composit` is a false friend: one of its three subjects is a *company* (Gujarat Composite Ltd). |
 | **`parse_bhavcopy` dedups on `(Date, Symbol)`** | Upstream prints **the same ticker twice in one file under two series** — **65 instances across 24 archives** (`RADIOCITY` as `EQ`+`P1`). One bar is silently dropped. Pre-existing and outside `EQ`∪`BE`, so the fix neither causes nor worsens it, but the union makes the hazard newly reachable. Fixing means keying on `(Date, Symbol, Series)`, which **changes the public output contract** — needs an owner decision. |
@@ -84,7 +92,14 @@ When issue 04 lands they will XPASS-fail under `strict=True`, which is the signa
 - `src/bfinance/nse/bhavcopy.py` — cookie-free NSE archive, UDiFF + legacy, parse-by-name
 - `src/bfinance/nse/corporate_actions.py` — official NSE events feed, 1 request, 43,789 rows
 - `src/bfinance/nse/marketlens.py` — 30Y close+volume authority
-- `src/bfinance/trendlyne/` — `client.py`, `tables.py`, `errors.py`; equities, BSE codes, indices, ETFs
+- `src/bfinance/trendlyne/` — `client.py`, `tables.py`, `errors.py`; equities, BSE codes, indices, ETFs.
+  **Amended 2026-09-30:** the package is `__init__.py`, `client.py`, `sectors.py`, `tables.py`,
+  `errors.py` (the list above omitted `sectors.py`, which does not exist yet on the date this
+  snapshot records). `sectors.py` carries the sector/industry layer: `TrendlyneGroup`,
+  classification, taxonomy, constituents and the industry aggregate. It is **not** a rename of the
+  deleted `bfinance.sector` module, which was a hardcoded fabricator; see `docs/RELEASE_0.2.0.md`
+  section 1 and `docs/YFINANCE_MIGRATION_GUIDE.md` section 3.D. The `ENDPOINTS` inventory grew with
+  it, to five keys.
 
 Isolation is enforced **by test**, not convention: an AST scan proves no module outside
 `bfinance.trendlyne` imports it, and a subprocess proves `import bfinance` does not pull it in.
@@ -111,7 +126,8 @@ Isolation is enforced **by test**, not convention: an AST scan proves no module 
    module is coming. `marketlens` is NSE's own product, so naming it is nominative use and needs
    the least protection of the two.
 3. **Crawl-delay — I had this wrong, do not apply the 10 s default.** Trendlyne's `Crawl-delay: 10` is
-   scoped to **GPTBot/ClaudeBot**; the `User-agent: *` group is **1 s**. The 750 ms default is
+   scoped to **GPTBot/ClaudeBot**; the `User-agent: *` group is **1 s**. The 750 ms default was 1.33 req/s against that floor, so it was set to **1 s**. **Applied 2026-09-30:**
+   `DEFAULT_MIN_REQUEST_INTERVAL_MS` is `1000.0`, pinned by `tests/test_trendlyne_pacing.py`. The
    marginally under the applicable rate, so set it to **1 s** — not 10 s. Also newly found and
    load-bearing: Trendlyne disallows `*/equity/technical-analysis-*` and `*/alerts/addStockAlert/`,
    so **Technicals and Alerts are off-limits by policy**, not merely empty.

@@ -2,6 +2,11 @@
 
 This guide is for developers migrating existing Python codebases from `yfinance` (versions 0.2.x up to 1.7.0+) to `bfinance` for Indian equities (NSE & BSE).
 
+Scope: written against `bfinance` 0.2.0. The 0.1.3 -> 0.2.0 release is a **breaking** change and
+the two that will hit a migrating user hardest are in section 3 (a `history(period=...)` that
+cannot be served now raises instead of returning six years of bars) and section 3.D (the sector
+and industry names were removed, not renamed). `docs/RELEASE_0.2.0.md` is the full list.
+
 ---
 
 ## 1. Zero-Code-Change Drop-in Migration
@@ -57,8 +62,7 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | `ticker.analyst_price_targets` | `None` | No analyst feed upstream (was fabricated pre-0.1.3; now honest) |
 | `ticker.valuation_measures` | `ticker.valuation_measures` | `yfinance 1.3.0+` valuation table |
 | `yf.Tickers(list)` | `bf.Tickers(list)` | Multi-ticker container matching `yf.Tickers` |
-| `yf.Sector(name)` | `bf.Sector(name)` | `yfinance 1.4.0+` sector constituent explorer |
-| `yf.Industry(name)` | `bf.Industry(name)` | `yfinance 1.4.0+` industry constituent explorer |
+| `yf.Sector(name)` / `yf.Industry(name)` | **no equivalent** | **removed in 0.2.0** -- not renamed. Read section 3.D before writing any replacement |
 | `yf.download(...)` | `bf.download(...)` | Concurrent batch downloader with `group_by='column'` and `group_by='ticker'` |
 
 ---
@@ -87,6 +91,113 @@ Migrating to `bfinance` unlocks features that `yfinance` does not possess:
 * `ticker.piotroski_score` & `ticker.graham_number`: Built-in quantitative models.
 * `ticker.to_excel("model.xlsx")`: 1-line multi-tab financial model export.
 * `ticker.to_ai_context()`: Native LLM data feed engine.
+
+### D. Sector and Industry: removed in 0.2.0, and not renamed
+
+`yfinance 1.4.0+` exposes `yf.Sector(name)` and `yf.Industry(name)`, which take a sector or
+industry **name** and hand back its constituent tickers.
+
+**`bfinance` has no equivalent, and the two names it shipped in 0.1.3 were a fabrication.**
+They are gone. Verified in this tree:
+
+```
+hasattr(bfinance, "Sector")               -> False
+hasattr(bfinance, "Industry")             -> False
+from bfinance.sector import Sector        -> ModuleNotFoundError
+```
+
+`src/bfinance/sector.py` is deleted. It was a **hardcoded 4-sector / 20-company table with
+hardcoded prices and P/Es and no HTTP call anywhere in the file**, so every number it
+returned was invented. The deletion is deliberate and test-guarded:
+`tests/test_exhaustive_screener_and_yfinance.py` asserts `not hasattr(bfinance, "Sector")`
+with the message "bfinance.Sector must stay deleted", and separately asserts the module itself
+cannot be imported. `docs/RELEASE_0.2.0.md` section 1 is the release note, and it is where the
+wider 0.2.0 shape change is written up.
+
+**What a migrating user hits:** an `AttributeError` on the first call, with no deprecation
+shim and no intermediate warning. The `AttributeError` is the intended signal, not a bug to
+report.
+
+#### The replacement is NOT a rename, and that distinction is the whole trap
+
+`bfinance.trendlyne.sectors.TrendlyneGroup` is the real destination, and it does not take a
+name. Verified signature:
+
+```
+TrendlyneGroup(kind: str, group_id: int, slug: str, name: str)
+```
+
+`__post_init__` rejects any `kind` other than `"sector"` or `"industry"`, and any
+`group_id <= 0`. `group_id` is the integer path segment on trendlyne: sector 20 is
+`/equity/sector/20/automobiles-auto-components/`. **No id in that module is hardcoded and
+none is guessed** -- every id, slug and display name is read out of a page, and the module
+docstring says so.
+
+**So there is no constructor path from a bare name, and a migration written as if there were
+one will not work.** You resolve a name to a `TrendlyneGroup` first, and that resolution
+costs a request.
+
+#### What to write instead
+
+**Starting from a symbol** (the common case) needs no extra request. The stock page this
+package already fetches for the OHLC token carries the sector and industry as schema.org
+microdata, so classification is free:
+
+```python
+from bfinance.trendlyne import TrendlyneClient
+
+client = TrendlyneClient()
+groups = client.classification("RELIANCE")   # {"sector": TrendlyneGroup, "industry": TrendlyneGroup}
+autos = groups["sector"]
+members = client.constituents(autos)        # DataFrame, one row per member
+```
+
+The same two values are on every OHLC frame without a second call:
+
+```python
+from bfinance.trendlyne import ohlc
+
+frame = ohlc("RELIANCE")
+frame.attrs["bfinance_trendlyne_sector"]     # {"id", "slug", "name"} mapping, or None
+frame.attrs["bfinance_trendlyne_industry"]   # {"id", "slug", "name"} mapping, or None
+```
+
+**Starting from a bare name** ("automobiles") needs a bootstrap group before anything else,
+because `taxonomy` reads the vocabulary off a group page:
+
+```python
+vocab = client.taxonomy(autos)   # {"sector:20": TrendlyneGroup, "industry:9": TrendlyneGroup, ...}
+```
+
+That is the whole shape of the problem: the vocabulary is one request, but it is keyed off
+a group you must already hold. Resolve the first group by symbol (`classification`) or from
+an id you have read off a page yourself, then the rest of the vocabulary costs nothing more.
+
+Key the mapping on `TrendlyneGroup.key` (`"sector:20"`), not on `name`. trendlyne itself is
+inconsistent about case -- the same sector renders `AUTOMOBILES & AUTO COMPONENTS` on the
+stock-page breadcrumb and `Automobiles & Auto Components` in the taxonomy select, for
+sector id 20 -- and both spellings are preserved verbatim rather than normalised, because
+folding them would invent a spelling the site does not use.
+
+Four behaviours to plan for, all verified:
+
+* `classification()` is the **strict** door: a page with no `SECTOR :` / `INDUSTRY :`
+  breadcrumb raises `TrendlyneSchemaError` rather than handing you `{}` and leaving you to
+  guess whether the stock is unclassified or the markup moved. It costs nothing beyond the
+  token fetch, whose page it shares. The two OHLC `attrs` are the lenient version and do read
+  `None`, because there the price series is the product and the classification is a bonus.
+* `constituents(group)` takes either kind. `industry_aggregate(sector)` takes a **sector
+  only** and raises `ValueError` for an industry; it is the per-industry block beside the
+  constituent list, and its per-industry company counts must sum to the list's row count,
+  which is a server-side cross-check for a truncated list.
+* The market-cap **column unit is not asserted** -- no unit label appears anywhere on the
+  page. `attrs["bfinance_trendlyne_market_cap_unit"] == "unverified"`. Use the `Weight %`
+  column, which is exact and unit-free (market cap over the sector's own total).
+* `bfinance.trendlyne` is an **opt-in, isolated third-party package**. Nothing else in
+  `bfinance` imports it, `import bfinance` does not pull it in, and it must be imported
+  explicitly. It is not an exchange source and it is not in the price cascade. It also sits
+  on trendlyne.com, not on an exchange, so "sector" means trendlyne's sector taxonomy,
+  which is not Yahoo's and need not agree with it.
 
 ---
 

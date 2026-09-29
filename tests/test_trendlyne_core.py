@@ -52,7 +52,7 @@ def payload(name: str = "ohlc_motherson.json") -> dict:
 
 @pytest.fixture
 def client() -> tl.TrendlyneClient:
-    """A client with pacing disabled (the real 750 ms slot would add nothing to a mock)."""
+    """A client with pacing disabled (the real 1 s robots floor would add nothing to a mock)."""
     return tl.TrendlyneClient(min_request_interval_ms=0.0, max_retries=2)
 
 

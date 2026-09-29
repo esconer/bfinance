@@ -217,20 +217,54 @@ to fix.
 
 ---
 
-## 4. Trendlyne — third party, unofficial, yfinance-basis
+## 4. Trendlyne - third party, unofficial, and the price basis is NOT yfinance's
 
 Legal posture: `User-agent: *` has **Crawl-delay 1** (not 10 — see the correction below) and 28 Disallow
-rules, **none of which cover the paths used** (`/equity/`, `/mapp/`, `/member/api/`, `/latest-news/`,
-`/fundamentals/`, `/research-reports/`, `/equity-sitemap*`). The disallowed paths are
-member/authenticated areas (`*/accounts/`, `*/like/`, `*/edithistory/`, `*/get-document/`). Only
-`AhrefsBot` gets `Disallow: /`.
+rules, ~~**none of which cover the paths used**~~ **CORRECTION, 2026-09-30: that was wrong in the
+permissive direction, and one of the rules does cover a path this package used to call.** Re-read from
+the live `https://www.trendlyne.com/robots.txt` (HTTP 200, 2,536 bytes), the `User-agent: *` group
+carries 28 `Disallow` rules and **one of them is `Disallow: */member/`**, which covers
+**`/member/api/ac_snames/`** (trendlyne's own autocomplete, and the only route to every ETF). It is
+therefore *not* among the clean paths; `/equity/`, `/mapp/`, `/latest-news/`, `/fundamentals/`,
+`/research-reports/` and `/equity-sitemap*` are the clean ones. The narrower rule
+`Disallow: */member/api/ac_snames/stock/` covers a *sibling* endpoint, not the `?term=` search.
+The 28 are **not** all member/authenticated areas, which is the other half the old sentence got
+wrong: besides `*/member/` they include `*/onwards/`, `*/trendit/`, `*/visitor/`, `*/wholikes/`,
+`*/relationships/`, `*/posts/comment/`, `*/getUserNavBar/`, `*/polls/getMemberVotes/`,
+`*/rapid-results/all/`, `*/alerts/modal/stockAlert/`, `*/alerts/addStockAlert/`,
+`*/create-basket/from/`, `*/fundamentals/back-test/runhistory/`, `*/fundamentals/chart/v2/`,
+`*/equity/technical-analysis-*`, `*/stock-screeners/by-type/?searchparam=`, and seven
+`*/portfolio|equity/.../custom/?query=%E|%F` rules. **Every route this package can build is
+clean except the one member route** -- `/equity/sector/{id}/{slug}/` and
+`/equity/industry/{id}/{slug}/` included, since `*/equity/technical-analysis-*` is the only
+equity rule and a stock or group page never carries that literal prefix.
+
+The code agrees with the robots file and gates on it, which is why the docstring, not the prose, was
+right: `ROBOTS_DISALLOWED_ROUTES` is exactly `{"/member/api/ac_snames/": "Disallow: */member/"}`,
+`TrendlyneClient._require_member_search` raises `TrendlyneRobotsDisallowedError` **before a socket
+opens**, and `allow_member_search` defaults to `False`. The stated consequence is that **ETFs are
+unreachable through this package by default**: `resolve_any` skips the fallback explicitly and records
+it rather than reporting the instrument as unknown. A legal-posture claim that errs toward "permitted"
+is the dangerous direction to be wrong in, so this is recorded as a correction rather than an edit.
+Only `AhrefsBot` gets `Disallow: /`.
 
 ⚠ **CORRECTION — I misread this earlier and recommended the wrong default.** The 10-second
 `Crawl-delay` is scoped to **GPTBot and ClaudeBot only**; the `*` group is **1 second**. So the
-module's 750 ms default is marginally *under* the applicable 1 s, not 13× over a 10 s preference.
-The correct fix is **1 s**, and a 10 s default would have made bulk scraping ~10× slower for no
+module's 750 ms default was *under* the applicable 1 s -- 1.33 requests per second
+against a published floor of one, a 250 ms per-request violation, not 13x over a 10 s
+preference. not 13× over a 10 s preference.
+The correct fix was **1 s**, and a 10 s default would have made bulk scraping ~10× slower for no
 compliance reason. Reading a `Crawl-delay` out of the wrong `User-agent` group is an easy and
 consequential mistake.
+
+**DONE, 2026-09-30.** `DEFAULT_MIN_REQUEST_INTERVAL_MS` is now `1000.0`, and
+`TrendlyneClient().min_request_interval_ms` is `1000.0` -- exactly one request per second.
+Re-verified against the live `robots.txt` on the day of the change. The old page-weight
+justification for 750 ms was not deleted silently: a 292 KB page per symbol is a real
+observation, but a heavy page does not lower a stated `Crawl-delay`, so it was never a
+robots-derived argument. Pinned by `tests/test_trendlyne_pacing.py`, which fails if the number
+is tidied back toward 750 -- including if 750 reappears as a live literal anywhere in the
+module, which that file checks by AST rather than by line grep.
 
 **Two of the disallowed rules are load-bearing for planned sections:**
 `Disallow: */equity/technical-analysis-*` and `*/alerts/addStockAlert/`. So **Technicals and Alerts
@@ -283,8 +317,35 @@ So 2 requests minimum: HTML page for the token, then the JSON call.
 `body` keys: `liveHeaders, liveData, eodHeaders, eodData, eodDataLastWeek, stockHeaders, stockData,
 exchange, suggestions`
 
-- **History is a 2006-01-02 floor, truncated at listing.** Old names 5,107 bars; IREDA (2023 IPO)
-  696; PAYTM (delisted) 1,199. It is *not* a fixed window.
+- ~~**History is a 2006-01-02 floor, truncated at listing.** Old names 5,107 bars; IREDA (2023 IPO)
+  696; PAYTM (delisted) 1,199. It is *not* a fixed window.~~ **CORRECTION: the "truncated at
+  listing" half is false, and was removed from the code in this release.** It had been generalised
+  from symbols that happened to agree with it. Neither "truncated at listing" nor "a fixed vendor
+  window" holds universally. Measured live 2026-09-29, full frame including the last-week merge:
+
+  | symbol | first bar | NSE listing | bars | bars dated before that listing |
+  |---|---|---|---|---|
+  | RELIANCE (id 1127) | 2006-01-02 | long before | 5,114 | 0 |
+  | SBIN (id 1193) | 2006-01-02 | 2015-01-15 | 5,114 | **2,222** (45,561,075,413 shares) |
+  | PAYTM (id 712312) | 2021-11-18 | 2021-11-18 | 1,206 | 0 |
+  | IREDA (id 1791996) | 2023-11-29 | 2023-10-13 | 703 | 0 |
+
+  What survives is only that the bar count is **symbol-dependent** (a recent listing reaches far
+  fewer bars than a mature large cap). Three of the four above start at or after the listing date,
+  which is what made the rule look right. **SBIN falsifies it**, and section 9 below records the same
+  counter-example independently: 2,222 of its 5,114 bars carry pre-listing volume. Its own payload
+  holds a `BSEcode` of 500112 beside the NSE symbol, so those bars are most likely the BSE history
+  of the same company filed under the NSE ticker (plausible, not verified).
+  There is **no listing-date source here to gate on** (the OHLC payload has no listing date, and
+  NSE's `/public-past-issues` answers empty for historical windows), so the package neither clips
+  nor pretends to. `parse_ohlc` takes an optional `listing_date` and publishes
+  `attrs["bfinance_trendlyne_rows_before_listing"]` and
+  `attrs["bfinance_trendlyne_volume_before_listing"]`: **-1 means "not measured"** and must never be
+  read as "none", 0 means measured and none found. The rows are never dropped, because the series is
+  split/bonus adjusted and clipping it would break the price basis. A frame whose `exchange` attr
+  reads `"NSE"` while holding pre-NSE-listing bars is exactly why the decision belongs to the caller.
+  (The 5,107 / 696 / 1,199 figures above are also stale by about one trading day; the counts in the
+  table are the re-measured ones.)
 - **`eodData` is newest-first and the freshest 5 sessions live in `eodDataLastWeek`.** Reading
   `eodData` alone silently loses a week — it stops at 2026-09-18 while the vendor's latest is
   2026-09-25. Merge both.
@@ -381,7 +442,15 @@ audit found:
   signature" when that table **is** the `board_meeting` signature — the docstring is simply wrong,
   and `test_trendlyne_core.py` already asserts the truth.
 - ✅ **The 14 dead `ENDPOINTS` templates are deleted.** `ENDPOINTS` now means exactly *routes this
-  package has a fetch method for* — `stock_page`, `ohlc`, `chart_metric`, and nothing else.
+  package has a fetch method for*: it had three when the 14 dead templates went
+  (`stock_page`, `ohlc`, `chart_metric`), and the text then described that set as exhaustive.
+  **CORRECTION, 2026-09-30: the exhaustiveness claim was false.** It is now **five** keys
+  (`chart_metric`, `industry_page`, `ohlc`, `sector_page`, `stock_page`), because
+  `bfinance.trendlyne.sectors` landed the sector and industry group pages, reachable through
+  `TrendlyneClient.group_page`. The two group routes are also collected in `GROUP_ENDPOINTS`
+  (`industry_page`, `sector_page`). One route is deliberately **not** in `ENDPOINTS`:
+  `/member/api/ac_snames/?term=...` is a query-string template, and `ENDPOINTS` is validated by
+  `build_path` as path templates.
   The reason deletion beat wiring-later: a template with no method behind it still lets `build_path`
   mint a plausible URL for a route nobody asked for, and **5 of the 14 had never returned HTTP 200 at
   all** (`rights`, `news`, `news_only`, `news_analyst_calls`, `news_bse_announcements`) — pure
@@ -397,9 +466,34 @@ audit found:
 - **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON, and the 6
   registered signatures were validated against just **2** of them.
 
-So the honest description of `bfinance.trendlyne` is: **a working OHLC client and symbol resolver,
-plus scaffolding for 8 section tables that are not yet wired.** Treat the row counts as a scraping
+So the honest description of `bfinance.trendlyne` is: **a working OHLC client and symbol resolver, a
+sector/industry layer (classification, taxonomy, constituents, industry aggregate), plus scaffolding
+for 8 section tables that are not yet wired.** Treat the row counts as a scraping
 feasibility study, not as delivered features.
+
+**CORRECTION: the summary above previously stopped at "a working OHLC client and symbol resolver,
+plus scaffolding for 8 section tables", which predates `sectors.py` entirely.** The sector and
+industry capability is real, wired and reachable; the 8-table scaffolding claim still holds and is
+unaffected by it. What exists now, all in `bfinance.trendlyne` and all opt-in via an explicit
+import (nothing in `bfinance` imports it and `import bfinance` does not pull it in):
+
+| capability | entry point |
+|---|---|
+| classification of a symbol, **zero extra request** (it shares the page fetch the OHLC token already needs) | `TrendlyneClient.classification(symbol)` |
+| the complete sector + industry vocabulary, **one request** | `TrendlyneClient.taxonomy(group)` |
+| every constituent of a group, weighted by market cap, **one request** | `TrendlyneClient.constituents(group)` |
+| the per-industry aggregate block beside a sector's constituent list, **no second request** | `TrendlyneClient.industry_aggregate(sector)` |
+| the same classification on every OHLC frame, as `{id, slug, name}` mappings or `None` | `attrs["bfinance_trendlyne_sector"]`, `attrs["bfinance_trendlyne_industry"]` |
+
+Two limits worth stating, because the earlier omission is what hid them. **`TrendlyneGroup` is not a
+rename of the deleted `bfinance.sector` names**: it requires `kind`, `group_id`, `slug` and `name`,
+rejects a `kind` other than `sector`/`industry` and a `group_id <= 0`, and **no id in the module is
+hardcoded or guessed**, so there is no constructor path from a bare name (you resolve the name
+through a symbol or an id first). And the market-cap **unit is not asserted**:
+`attrs["bfinance_trendlyne_market_cap_unit"] == "unverified"`, so use the `Weight %` column, which
+is exact and unit-free. `docs/RELEASE_0.2.0.md` section 1 is the release note for the removal, and
+`docs/YFINANCE_MIGRATION_GUIDE.md` section 3.D carries the migration shape
+for a user coming from `yfinance`'s `Sector`/`Industry`.
 
 `share-holding` is **snapshot-only** — `Jun-2024` and `2024` in the path both return **HTTP 500**.
 
