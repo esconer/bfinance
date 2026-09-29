@@ -153,6 +153,44 @@ class TestPutDay:
         assert mirror.put_day(DAY1, pd.DataFrame(), "udiff", "x") == 0
         assert mirror.coverage(DAY1, DAY1)[DAY1].downloaded is False
 
+    def test_a_repeated_symbol_in_one_day_is_refused_not_upserted(self, mirror):
+        """
+        The primary key is (day, symbol, series) and the insert is an upsert, so a day
+        carrying one symbol twice would silently lose a row. A bhavcopy file holding both
+        EQ and BE for a single symbol is the real route to that, and the outcome -- a BSE
+        bar relabelled EQ and served from a read filtered on EQ -- is the same defect the
+        Trendlyne listing work documents from the other side: a frame that reads NSE and
+        holds BSE history.
+        """
+        collided = market_frame([
+            (DAY1, "SBIN", 1.0, 2.0, 0.5, 1.5, 10, 15.0),
+            (DAY1, "SBIN", 9.0, 9.0, 9.0, 9.0, 20, 180.0),
+        ])
+        with pytest.raises(ValueError, match="appear more than once"):
+            mirror.put_day(DAY1, collided, "udiff", "x")
+        assert mirror.read("SBIN", DAY1, DAY1).empty, (
+            "the refused day must leave nothing behind, not half of it"
+        )
+
+    def test_the_series_is_stamped_from_the_caller_not_assumed(self, mirror):
+        """
+        The parsed frame carries no per-row series -- only ``attrs['bfinance_series']``,
+        a tuple of the series present somewhere in the file. So the caller states it, and
+        a non-default series must be honoured rather than normalised to EQ.
+        """
+        frame = market_frame([(DAY1, "SBIN", 1.0, 2.0, 0.5, 1.5, 10, 15.0)])
+        assert mirror.put_day(DAY1, frame, "udiff", "a", series="BE") == 1
+        assert len(mirror.read("SBIN", DAY1, DAY1, series="BE")) == 1
+        assert mirror.read("SBIN", DAY1, DAY1, series="EQ").empty, (
+            "a BE row must not be visible to a read filtered on EQ"
+        )
+
+    def test_a_clean_real_shaped_day_stores_every_row(self, mirror):
+        """The guard must cost nothing on a real file: measured live, one row per symbol."""
+        rows = [(DAY1, f"SYM{i}", 1.0, 2.0, 0.5, 1.5, 10, 15.0) for i in range(50)]
+        assert mirror.put_day(DAY1, market_frame(rows), "udiff", "a") == 50
+        assert mirror.stats()["symbols"] == 50
+
 
 # ---------------------------------------------------------------------- reading
 class TestRead:

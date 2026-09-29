@@ -273,13 +273,28 @@ class Mirror:
         self.close()
 
     # ------------------------------------------------------------------ writing
-    def put_day(self, day: str, frame: pd.DataFrame, era: str, payload_sha: str) -> int:
+    def put_day(self, day: str, frame: pd.DataFrame, era: str, payload_sha: str,
+                series: str = "EQ") -> int:
         """
         Store one whole-market day.
 
         The frame is the parsed market frame, not a per-symbol slice, and that is the whole
         point: one row set per day serves every symbol, so a caller asking for 5,000
         symbols costs the same as a caller asking for one.
+
+        ``series`` is a parameter rather than a constant because the parsed frame does not
+        carry it per row. What a bhavcopy frame exposes is ``attrs["bfinance_series"]``, a
+        tuple of the series *present somewhere in the file* -- measured live as
+        ``("EQ", "BE")`` -- which says nothing about which series any individual row is.
+        Stamping every row "EQ" regardless is therefore a claim this method cannot support
+        from its input, so the caller states it.
+
+        That matters because of what happens when the claim is wrong. The primary key is
+        ``(day, symbol, series)``, and the insert is an upsert, so two rows for one symbol
+        and day under the same series means **one silently overwrites the other**. A BSE bar
+        relabelled EQ and served from a read filtered on EQ is precisely the failure the
+        Trendlyne work documents from the other direction: a frame that reads NSE and holds
+        BSE history. So a duplicate is refused rather than resolved.
         """
         if frame is None or not len(frame):
             return 0
@@ -301,6 +316,19 @@ class Mirror:
                     f"whole-market frame, not a per-symbol slice."
                 )
             idx = frame.reset_index()
+            # Refuse a repeated (day, symbol) under one series rather than letting the
+            # upsert pick a winner. Measured on a live day there are 2,900 rows and zero
+            # repeats, so this costs nothing today and is the only thing standing between a
+            # future two-series file and a silent row loss.
+            repeats = idx["Symbol"].astype(str).duplicated()
+            if repeats.any():
+                dupes = sorted(set(idx["Symbol"].astype(str)[repeats]))
+                raise ValueError(
+                    f"{len(dupes)} symbol(s) appear more than once for {day} under series "
+                    f"{series!r}, e.g. {dupes[:5]}. Storing them would upsert and silently "
+                    f"drop a row. A bhavcopy file carrying both EQ and BE for one symbol "
+                    f"needs the series resolved per row before it can be mirrored."
+                )
             volume = pd.to_numeric(idx["Volume"], errors="coerce").fillna(0)
             turnover = (
                 pd.to_numeric(idx["TurnoverValue"], errors="coerce").to_numpy()
@@ -322,7 +350,7 @@ class Mirror:
                 "(day,symbol,series,open,high,low,close,volume,turnover,era) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
-                    (d, str(sym), "EQ", float(o), float(h), float(lo), float(cl), int(v),
+                    (d, str(sym), series, float(o), float(h), float(lo), float(cl), int(v),
                      None if t is None or pd.isna(t) else float(t), era)
                     for (d, sym, o, h, lo, cl, v, t) in rows
                 ),
@@ -479,7 +507,8 @@ class Mirror:
                 market = bc.bhavcopy_range(iso, iso)
                 if market is not None and len(market):
                     era = "udiff" if day >= bc.UDIFF_CUTOFF else "legacy"
-                    n = self.put_day(iso, market, era, f"nse:{iso}:{len(market)}")
+                    n = self.put_day(iso, market, era, f"nse:{iso}:{len(market)}",
+                                     series="EQ")
                     stored.append(iso)
                     total_rows += n
                 else:
