@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Literal, Optional, Union
 import numpy as np
 import pandas as pd
@@ -29,6 +31,59 @@ IST = "Asia/Kolkata"
 BHAVCOPY_FIRST_DATE = "2024-01-01"
 
 OHLC_SOURCES = ("bhavcopy", "synthetic")
+
+# --------------------------------------------------------------------------------------
+# Where the BARS came from, as opposed to what they are.
+#
+# ``attrs["bfinance_ohlc_source"]`` answers "bhavcopy print or derived O/H/L". This answers a
+# different question: did these numbers leave the local SQLite mirror, leave NSE, or both. A
+# frame can be real bhavcopy and still have been read off disk a week ago, and a consumer
+# deciding how much to trust a number's freshness cannot read that off the feed label.
+SOURCE_NETWORK = "network"
+SOURCE_MIRROR = "mirror"
+SOURCE_MIRROR_NETWORK = "mirror+network"
+
+#: Set this to opt the bhavcopy path into reading :mod:`bfinance.mirror`. A bare truthy value
+#: means the default location (``~/.bfinance/mirror.db``); any other non-empty value is read as
+#: a path. Unset or empty -- the state of every existing installation -- means OFF, and the
+#: call path is byte-identical to before the mirror existed: no :class:`bfinance.mirror.Mirror`
+#: is constructed, no file is opened, no query runs.
+#:
+#: The env var exists because ``Ticker.history()`` and ``download()`` cannot be given a new
+#: keyword argument without changing signatures this module does not own, and the engine is
+#: constructed for them in ``Ticker.__init__`` with a single positional argument. A per-call
+#: ``fetch_history(mirror=...)`` is the other door in; this is the one a caller of the public
+#: yfinance-shaped API can actually reach.
+MIRROR_ENV_VAR = "BFINANCE_MIRROR"
+
+_TRUTHY_ENV = frozenset({"1", "true", "on", "yes", "y"})
+
+
+def _mirror_state(**overrides) -> dict:
+    """
+    The per-call record of what the mirror was asked and what it answered.
+
+    Published verbatim on ``df.attrs["bfinance_mirror"]`` on EVERY frame, mirror or not, so a
+    consumer reads one key instead of probing for the absence of one. ``days_missing`` is the
+    load-bearing field: it is the list of trading days the mirror does not hold, which is the
+    difference between a complete frame and one that would have been a silent lie.
+    """
+    state = {
+        "enabled": False,      # was a mirror consulted at all
+        "used": False,         # did the store contribute to the ANSWER -- rows, or a definitive
+                               # empty. False when it was opened and could not contribute, which
+                               # is the negative control's whole claim.
+        "path": None,          # which database, so a stale-mirror bug is traceable
+        "reason": None,        # why not, when it was not used
+        "days_considered": 0,  # calendar days the coverage query looked at
+        "days_missing": [],    # trading days it does not hold -> a real gap, never silent
+        "non_trading_days": [],  # weekends and seeded holidays -> absence here is an ANSWER
+        "network_days": [],    # which days this call had to fetch from NSE to close the gaps
+        "calendar_seeded": None,  # False means a weekday gap could not be proven either way
+        "source": SOURCE_NETWORK,
+    }
+    state.update(overrides)
+    return state
 
 #: The columns a corporate-action back-adjustment restates *as prices*. ``Volume`` is deliberately
 #: absent: it is a share count, not a rupee price, and it is restated separately by the rule below.
@@ -458,6 +513,23 @@ class OHLCVEngine:
     is one quantity across the boundary instead of stepping by exactly ``F`` there. The as-traded
     bhavcopy mixes the two share-count bases in a single column, which the RELIANCE measurement in
     :data:`VOLUME_COLUMN` demonstrates. ``attrs["price_basis"]`` states the result on every frame.
+
+    The local mirror, and what it is allowed to do
+    -----------------------------------------------
+    :mod:`bfinance.mirror` is a SQLite copy of the bhavcopy tape. It is **opt-in**
+    (``fetch_history(mirror=...)``, or :data:`MIRROR_ENV_VAR` for callers of the yfinance-shaped
+    API), and with it off the path here is unchanged: no store is constructed, no file is opened,
+    no query runs.
+
+    The reason it needs a section rather than a paragraph is that it introduces a way to be wrong
+    this module could not previously be. A mirror read returns zero rows for a security that did
+    not list, for a day before it listed, and for a day nobody has downloaded yet, and all three
+    look identical. So the store's coverage watermark, not its row count, decides whether it may
+    answer; a day it does not hold is fetched from NSE or the call raises, and is never returned
+    as a short frame. ``attrs["bfinance_source"]`` (``"network"`` / ``"mirror"`` /
+    ``"mirror+network"``) and ``attrs["bfinance_mirror"]`` (the full record, including
+    ``days_missing``) are published on every frame, the empty one included. The decision table
+    is in :meth:`_fetch_bhavcopy_bars`.
     """
 
     #: The closed vocabulary of ``period`` values, and their lookback in calendar days.
@@ -527,6 +599,7 @@ class OHLCVEngine:
         raise_errors: bool = False,
         ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
         adjust_corporate_actions: bool = True,
+        mirror=None,
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV DataFrame matching exact yfinance schema:
@@ -563,6 +636,20 @@ class OHLCVEngine:
                 (``None`` when the adjustment is complete), and ``attrs["price_basis"]`` names the
                 basis in a machine-readable form.
             auto_adjust: Refused when True (:class:`AdjustmentNotAvailableError`) -- see below.
+            mirror: opt in to reading the local :mod:`bfinance.mirror` SQLite tape before the
+                network. ``None`` (the default) consults :data:`MIRROR_ENV_VAR` instead and, with
+                that unset, is **off**: no ``Mirror`` is constructed, no file is opened, no query
+                runs, and the returned values are unchanged. Pass a path, or ``True`` for
+                ``~/.bfinance/mirror.db``, or a ``Mirror`` you already hold. Applies to
+                ``ohlc="bhavcopy"`` only -- the mirror holds the bhavcopy tape, not the
+                close-only Screener series, so the synthetic path never consults it.
+
+                A mirror that HOLDS the window answers from disk and sets
+                ``attrs["bfinance_source"] = "mirror"``. A mirror that does not hold it does
+                **not** get to answer with a short frame: :meth:`Mirror.coverage` is consulted
+                first, and the missing trading days are fetched from NSE, so the frame is
+                complete or the call raises. ``attrs["bfinance_mirror"]["days_missing"]`` names
+                them either way. See :meth:`_fetch_bhavcopy_bars` for the full decision table.
 
         yfinance 1.7.0 parity notes (measured live, bhavcopy / yfinance over
         2024-09-01..2024-11-15):
@@ -683,10 +770,18 @@ class OHLCVEngine:
         synthetic = ohlc == "synthetic"
         if synthetic:
             bars = await self._fetch_synthetic_bars(clean_symbol, days, raise_errors)
-        else:
-            bars = await self._fetch_bhavcopy_bars(
-                symbol, clean_symbol, start, end, days, raise_errors
+            # The mirror holds the bhavcopy tape, not the close-only Screener series, so there is
+            # nothing for it to answer. Recorded rather than left blank, so a consumer reading one
+            # key on every frame does not have to know which of the two feeds was used.
+            mirror_state = _mirror_state(
+                reason="ohlc='synthetic' reads the close-only Screener feed, which the "
+                       "bhavcopy mirror does not hold"
             )
+        else:
+            bars, mirror_state = await self._fetch_bhavcopy_bars(
+                symbol, clean_symbol, start, end, days, raise_errors, mirror
+            )
+        source = mirror_state.get("source") or SOURCE_NETWORK
 
         if bars.empty:
             cols = self._history_columns(auto_adjust, back_adjust, actions)
@@ -717,6 +812,11 @@ class OHLCVEngine:
             # every frame must not have to special-case the empty one.
             empty.attrs["bfinance_bar_interval"] = None
             empty.attrs["bfinance_bar_interval_mismatch"] = None
+            # Provenance, on the empty frame too. An empty frame is precisely the frame a caller
+            # is most likely to treat as "nothing went wrong", so it is the worst place to leave
+            # the question of where the answer came from unanswered.
+            empty.attrs["bfinance_source"] = source
+            empty.attrs["bfinance_mirror"] = mirror_state
             return empty
 
         df = bars.copy()
@@ -928,6 +1028,16 @@ class OHLCVEngine:
         # today's share count. A frame can be real-but-unadjusted (as-traded bhavcopy) and a
         # frame can be synthetic; neither implies the other.
         df.attrs["bfinance_ohlc_source"] = ohlc
+        # WHERE the rows were read from, as distinct from what they are: "network" on the
+        # default path, "mirror" when the local tape held the whole window, "mirror+network"
+        # when it held part of it and NSE supplied the rest. A consumer asking "how stale can
+        # this be?" reads this key and not the feed label.
+        df.attrs["bfinance_source"] = source
+        # The full mirror record, on every frame. ``days_missing`` is the honest-gap list, and
+        # it is empty on every frame this method returns -- a non-empty one alongside rows would
+        # mean a short frame dressed as a complete answer, which is the defect this whole
+        # integration exists to make impossible.
+        df.attrs["bfinance_mirror"] = mirror_state
         df.attrs["bfinance_corporate_actions_applied"] = applied
         df.attrs["bfinance_corporate_actions_applied_detail"] = applied_detail
         # The one key a consumer needs to detect a half-done adjustment without reading logs. It is
@@ -1111,10 +1221,14 @@ class OHLCVEngine:
     async def _fetch_bhavcopy_bars(
         self, symbol: str, clean_symbol: str,
         start: Optional[Union[str, datetime]], end: Optional[Union[str, datetime]],
-        days: int, raise_errors: bool = False,
-    ) -> pd.DataFrame:
+        days: int, raise_errors: bool = False, mirror=None,
+    ) -> tuple:
         """
-        Real published Open/High/Low/Close/Volume for one symbol from the NSE bhavcopy archive.
+        Real published Open/High/Low/Close/Volume for one symbol, and where they were read from.
+
+        Returns ``(rows, state)``; ``state["source"]`` is one of :data:`SOURCE_NETWORK`,
+        :data:`SOURCE_MIRROR` or :data:`SOURCE_MIRROR_NETWORK`, and the whole dict is published
+        on ``df.attrs["bfinance_mirror"]``.
 
         The whole-market range is fetched ONCE and sliced to ``clean_symbol`` here, because a
         single daily file already covers every NSE scrip: one request per symbol would
@@ -1122,6 +1236,41 @@ class OHLCVEngine:
         warning (logged, not silent); an archive that cannot answer at all raises rather than
         returning fabricated bars, since an empty frame would be indistinguishable from
         "this instrument has no data".
+
+        THE MIRROR DECISION, which is the whole reason this method has a mirror argument
+        ---------------------------------------------------------------------------
+        :meth:`bfinance.mirror.Mirror.read` returns zero rows for three different situations and
+        cannot tell them apart: the security did not list that day, the day is before the
+        security existed, and the day has not been downloaded. Handing any of those back as an
+        empty (or short) frame would relocate the silent-empty-frame defect from the network
+        into the database and call it a cache. So ``read()`` is never the thing that decides
+        whether the mirror may answer -- :meth:`~bfinance.mirror.Mirror.coverage` is, and it
+        distinguishes four states rather than two:
+
+            mirror not consulted (opt-out)            -> network, source "network"
+            consulted, file absent                     -> network, source "network", reason logged
+            consulted, holds EVERY requested day      -> mirror, source "mirror"
+            consulted, missing only a short span       -> mirror for the held days, NSE for the
+                                                        gaps, source "mirror+network"
+            consulted, gaps span the whole window     -> network for the whole window, source
+                                                        "network", gaps named in attrs
+            consulted, NSE fails on the gaps          -> RAISES. Never the mirror's partial
+                                                        window presented as a complete answer.
+
+        Two of those rows are the load-bearing ones. The third is the only case where the mirror
+        is trusted, and it is trusted precisely because the coverage watermark -- not the row
+        count -- established it. The last is the refusal: a frame with a day silently missing
+        is the exact artefact this package exists to not produce, and a caller cannot tell it
+        from a complete one without reading attrs nobody reads.
+
+        Why the "short span" test rather than "always top up the gaps"
+        ----------------------------------------------------------------
+        ``bhavcopy_range`` costs one HTTP request per DAY in the span it is given, so topping
+        up the gaps of a 25-year request against a calendar that only covers 2026 would ask for
+        roughly 6,000 files to fix 6,000 files. So the gap span is compared against the window
+        span: topping up happens only when it is strictly cheaper, and otherwise the whole
+        window is read from the network exactly as it would have been with no mirror at all.
+        That bound is what keeps enabling this strictly non-regressive in traffic.
         """
         if bhavcopy_range is None:
             raise RealOHLCUnavailableError(
@@ -1142,26 +1291,256 @@ class OHLCVEngine:
             )
             start_ts = floor
 
+        start_iso = start_ts.strftime("%Y-%m-%d")
+        end_iso = end_ts.strftime("%Y-%m-%d")
+
+        rows, state = await self._bhavcopy_bars_from(
+            symbol, clean_symbol, start_iso, end_iso, mirror
+        )
+        if rows.empty:
+            # Lenient by default, matching the package convention for a genuinely absent
+            # instrument -- but empty, never filled with invented bars, and never short.
+            if raise_errors:
+                raise TickerNotFoundError(
+                    f"{symbol}: not present in the NSE bhavcopy for "
+                    f"{start_ts.date()}..{end_ts.date()}."
+                )
+            logger.warning(
+                "%s: no bhavcopy rows in %s..%s. Returning empty DataFrame.",
+                symbol, start_ts.date(), end_ts.date(),
+            )
+        return rows, state
+
+    # ------------------------------------------------------------------ the mirror decision
+    @staticmethod
+    def _mirror_spec(mirror):
+        """
+        Resolve the opt-in into what to open, or ``None`` for OFF.
+
+        The very first question, and the one that keeps the default path byte-identical: with
+        this ``None`` nothing below constructs a ``Mirror``, opens a file, or runs a query. The
+        return is the spec itself rather than a boolean because the two doors answer with
+        different things -- a caller-supplied path or ``Mirror`` versus the environment's
+        string -- and resolving the string here is what stops the env var from being honoured
+        with the DEFAULT path when the caller set neither.
+        """
+        if mirror is not None:
+            return True if mirror is True else mirror
+        raw = os.environ.get(MIRROR_ENV_VAR)
+        if not raw or not str(raw).strip():
+            return None
+        value = str(raw).strip()
+        return True if value.lower() in _TRUTHY_ENV else value
+
+    def _open_mirror(self, mirror) -> tuple:
+        """
+        Turn the opt-in into a usable store, or say plainly why there is not one.
+
+        ``mirror`` is a path, a ``True``/``None`` meaning "the default location", or a ``Mirror``
+        the caller already holds. Returns ``(store_or_None, state)`` and never raises: a broken
+        or absent mirror must degrade to the network with the reason recorded, not take down a
+        price feed that is otherwise fine. The one thing it refuses to do is CREATE the database
+        -- a read must not leave a 0-byte file behind, and a caller who enabled the mirror
+        before backfilling it needs to be told that, not to have an empty database silently
+        created and then reported as "the mirror had no rows for your window".
+
+        Imported inside the function, like ``bhavcopy`` at the top of the module and for the
+        same reason: ``import bfinance`` must not execute an opt-in module, and
+        ``tests/test_public_surface.py`` asks that in a fresh interpreter.
+        """
+        from bfinance.mirror import Mirror, default_mirror_path  # lazy: opt-in isolation
+
+        if isinstance(mirror, Mirror):
+            store = mirror
+        elif mirror is True:
+            store = Mirror(default_mirror_path())
+        else:
+            store = Mirror(mirror)
+        path = Path(store.path)
+        state = _mirror_state(enabled=True, path=str(path))
+        if not path.exists():
+            state["enabled"] = False
+            state["reason"] = (
+                f"no mirror database at {path}. A history() call never creates one: run "
+                f"Mirror({str(path)!r}).sync(start, end) first, or point {MIRROR_ENV_VAR} at a "
+                f"database that exists."
+            )
+            logger.warning("%s: %s", MIRROR_ENV_VAR, state["reason"])
+            return None, state
+        return store, state
+
+    @staticmethod
+    def _mirror_plan(store, start_iso: str, end_iso: str) -> dict:
+        """
+        Ask the coverage watermark what the mirror actually holds for the window.
+
+        This is the only thing allowed to decide that the mirror may answer. ``read()`` is not,
+        because ``read()`` cannot tell an un-downloaded day from a day this security did not
+        trade -- it returns zero rows for both, and for a day before the listing as well.
+
+        ``missing_trading_days`` deliberately includes weekdays the calendar cannot classify
+        (``is_trading_day is None``, e.g. a year the seeded holiday payload does not cover).
+        That is the safe direction: an unclassifiable day is fetched rather than assumed
+        absent, so a mirror with no calendar at all simply never serves anything rather than
+        serving a hole. Weekends and seeded holidays come back as holidays instead, which is
+        what makes test "a holiday is not a gap" pass without any special-casing here.
+        """
+        coverage = store.coverage(start_iso, end_iso)
+        return {
+            "days_considered": len(coverage),
+            "days_missing": list(coverage.missing_trading_days),
+            "non_trading_days": list(coverage.holidays),
+            "calendar_seeded": store.get_holidays() is not None,
+        }
+
+    async def _bhavcopy_bars_from(
+        self, symbol: str, clean_symbol: str, start_iso: str, end_iso: str, mirror,
+    ) -> tuple:
+        """The mirror-first reader, with the network as the fallback in every direction."""
+        state = _mirror_state()
+        store = None
+        spec = self._mirror_spec(mirror)
+        if spec is not None:
+            store, state = self._open_mirror(spec)
+        if store is not None:
+            try:
+                state.update(
+                    await asyncio.to_thread(self._mirror_plan, store, start_iso, end_iso)
+                )
+            except Exception as e:  # noqa: BLE001 - a broken store must not break a price read
+                state.update(
+                    enabled=False,
+                    reason=f"mirror coverage query failed ({e}); read the network instead",
+                )
+                logger.warning("%s: %s: %s", symbol, MIRROR_ENV_VAR, state["reason"])
+                store = None
+
+        try:
+            if store is None:
+                rows = await self._bhavcopy_network_rows(
+                    symbol, clean_symbol, start_iso, end_iso
+                )
+                return rows, dict(state, used=False, source=SOURCE_NETWORK)
+
+            gaps = list(state["days_missing"])
+
+            if gaps and not self._gap_top_up_pays(gaps, start_iso, end_iso):
+                # The mirror is missing as much as the window is wide -- a stale or empty store
+                # on a long request. One whole-window fetch is the same single call the
+                # un-mirrored path makes, so this cannot be worse than having no mirror, and the
+                # frame is complete. The gaps are still named, so a user can see their mirror
+                # is not keeping up instead of wondering why it was ignored.
+                logger.warning(
+                    "%s: the local mirror is missing %d trading day(s) spanning %s..%s, which is "
+                    "no better than the requested window itself; reading the whole window from "
+                    "NSE. attrs['bfinance_mirror']['days_missing'] lists them.",
+                    symbol, len(gaps), gaps[0], gaps[-1],
+                )
+                rows = await self._bhavcopy_network_rows(
+                    symbol, clean_symbol, start_iso, end_iso
+                )
+                # used=False and deliberately not "not held.empty": NOTHING from the store
+                # reached this frame, so a truthy `used` here would be the provenance key lying
+                # about the frame's own source.
+                return rows, dict(
+                    state, used=False, source=SOURCE_NETWORK,
+                    network_days=[start_iso, end_iso],
+                )
+
+            held = await asyncio.to_thread(store.read, clean_symbol, start_iso, end_iso)
+            held = self._tidy_bars(symbol, held, {
+                "bfinance_provenance": f"bfinance mirror (SQLite) {state['path']}",
+            })
+
+            if not gaps:
+                # Full coverage. The mirror is authoritative, so this is the one case where
+                # "no rows for this symbol" is a real answer rather than a missing day: the
+                # watermark says the file was downloaded, so the security genuinely had no bar.
+                return held, dict(
+                    state, used=True, source=SOURCE_MIRROR, network_days=[],
+                )
+
+            logger.warning(
+                "%s: the local mirror is missing %d trading day(s) (%s..%s) of the requested "
+                "window; fetching exactly those from NSE so the frame is not short. "
+                "attrs['bfinance_source'] is %r and attrs['bfinance_mirror']['days_missing'] "
+                "lists them.",
+                symbol, len(gaps), gaps[0], gaps[-1], SOURCE_MIRROR_NETWORK,
+            )
+            try:
+                fetched = await self._bhavcopy_network_rows(
+                    symbol, clean_symbol, gaps[0], gaps[-1]
+                )
+            except RealOHLCUnavailableError as e:
+                # THE refusal. Returning `held` here would be a frame missing real trading
+                # days, wearing the same schema and the same attrs as a complete one, and the
+                # caller would have no way to tell. An empty frame is no better -- it is the
+                # defect in its purest form. So the call fails loudly, exactly as it does when
+                # the network is the only source.
+                raise RealOHLCUnavailableError(
+                    f"{symbol}: the local mirror is missing {len(gaps)} trading day(s) of the "
+                    f"requested window ({start_iso}..{end_iso}) and NSE could not supply them "
+                    f"({e}). The mirror's partial window is deliberately NOT returned: a frame "
+                    f"with real days missing is indistinguishable from a complete one. Fill the "
+                    f"gap with Mirror(...).sync({gaps[0]!r}, {gaps[-1]!r}) and retry."
+                ) from e
+
+            rows = self._merge_mirror_and_network(symbol, held, fetched)
+            return rows, dict(
+                # used tracks whether a single stored row reached the frame, not whether the
+                # store was opened. A window the mirror shares in name but not in days has
+                # `enabled=True` and `used=False`, and that pair is the whole negative control.
+                state, used=not held.empty,
+                source=SOURCE_MIRROR_NETWORK if not held.empty else SOURCE_NETWORK,
+                network_days=list(gaps),
+            )
+        finally:
+            # One short-lived connection per call. download() fans out across symbols, and a
+            # leaked handle per fan-out member is a real fd leak on a 5,000-symbol request.
+            if store is not None:
+                store.close()
+
+    @staticmethod
+    def _gap_top_up_pays(gaps: list, start_iso: str, end_iso: str) -> bool:
+        """
+        Is closing the gaps cheaper than ignoring the mirror?
+
+        ``bhavcopy_range`` spends one HTTP request per day of the SPAN it is handed, not per
+        missing day, so topping up a sparse set of gaps in a long window can cost exactly as
+        much as the window itself. Comparing the two spans keeps the decision honest instead of
+        assuming the mirror is always worth it, and makes the answer False whenever topping up
+        would fetch the whole window anyway.
+        """
+        gap_span = (pd.Timestamp(gaps[-1]) - pd.Timestamp(gaps[0])).days + 1
+        window_span = (pd.Timestamp(end_iso) - pd.Timestamp(start_iso)).days + 1
+        return gap_span < window_span
+
+    async def _bhavcopy_network_rows(
+        self, symbol: str, clean_symbol: str, start_iso: str, end_iso: str,
+    ) -> pd.DataFrame:
+        """
+        One whole-market range fetch, sliced to one symbol and tidied. Raises if it cannot.
+
+        Split out of the caller so the gap-closing path can ask NSE for a sub-range through the
+        identical contract -- same errors, same messages -- instead of growing a second, laxer
+        copy of the fetch.
+        """
         try:
             # sync/blocking client -> off the event loop so concurrent fetches stay concurrent
-            market = await asyncio.to_thread(
-                bhavcopy_range,
-                start_ts.strftime("%Y-%m-%d"),
-                end_ts.strftime("%Y-%m-%d"),
-            )
+            market = await asyncio.to_thread(bhavcopy_range, start_iso, end_iso)
         except BFinanceError:
             # Already a typed, specific answer (NotAnNseSymbolError for a BSE scrip code,
             # ParsingError for a schema change, ...). Do not blur it into a generic one.
             raise
         except Exception as e:
             raise RealOHLCUnavailableError(
-                f"{symbol}: NSE bhavcopy unavailable for {start_ts.date()}..{end_ts.date()} ({e}). "
+                f"{symbol}: NSE bhavcopy unavailable for {start_iso}..{end_iso} ({e}). "
                 f"No bars returned; bfinance does not invent them."
             ) from e
 
         if market is None or getattr(market, "empty", True):
             raise RealOHLCUnavailableError(
-                f"{symbol}: NSE bhavcopy returned no data for {start_ts.date()}..{end_ts.date()}. "
+                f"{symbol}: NSE bhavcopy returned no data for {start_iso}..{end_iso}. "
                 f"The archive covers {BHAVCOPY_FIRST_DATE} onward; an earlier window cannot be "
                 f"served with real OHLC. No bars returned."
             )
@@ -1173,34 +1552,62 @@ class OHLCVEngine:
                 f"Refusing to synthesize them."
             )
 
-        rows = _select_symbol_rows(market, clean_symbol)
-        if rows.empty:
-            # Lenient by default, matching the package convention for a genuinely absent
-            # instrument -- but empty, never filled with invented bars.
-            if raise_errors:
-                raise TickerNotFoundError(
-                    f"{symbol}: not present in the NSE bhavcopy for "
-                    f"{start_ts.date()}..{end_ts.date()}."
-                )
-            logger.warning(
-                "%s: no bhavcopy rows in %s..%s. Returning empty DataFrame.",
-                symbol, start_ts.date(), end_ts.date(),
-            )
-            return rows
+        return self._tidy_bars(
+            symbol, _select_symbol_rows(market, clean_symbol), dict(market.attrs)
+        )
 
+    @staticmethod
+    def _tidy_bars(symbol: str, rows: pd.DataFrame, attrs: Optional[dict] = None) -> pd.DataFrame:
+        """
+        Localise, coerce and provenance-stamp a per-symbol slice, from either source.
+
+        Shared by the network and mirror paths on purpose: the two must be indistinguishable
+        once they are in, or "the mirror serves the same bars" would be a claim about values
+        and a difference in dtypes.
+        """
         rows = _localize_ist(rows)
         # Carry the source's own provenance record (provenance string, schema, dates the NSE
         # published no archive for) onto the per-symbol frame, so a gap in the returned bars
         # is explainable rather than mysterious.
-        rows.attrs = {k: v for k, v in market.attrs.items() if k != "bfinance_synthetic_ohlc"}
+        rows.attrs = {k: v for k, v in (attrs or {}).items() if k != "bfinance_synthetic_ohlc"}
         for col in ("Open", "High", "Low", "Close"):
             rows[col] = pd.to_numeric(rows[col], errors="coerce")
-        rows["Volume"] = pd.to_numeric(rows["Volume"], errors="coerce").fillna(0).astype(np.int64)
+        if VOLUME_COLUMN in rows.columns:
+            rows[VOLUME_COLUMN] = pd.to_numeric(
+                rows[VOLUME_COLUMN], errors="coerce"
+            ).fillna(0).astype(np.int64)
         unpriced = int(rows["Close"].isna().sum())
         if unpriced:
             logger.warning("%s: dropped %d bhavcopy row(s) with no usable close.", symbol, unpriced)
             rows = rows[rows["Close"].notna()]
         return rows
+
+    @staticmethod
+    def _merge_mirror_and_network(
+        symbol: str, held: pd.DataFrame, fetched: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Union the mirror's held days with the days NSE just supplied.
+
+        The mirror wins on any day it holds, deliberately: it is the authority for a day whose
+        file is already in the store, and the network rows for those days were transferred only
+        because a range fetch cannot be sparse. The drop is therefore a no-op on the values and
+        the point is that the PROVENANCE is exact -- ``bfinance_source`` says which days came
+        from where, and a day cannot be both.
+        """
+        if fetched.empty:
+            # The archive had no rows for this symbol on the gap days. That is a real answer
+            # (no listing, no trade), not a failure, so the mirror's days stand on their own.
+            return held
+        fetched = fetched[~fetched.index.isin(held.index)]
+        if fetched.empty:
+            return held
+        merged = pd.concat([held, fetched]).sort_index()
+        merged.index.name = "Date"
+        # pd.concat drops attrs, so the source's own provenance record is reattached here.
+        merged.attrs = {**held.attrs, **{k: v for k, v in fetched.attrs.items()
+                                         if k not in held.attrs}}
+        return merged
 
     @staticmethod
     def _window_start(start: Optional[Union[str, datetime]], days: int) -> pd.Timestamp:
