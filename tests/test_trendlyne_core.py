@@ -1085,23 +1085,80 @@ class TestProvenance:
         )
         assert "yfinance basis" not in note
 
-    def test_the_note_says_the_history_is_truncated_at_listing(self):
-        """The note must NOT claim a fixed vendor window.
+    def test_the_note_does_not_claim_the_history_is_truncated_at_listing(self):
+        """The note must claim neither a fixed vendor window NOR truncation at listing.
 
-        This assertion used to be ``"not the listing history" in note`` — i.e. the test enforced a
-        statement that was itself false. The claim came from generalising a large-cap measurement
-        (5,107 bars from 2006-01-02) to every symbol, and the counter-examples are decisive: a 2023
-        IPO cannot have twenty years of bars, and IREDA returns 696 while delisted PAYTM returns
-        1,199. So the history **is** truncated at listing, 2006-01-02 is only the floor for old
-        listings, and any bar count is symbol-dependent.
+        This assertion has been wrong in both directions, once each, and the file is the
+        record. It was first ``"not the listing history" in note``, which enforced a
+        statement that was itself false. It was then swung to ``"truncated at the
+        instrument's listing" in note``, justified by reasoning that was sound on the
+        evidence then available: a 2023 IPO cannot have twenty years of bars, so the series
+        must stop at the listing. That justification has now been falsified by direct
+        measurement. Live on 2026-09-29, SBIN returned **2,222 bars and 45,561,075,413
+        shares of volume dated before its 2015-01-15 NSE listing**, on a frame whose
+        exchange attribute reads "NSE". PAYTM, IREDA and RELIANCE return zero pre-listing
+        bars on the same route, so neither rule holds universally and the earlier claim was
+        generalised from symbols that happened to agree with it.
+
+        What is actually true is narrower: the start of the series is a vendor floor that
+        this package has not verified against any exchange listing date, and for some
+        instruments it sits before the NSE listing. The note has to say that much and no
+        more. SBIN's own payload carries ``stockData[2] == "500112"`` as a BSE code beside
+        the NSE symbol, so those bars are most plausibly BSE history filed under the NSE
+        ticker -- plausible, **not verified**, and the note must not present them as either
+        real or fabricated.
         """
         note = tl.parse_ohlc(payload(), "MOTHERSON").attrs["bfinance_trendlyne_note"]
-        assert "truncated at the instrument's listing" in note
-        assert "symbol-dependent" in note
-        assert "vendor-fixed window" not in note, "the fixed-window claim is the one being retired"
+
+        # The retired claim, in both directions.
+        assert "truncated at the instrument's listing" not in note
         assert "not the listing history" not in note
+        assert "vendor-fixed window" not in note
+
+        # What replaces it: an unverified floor, named as such.
+        assert "vendor floor" in note
+        assert "NOT verified" in note
+        assert "NOT the listing date" in note
+        assert "Do not treat index[0] as the listing" in note
+
+        # The measurement that retired the old claim has to travel with the note, or the
+        # next reader generalises from whichever symbol they happened to test.
+        assert "SBIN" in note
+        assert "2,222" in note
+        assert "45,561,075,413" in note
+        assert "2015-01-15" in note
+
+        # Unchanged from the previous revision, and still load-bearing: the bar count is
+        # symbol-dependent, the basis label is as-traded, and the frame names the source it
+        # must not be spliced with.
+        assert "symbol-dependent" in note
         assert "as-traded" in note
         assert "bhavcopy" in note, "the frame must name the source it may not be mixed with"
+
+    def test_the_frame_measures_pre_listing_rows_only_when_given_a_listing_date(self):
+        """``-1`` and ``0`` are different answers and must not be collapsed.
+
+        ``-1`` means *not measured*: the caller supplied no listing date, so the package has
+        no basis for the claim. ``0`` means *measured, and there were none*. Collapsing them
+        is how the original defect stood -- nothing on the frame ever contradicted the
+        note, because the frame carried no counter-evidence at all.
+        """
+        frame = tl.parse_ohlc(payload(), "MOTHERSON")
+        assert frame.attrs[tl.ROWS_BEFORE_LISTING_ATTR] == -1
+        assert frame.attrs[tl.VOLUME_BEFORE_LISTING_ATTR] == -1
+        assert frame.attrs[tl.LISTING_DATE_ATTR] is None
+
+        # MOTHERSON listed on NSE on 2021-08-18 and the captured fixture holds 60 bars
+        # before that date, so this is a real measurement rather than a constant.
+        dated = tl.parse_ohlc(payload(), "MOTHERSON", listing_date="2021-08-18")
+        assert dated.attrs[tl.ROWS_BEFORE_LISTING_ATTR] == 60
+        assert dated.attrs[tl.VOLUME_BEFORE_LISTING_ATTR] > 0
+        assert dated.attrs[tl.LISTING_DATE_ATTR] == "2021-08-18"
+        assert len(dated) == len(frame), (
+            "the rows are never dropped: the series is split/bonus adjusted, so clipping "
+            "the pre-listing span would leave a discontinuity at the cut rather than "
+            "remove one"
+        )
 
     def test_the_window_is_reported_from_the_data_not_claimed(self):
         frame = tl.parse_ohlc(payload(), "MOTHERSON")
@@ -1892,7 +1949,7 @@ class TestSectorTaxonomy:
         client.transport = httpx.MockTransport(handler)
         sector = tls.TrendlyneGroup("sector", 20, "automobiles-auto-components", "Autos")
         taxonomy = await client.taxonomy_async(sector)
-        assert len(calls) == 1, f"the whole vocabulary must cost one request, not one per group"
+        assert len(calls) == 1, "the whole vocabulary must cost one request, not one per group"
         assert len(taxonomy) == 164
         assert calls[0].endswith("/equity/sector/20/automobiles-auto-components/")
 
@@ -2199,7 +2256,7 @@ class TestSectorConstituents:
         """
         frame = constituents.frame
         lengths = [len(tls.sparkline_points(v)) for v in frame["Sparkline"]]
-        assert min(lengths) >= 2, f"a sparkline with fewer than 2 points is not a sparkline"
+        assert min(lengths) >= 2, "a sparkline with fewer than 2 points is not a sparkline"
         assert max(lengths) == 14, "14 weekly points is the full window"
         assert lengths.count(14) == 183
         assert len(set(lengths)) > 1, (

@@ -181,17 +181,43 @@ must **not** be guarded. :data:`SNAPSHOT_PERIOD` survives as the only period seg
 share-holding route accepts, and :func:`validate_period` already rejects anything else before a
 request is spent.
 
-``eodData`` is newest-first, and the freshest week is in a different key
------------------------------------------------------------------------
-**The history is truncated at listing — it is *not* a fixed vendor window.** This docstring used to
-claim the opposite ("5,107 bars for every symbol measured … a fixed vendor window, *not* listing
-history"), and that was wrong: it generalised a large-cap measurement to every symbol. Measured
-counter-examples — **IREDA (2023 IPO) returns 696 bars**, and **PAYTM (delisted) 1,199**. A 2023
-listing cannot have twenty years of history, so the floor is the listing date, not a window edge.
+``eodData`` is newest-first, and its start is not the instrument's listing date
+-------------------------------------------------------------------------------
+**The start of the series is a vendor floor that this package has never verified against an exchange
+listing date.** This section has been wrong twice and both versions shipped. The first claim was a
+uniform vendor window, generalised from a large-cap measurement to every symbol. The correction,
+which is the version that shipped until this commit, was the opposite one: that the floor IS the
+listing date, because a 2023 IPO cannot have twenty years of bars. Both are false, and the second
+is the more dangerous one, because it tells a caller the data is clean when it is not.
 
-What *is* uniform is the **start** for old listings: 2006-01-02. So a mature large cap reaches
-5,107 bars in ``eodData`` and 5,112 after the last-week merge, and a recent listing reaches far
-fewer. Treat any bar count as symbol-dependent, and do not use a constant to reason about coverage.
+Measured live 2026-09-29, four symbols, the full frame including the last-week merge:
+
+========================  ===========  ==============  ======  =================================
+symbol                    first bar   NSE listing     bars   bars dated before that listing
+========================  ===========  ==============  ======  =================================
+RELIANCE (id 1127)        2006-01-02   long before     5114   0
+SBIN (id 1193)            2006-01-02   2015-01-15      5114   **2222** (45,561,075,413 shares)
+PAYTM (id 712312)         2021-11-18   2021-11-18      1206   0
+IREDA (id 1791996)        2023-11-29   2023-10-13      703    0
+========================  ===========  ==============  ======  =================================
+
+What survives of the old claim is only that the bar count is symbol-dependent: a recent listing
+reaches far fewer bars than a mature large cap. For three of the four symbols above the first bar is
+at or after the listing date, which is what made the listing-date claim look right. **SBIN is the
+counter-example that falsifies the rule.** 2,222 of its 5,114 bars, carrying 45,561,075,413 shares
+of volume, are dated before its 2015-01-15 NSE listing. Its own payload carries a ``BSEcode`` of
+500112 next to the NSE symbol, so those bars are most likely the BSE history of the same company
+filed under the NSE ticker -- plausible, not verified, and not this package's call to make. A frame
+whose ``exchange`` attr reads ``"NSE"`` while holding pre-NSE-listing bars is exactly why the
+decision belongs to the caller.
+
+**There is no listing-date source here to gate on.** The OHLC payload's ``stockData`` holds the full
+name, the NSE code, the BSE code, the ISIN and three scores, and no listing date; NSE's
+``/public-past-issues`` answers an empty list for historical windows. So this package neither clips
+nor pretends to. :func:`parse_ohlc` takes an optional ``listing_date`` and publishes
+``attrs["bfinance_trendlyne_rows_before_listing"]`` plus the volume those rows carry, so the caller
+can see the number and decide for itself. The key reads ``-1`` when no date was supplied, which
+means "not measured" and must never be read as "none".
 
 The payload also carries ``eodDataLastWeek``, which on the same
 capture holds 2026-09-21 to 2026-09-25 — i.e. the five most recent sessions that ``eodData`` does
@@ -421,6 +447,25 @@ PRICE_BASIS_ATTR = "bfinance_trendlyne_price_basis"
 DEMERGER_APPLIED_ATTR = "bfinance_trendlyne_demerger_applied"
 SOURCE_ATTR = "bfinance_trendlyne_source"
 NOTE_ATTR = "bfinance_trendlyne_note"
+
+#: The listing date the CALLER supplied to :func:`parse_ohlc`, echoed back on the frame.
+#: ``None`` when none was supplied. This package has no listing-date source of its own: the OHLC
+#: ``stockData`` carries name, NSE code, BSE code, stock_id, instrument type, ISIN and three scores,
+    # and no date of any kind. Observed verbatim on SBIN:
+    #   [0] 'State Bank of India' [1] 'SBIN' [2] '500112' [3] 1193 [4] 'Equity'
+    #   [5] 'INE062A01020' [6] 40 [7] 48 [8] 34 The value is
+#: therefore only ever what a caller asserted, never something this module looked up.
+LISTING_DATE_ATTR = "bfinance_trendlyne_listing_date"
+#: How many bars are dated before :data:`LISTING_DATE_ATTR`. This is the number the module used to
+#: *assert away*: the note and the docstring both claimed the history was clipped at the listing
+#: date, and SBIN (2,222 of 5,114 bars, 45,561,075,413 shares of volume, before its 2015-01-15 NSE
+#: listing, measured 2026-09-29) shows the claim was false. ``-1`` means *not measured* -- no
+#: listing date was supplied -- and is deliberately distinct from ``0``, which means *measured,
+#: none found*. Same convention as ``bfinance_trendlyne_last_week_rows_added``.
+ROWS_BEFORE_LISTING_ATTR = "bfinance_trendlyne_rows_before_listing"
+#: Total volume of those same rows, so "how much of this is pre-listing" is one dict lookup rather
+#: than a second pass. ``-1`` when not measured, on the same terms as the row count.
+VOLUME_BEFORE_LISTING_ATTR = "bfinance_trendlyne_volume_before_listing"
 #: Written by ``build_attrs(window=...)``, which prefixes its keyword arguments. A one-line
 #: summary of the same facts as ``bfinance_trendlyne_first_date`` / ``_last_date`` / ``_bars``.
 WINDOW_ATTR = "bfinance_trendlyne_window"
@@ -840,6 +885,38 @@ def _rows_to_frame(
     return frame, int(pd.isna(close).sum()), divergent
 
 
+def _listing_cutoff(listing_date: Any) -> Optional[pd.Timestamp]:
+    """Normalise a caller-supplied listing date to a midnight, tz-naive ``Timestamp``.
+
+    The date component is taken as given, exactly as :func:`_rows_to_frame` takes it from the wire:
+    a listing is a calendar day, so an offset carried on the argument is dropped rather than shifted
+    the date across a boundary. ``None`` in, ``None`` out, because "no listing date was supplied" is
+    a first-class answer here and not an error -- it is what makes the attrs read ``-1``.
+
+    Raises:
+        ValueError: The argument is not a date at all. Silently counting against a ``NaT`` would
+            report ``0`` rows before a listing date the caller believes in, which is the exact false
+            all-clear this measurement exists to remove.
+    """
+    if listing_date is None:
+        return None
+    try:
+        stamp = pd.Timestamp(listing_date)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"listing_date={listing_date!r} is not a date. Pass an ISO string ('2015-01-15'), a "
+            f"datetime.date or a pandas Timestamp, or None to skip the check."
+        ) from exc
+    if pd.isna(stamp):
+        raise ValueError(
+            f"listing_date={listing_date!r} is NaT, which is not a listing date. Pass a real date, "
+            f"or None to skip the check."
+        )
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_localize(None)
+    return stamp.normalize()
+
+
 def parse_ohlc(
     payload: Any,
     symbol: str,
@@ -848,6 +925,7 @@ def parse_ohlc(
     include_last_week: bool = True,
     retrieved_at: Optional[datetime] = None,
     stock_id: Optional[int] = None,
+    listing_date: Any = None,
 ) -> pd.DataFrame:
     """Parse an OHLC payload into a ``DatetimeIndex`` frame with truthful ``attrs``.
 
@@ -862,15 +940,31 @@ def parse_ohlc(
             present in ``eodData`` are **never** overwritten — ``eodData`` is authoritative.
         retrieved_at: When the response arrived.
         stock_id: trendlyne's internal id for the symbol, recorded in ``attrs`` when known.
+        listing_date: The security's listing date, as ``'YYYY-MM-DD'``, a ``date`` or a
+            ``Timestamp``. **The caller supplies it; this module does not know it.** Supplying it
+            publishes :data:`ROWS_BEFORE_LISTING_ATTR` (and :data:`VOLUME_BEFORE_LISTING_ATTR`) on
+            the frame; omitting it leaves both at ``-1``, meaning *not measured*.
 
     Returns:
         Columns :data:`COLUMNS`, ascending ``Date`` index, with ``attrs`` recording provenance,
         the price basis, the vendor window, the merge, the invariant check and every missing value.
 
+    Note:
+        ``listing_date`` exists because a stronger claim used to live here. The module asserted
+        that the history was clipped at the instrument's listing date, and there is no such
+        clipping in the code -- there was never a listing-date lookup to clip against. SBIN
+        returned 2,222 of 5,114 bars, carrying 45,561,075,413 shares of volume, dated before its
+        2015-01-15 NSE listing (measured live 2026-09-29). The package cannot decide for the
+        caller which of those bars are wanted, so it counts them and says so. **The rows are never
+        dropped**: on a split- or bonus-adjusted series the pre-listing bars are on the same
+        adjusted scale as the rest, so clipping them would leave a discontinuity rather than
+        remove one.
+
     Raises:
         TrendlyneNotAuthorizedError: The envelope reports a failed request (rejected token).
         TrendlyneSchemaError: Missing ``eodHeaders``/``eodData``, a renamed column, a row of the
             wrong width, an unparseable date, or an all-missing close.
+        ValueError: ``listing_date`` is neither a date nor ``None``.
     """
     body = parse_envelope(payload, context=f"the OHLC payload for {symbol}")
     for key in ("eodHeaders", "eodData"):
@@ -972,15 +1066,47 @@ def parse_ohlc(
     }
     first_date = frame.index[0].date().isoformat()
     last_date = frame.index[-1].date().isoformat()
+
+    # The listing date is the CALLER's claim about the security, never a lookup this module
+    # made -- there is no listing-date source on this route, and the payload's stockData does
+    # not carry one. Without it the count stays -1 ("not measured"), which is deliberately not
+    # 0: a frame nobody has checked must not read as a frame that was checked and came back
+    # clean. That distinction is the whole point -- this count is the replacement for a claim
+    # about the data that the data did not support.
+    cutoff = _listing_cutoff(listing_date)
+    if cutoff is None:
+        listing_iso = None
+        rows_before = -1
+        volume_before = -1
+    else:
+        pre = frame.index < cutoff
+        rows_before = int(pre.sum())
+        volume_before = frame.loc[pre, "Volume"].sum()
+        if pd.api.types.is_integer_dtype(frame["Volume"]):
+            volume_before = int(volume_before)
+        listing_iso = cutoff.date().isoformat()
+        if rows_before:
+            logger.warning(
+                "trendlyne eodData for %s carries %d bar(s) dated before the caller-supplied "
+                "listing date %s (%s shares of volume). The rows are kept and the count is in "
+                "attrs; this package has no listing-date source of its own to gate on.",
+                symbol, rows_before, listing_iso, f"{volume_before:,}",
+            )
+
     note = (
         f"Daily EOD series from trendlyne.com, spanning {first_date}..{last_date} "
-        f"({len(frame)} bars) — truncated at the instrument's listing, so the bar count is "
-        f"symbol-dependent (2006-01-02 is the floor for old listings; a 2023 IPO returns a few "
-        f"hundred). Basis: "
+        f"({len(frame)} bars). The bar count is symbol-dependent, but the START of the series is a "
+        f"vendor floor this package has NOT verified against any exchange listing date, and it is "
+        f"NOT the listing date: measured live 2026-09-29, SBIN returned 2,222 bars and "
+        f"45,561,075,413 shares of volume dated before its 2015-01-15 NSE listing, on a frame "
+        f"whose exchange reads NSE. Do not treat index[0] as the listing, and do not read a short "
+        f"bar count as a young listing. Pass listing_date= to have "
+        f"attrs['{ROWS_BEFORE_LISTING_ATTR}'] measured for your instrument; it reads -1 when it "
+        f"has not been measured. Basis: "
         f"AS-TRADED, back-adjusted for splits and bonuses only; DEMERGERS ARE NOT APPLIED, so "
         f"these bars equal the NSE as-traded print wherever no split or bonus falls inside the "
         f"joined span. Do not splice them with bfinance.nse.bhavcopy bars across a split or bonus "
-        f"date — the older bars are scaled there and the join carries a corporate-action-sized "
+        f"date (the older bars are scaled there and the join carries a corporate-action-sized "
         f"step. Do not splice them with yfinance bars on a demerger name: yfinance rewrites that "
         f"history and this source does not."
     )
@@ -1005,6 +1131,9 @@ def parse_ohlc(
             ohlc_invariant_violations=violations,
             duplicate_dates=duplicated,
             missing_values=missing_values,
+            listing_date=listing_iso,
+            rows_before_listing=rows_before,
+            volume_before_listing=volume_before,
         )
     )
     frame.attrs["bfinance_synthetic_ohlc"] = False
@@ -1801,6 +1930,7 @@ class TrendlyneClient:
         symbol: str,
         *,
         include_last_week: bool = True,
+        listing_date: Any = None,
     ) -> pd.DataFrame:
         """Daily OHLCV, as-traded and split/bonus-adjusted. Two requests the first time, one after.
 
@@ -1808,6 +1938,12 @@ class TrendlyneClient:
             symbol: Anything :meth:`resolve_async` accepts.
             include_last_week: Merge ``eodDataLastWeek`` — the five most recent sessions, which
                 the main ``eodData`` key does not contain. See the module docstring.
+            listing_date: The security's listing date, as ``'YYYY-MM-DD'``, a ``date`` or a
+                ``Timestamp``. **The caller supplies it; this package does not look it up** -- the
+                OHLC payload carries no listing date and this route has no other source for one.
+                Passing it publishes ``attrs["bfinance_trendlyne_rows_before_listing"]`` and its
+                volume companion; the bars themselves are never dropped. Without it both read
+                ``-1``, meaning *not measured*, which is not the same as zero.
 
         Returns:
             A ``DatetimeIndex`` frame with columns :data:`COLUMNS` and ``attrs`` recording
@@ -1828,6 +1964,7 @@ class TrendlyneClient:
             TrendlyneNotAuthorizedError: The envelope rejected the token, and re-scraping it once
                 did not produce a different one.
             TrendlyneSchemaError: The payload did not have the expected shape.
+            ValueError: ``listing_date`` is neither a date nor ``None``.
         """
         record = await self.resolve_any_async(symbol)
         retrieved_at = datetime.now(timezone.utc)
@@ -1844,6 +1981,7 @@ class TrendlyneClient:
                 include_last_week=include_last_week,
                 retrieved_at=retrieved_at,
                 stock_id=record.stock_id,
+                listing_date=listing_date,
             )
         except TrendlyneNotAuthorizedError:
             # The token may have rotated upstream. Re-scrape once — and only if it actually
@@ -1864,6 +2002,7 @@ class TrendlyneClient:
                 include_last_week=include_last_week,
                 retrieved_at=retrieved_at,
                 stock_id=record.stock_id,
+                listing_date=listing_date,
             )
         frame.attrs.update(extra)
         return frame
@@ -1900,9 +2039,21 @@ class TrendlyneClient:
             }
         return extra
 
-    def ohlc(self, symbol: str, *, include_last_week: bool = True) -> pd.DataFrame:
+    def ohlc(
+        self,
+        symbol: str,
+        *,
+        include_last_week: bool = True,
+        listing_date: Any = None,
+    ) -> pd.DataFrame:
         """Sync variant of :meth:`ohlc_async`."""
-        return _run_async(self.ohlc_async(symbol, include_last_week=include_last_week))
+        return _run_async(
+            self.ohlc_async(
+                symbol,
+                include_last_week=include_last_week,
+                listing_date=listing_date,
+            )
+        )
 
     async def chart_metric_async(self, symbol: str, metric: str) -> Any:
         """The raw ``chart-data`` payload for a metric. No token needed.
@@ -2043,18 +2194,35 @@ def _default_client() -> TrendlyneClient:
     return _DEFAULT_CLIENT
 
 
-def ohlc(symbol: str, *, include_last_week: bool = True) -> pd.DataFrame:
+def ohlc(
+    symbol: str,
+    *,
+    include_last_week: bool = True,
+    listing_date: Any = None,
+) -> pd.DataFrame:
     """Module-level shortcut for :meth:`TrendlyneClient.ohlc`.
+
+    Pass ``listing_date`` to have ``attrs["bfinance_trendlyne_rows_before_listing"]`` measured
+    against your own listing date. The package cannot supply one and will not guess one.
 
     >>> from bfinance.trendlyne import ohlc
     >>> ohlc("RELIANCE").tail()          # doctest: +SKIP
     """
-    return _default_client().ohlc(symbol, include_last_week=include_last_week)
+    return _default_client().ohlc(
+        symbol, include_last_week=include_last_week, listing_date=listing_date
+    )
 
 
-def ohlc_async(symbol: str, *, include_last_week: bool = True) -> pd.DataFrame:
+def ohlc_async(
+    symbol: str,
+    *,
+    include_last_week: bool = True,
+    listing_date: Any = None,
+) -> pd.DataFrame:
     """Async variant of :func:`ohlc`."""
-    return _default_client().ohlc_async(symbol, include_last_week=include_last_week)
+    return _default_client().ohlc_async(
+        symbol, include_last_week=include_last_week, listing_date=listing_date
+    )
 
 
 def resolve(symbol: str) -> TrendlyneSymbol:
