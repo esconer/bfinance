@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Literal, Optional, Union
+from typing import Dict, Literal, Optional, Union
 import numpy as np
 import pandas as pd
 
@@ -297,6 +297,77 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if "Volume" in out.columns:
         out["Volume"] = out["Volume"].fillna(0).astype(np.int64)
     return out
+
+
+#: Coarseness order, so "delivered is coarser than requested" is a comparison and not a
+#: guess. ``None`` is not in here: an interval that cannot be determined is a third thing,
+#: neither finer nor coarser, and it must not be silently treated as the finest.
+_INTERVAL_RANK: Dict[str, int] = {"1d": 0, "1wk": 1, "1mo": 2}
+
+
+def _infer_bar_interval(index) -> Optional[str]:
+    """
+    The bar spacing a frame actually carries, read off its own index, or ``None``.
+
+    Why this exists: the close-only Screener feed changes granularity with window length
+    and nothing in the request says which you got. Measured on RELIANCE, same
+    ``interval="1d"`` call, screener.in route:
+
+        period=1mo    20 rows   median gap 1 day    daily
+        period=6mo   122 rows   median gap 1 day    daily
+        period=1y    247 rows   median gap 1 day    daily
+        period=2y    105 rows   median gap 7 days   weekly
+        period=5y    262 rows   median gap 7 days   weekly
+
+    So a caller asking for daily bars silently receives weekly ones past roughly eighteen
+    months, with no column, attribute or warning to say so. Any indicator, volatility
+    estimate or backtest then changes meaning at that boundary without changing shape.
+
+    The median is used rather than the minimum because a daily equity series legitimately
+    contains 3-day gaps across weekends and holidays; the mode of trading-day spacing is
+    the signal, and the minimum would read a Friday-to-Monday pair as weekly.
+
+    Fewer than three bars cannot establish a spacing, and ``None`` is returned rather than
+    guessing from one gap, which would classify a two-bar frame by noise.
+    """
+    idx = pd.DatetimeIndex(index)
+    if idx.hasnans or len(idx) < 3:
+        return None
+    gaps = pd.Series(idx).diff().dt.days.dropna()
+    if gaps.empty:
+        return None
+    median_gap = float(gaps.median())
+    if median_gap <= 1.5:
+        return "1d"
+    if median_gap <= 9.0:
+        return "1wk"
+    if median_gap <= 40.0:
+        return "1mo"
+    return None
+
+
+def _interval_mismatch_detail(requested: str, delivered: Optional[str]) -> Optional[str]:
+    """
+    A sentence naming the coarser-than-requested case, or ``None`` when there is none.
+
+    The published reason this does not raise: the values are real, only the granularity
+    is coarser than asked, so a caller who genuinely wants five years at weekly
+    resolution is served correctly by the same call. Refusing would break that legitimate
+    use to prevent a misuse the caller can now see. What it must never be is silent, so
+    the frame carries the key, the sentence, and a logged warning.
+    """
+    if delivered is None or requested not in _INTERVAL_RANK or delivered not in _INTERVAL_RANK:
+        return None
+    if _INTERVAL_RANK[delivered] <= _INTERVAL_RANK[requested]:
+        return None
+    return (
+        f"the feed delivered {delivered} bars while interval={requested!r} was requested. "
+        f"The Screener.in chart route coarsens with window length, so a longer request "
+        f"silently yields fewer, wider bars. This frame is REAL but is not the resolution "
+        f"you asked for: any per-bar indicator, ATR, or backtest computed on it changes "
+        f"meaning. Ask for interval={delivered!r} if that is what you wanted, or use "
+        f"ohlc='bhavcopy' for real daily bars (from 2024-01-01, the archive floor)."
+    )
 
 
 class OHLCVEngine:
@@ -641,6 +712,11 @@ class OHLCVEngine:
             empty.attrs["price_basis"] = (
                 PRICE_BASIS_SYNTHETIC if synthetic else PRICE_BASIS_AS_TRADED
             )
+            # Present on the empty frame too, and None rather than a guess: there are no
+            # bars, so the spacing is genuinely unknown. A consumer that reads one key on
+            # every frame must not have to special-case the empty one.
+            empty.attrs["bfinance_bar_interval"] = None
+            empty.attrs["bfinance_bar_interval_mismatch"] = None
             return empty
 
         df = bars.copy()
@@ -829,6 +905,19 @@ class OHLCVEngine:
 
         if resample is not None and not df.empty:
             df = _resample_ohlcv(df, resample)
+            # The resample rule IS the delivered spacing, so it is read off the request
+            # rather than inferred back out of the index. Inference is only needed when
+            # no resampling happened, which is the daily-request case and the one where
+            # the feed can hand back something coarser than was asked for.
+            delivered_interval = "1wk" if resample == "weekly" else "1mo"
+        else:
+            delivered_interval = _infer_bar_interval(df.index)
+
+        interval_detail = _interval_mismatch_detail(norm_interval, delivered_interval)
+        if interval_detail:
+            # Logged as well as published. The package's degradation channel is
+            # logger + attrs, and the two carry the same sentence so they cannot drift.
+            logger.warning("%s: %s", symbol, interval_detail)
 
         if synthetic:
             df.attrs["bfinance_synthetic_ohlc"] = True
@@ -849,6 +938,15 @@ class OHLCVEngine:
         # the empty one, because a frame with no bars is exactly the frame a consumer is most
         # likely to treat as "nothing to worry about".
         df.attrs["price_basis"] = self._price_basis(synthetic=synthetic, scaled=scaled)
+        # What the bars actually are spaced at, which is NOT the interval that was
+        # requested. Present on every frame, including the empty one (where it is None,
+        # because no bars exist to measure), so a consumer reads one key instead of
+        # probing for its absence.
+        df.attrs["bfinance_bar_interval"] = delivered_interval
+        # None when the delivered spacing is what was asked for, or finer, or
+        # undeterminable. A sentence naming both when it is coarser. The check is
+        # ``df.attrs["bfinance_bar_interval_mismatch"] is not None``.
+        df.attrs["bfinance_bar_interval_mismatch"] = interval_detail
         # Which feed produced the Dividends / Stock Splits columns, so a frame built on the
         # fiscal-year-end approximation is never mistaken for one carrying true ex-dates.
         df.attrs["bfinance_actions_source"] = actions_source or ACTIONS_SOURCE_NONE

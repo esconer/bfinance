@@ -40,7 +40,66 @@ specific confusion this package exists to prevent.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Dict, Mapping
+
+
+def _run_async(coro):
+    """Bridge to sync, matching ``nse.bhavcopy._run_async`` and ``Ticker._run_async``.
+
+    When an event loop is already running in this thread the coroutine is handed to a
+    one-worker thread, because ``asyncio.run`` cannot nest. The thread is joined before
+    returning, so the value is fully materialised at the call site rather than escaping
+    into the caller's frame.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(coro)).result()
+    return asyncio.run(coro)
+
+
+def _resolved(value: Any) -> Any:
+    """
+    Drive a coroutine to completion, or pass a plain value straight through.
+
+    Why this exists, measured rather than reasoned: a registry row names its entry by
+    string, and an entry that is a CLIENT METHOD may be a coroutine function while an entry
+    that is a module-level function is not. ``screener_chart_history`` resolves to
+    ``ScreenerClient.get_chart_timeseries``, which is ``async def``, so the adapter's
+    ``return reader(**given)`` handed the cascade a coroutine OBJECT where a price series
+    belonged. Confirmed directly:
+
+        >>> type(bindings.screener_chart_history(ScreenerClient, {...}))
+        <class 'coroutine'>
+
+    and the cascade's next step raised ``TypeError: object of type 'coroutine' has no
+    len()``. The row looked wired, passed every surface test, and could never answer.
+
+    The failure is silent in the worst way: a coroutine is a legal Python object, so
+    nothing complains at the boundary, and the real error surfaces far from its cause, or
+    never surfaces at all if the caller only inspects ``attrs``. Resolving here means the
+    class of defect cannot recur in any adapter, present or future, rather than fixing the
+    one instance found today.
+
+    Deliberately not a rename. The obvious alternative is to rename every client method to
+    ``*_async`` and add a synchronous twin under the plain name, which is the convention the
+    other clients in this package already follow. That is a public API break, and it would
+    silently un-await every duck-typed stub: ``ohlcv.py`` resolves the profile loader with
+    ``getattr(self.screener, "get_company_profile", None)`` and awaits whatever it gets, so
+    renaming the real method would leave test doubles returning ``None`` where a coroutine
+    is expected. Resolving the value keeps both worlds working and removes the hazard
+    without touching a single call site.
+    """
+    if asyncio.iscoroutine(value):
+        return _run_async(value)
+    return value
 
 __all__ = [
     "call_entry",
@@ -195,8 +254,11 @@ def statements_cascade(entry: Any, request: Mapping[str, Any]) -> Any:
         frequency=Frequency(str(request.get("frequency", "annual")).lower()),
         basis=Basis(str(request.get("basis", "consolidated")).lower()),
     )
-    return resolve(
-        statement_request, fetch=_payload_fetch(dict(request.get("payloads") or {}))
+    return _resolved(
+        resolve(
+            statement_request,
+            fetch=_payload_fetch(dict(request.get("payloads") or {})),
+        )
     )
 
 
@@ -230,7 +292,7 @@ def nse_bhavcopy_range(entry: Any, request: Mapping[str, Any]) -> Any:
     filter this layer does not have.
     """
     given = _require(request, "start", "end")
-    return entry(**given)
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.marketlens_history")
@@ -242,7 +304,7 @@ def marketlens_history(entry: Any, request: Mapping[str, Any]) -> Any:
     omitting it.
     """
     given = _require(request, "symbol")
-    return entry(**given)
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.screener_chart_history")
@@ -268,7 +330,7 @@ def screener_chart_history(entry: Any, request: Mapping[str, Any]) -> Any:
             f"method that does exist rather than guessing at one."
         )
     given = _require(request, "ticker")
-    return reader(**given)
+    return _resolved(reader(**given))
 
 
 @_register("bfinance.sources.bindings.macro_index_series")
@@ -289,7 +351,7 @@ def macro_index_series(entry: Any, request: Mapping[str, Any]) -> Any:
     if capability == "index_valuation" and request.get("index"):
         from bfinance.nse.macro import select_index
 
-        return select_index(frame, str(request["index"]))
+        return _resolved(select_index(frame, str(request["index"])))
     return frame
 
 
@@ -301,7 +363,7 @@ def participant_flows(entry: Any, request: Mapping[str, Any]) -> Any:
     Both dates are required: a range with an open end is a different question, and defaulting one
     would silently change which days are covered.
     """
-    return entry(**_require(request, "start", "end"))
+    return _resolved(entry(**_require(request, "start", "end")))
 
 
 @_register("bfinance.sources.bindings.amfi_aum")
@@ -313,7 +375,7 @@ def amfi_aum(entry: Any, request: Mapping[str, Any]) -> Any:
     :func:`bfinance.flows.amfi_workbook_coverage`, which is a separate call and not something this
     adapter guesses at.
     """
-    return entry(**_require(request, "workbook_url"))
+    return _resolved(entry(**_require(request, "workbook_url")))
 
 
 @_register("bfinance.sources.bindings.universe_constituents")
@@ -325,7 +387,7 @@ def universe_constituents(entry: Any, request: Mapping[str, Any]) -> Any:
     "here is a page, read it", and the fetching is the caller's. The registry note says so; a row
     that implied this source fetches would send someone looking for a client it does not have.
     """
-    return entry(**_require(request, "text"))
+    return _resolved(entry(**_require(request, "text")))
 
 
 @_register("bfinance.sources.bindings.universe_archive")
@@ -343,7 +405,7 @@ def universe_archive(entry: Any, request: Mapping[str, Any]) -> Any:
             f"a universe archive built from {type(archive).__name__} has no membership_asof "
             f"reader; point the registry entry at the method that exists rather than guessing"
         )
-    return reader(**_require(request, "index", "on"))
+    return _resolved(reader(**_require(request, "index", "on")))
 
 
 @_register("bfinance.sources.bindings.costs_quote")
@@ -355,7 +417,9 @@ def costs_quote(entry: Any, request: Mapping[str, Any]) -> Any:
     defaulted: a date-keyed schedule asked for a rate with no date would return today's regime,
     which is a wrong number wearing a correct-looking unit — a 2019 trade charged at 2026 rates.
     """
-    return entry(**_require(request, "buy_shape", "sell_shape", "trade_date", "buy_amount"))
+    return _resolved(
+        entry(**_require(request, "buy_shape", "sell_shape", "trade_date", "buy_amount"))
+    )
 
 
 @_register("bfinance.sources.bindings.ownership_read")
@@ -380,11 +444,11 @@ def ownership_read(entry: Any, request: Mapping[str, Any]) -> Any:
                 f"point the registry entry at the method that exists rather than guessing"
             )
         given = _require(request, "expected_date")
-        return reader(kinds=[capability.removesuffix("_deals")], **given)
+        return _resolved(reader(kinds=[capability.removesuffix("_deals")], **given))
     reader = getattr(client, "shareholding_patterns", None)
     if reader is None:
         raise TypeError(
             f"an ownership client built from {type(client).__name__} has no shareholding_patterns "
             f"reader; point the registry entry at the method that exists rather than guessing"
         )
-    return reader(**_require(request, "symbol"))
+    return _resolved(reader(**_require(request, "symbol")))
