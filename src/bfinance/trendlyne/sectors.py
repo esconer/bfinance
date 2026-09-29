@@ -124,6 +124,32 @@ from .tables import (
     find_table_elements,
 )
 
+
+#: Public surface of this module. Without it, ``from bfinance.trendlyne.sectors import *``
+#: binds the module's own imports as well as its API -- ``bs4``, ``json``, ``re``, ``pandas``
+#: and ``logging`` all land in the caller's namespace. The package __init__ curates a subset
+#: of these for ``bfinance.trendlyne`` itself; this list describes the module.
+__all__ = [
+    "AGGREGATE_SIG",
+    "CONSTITUENTS_SIG",
+    "ConstituentResult",
+    "INDUSTRY_ROUTE",
+    "SECTOR_ROUTE",
+    "SUSPICIOUS_ROW_MULTIPLE",
+    "TAXONOMY_SELECT_ID",
+    "TrendlyneGroup",
+    "constituent_attrs",
+    "declared_group",
+    "load_signatures",
+    "parse_classification",
+    "parse_constituents",
+    "parse_industry_aggregate",
+    "parse_taxonomy",
+    "self_route",
+    "sparkline_points",
+    "taxonomy_counts",
+
+]
 logger = logging.getLogger("bfinance")
 
 #: The complete group vocabulary lives in this one ``<select>`` on every sector and industry page.

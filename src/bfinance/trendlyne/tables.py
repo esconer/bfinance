@@ -82,6 +82,28 @@ from .errors import (
     TrendlyneTokenError,
 )
 
+
+#: Public surface of this module. Without it, ``from bfinance.trendlyne.sectors import *``
+#: binds the module's own imports as well as its API -- ``bs4``, ``json``, ``re``, ``pandas``
+#: and ``logging`` all land in the caller's namespace. The package __init__ curates a subset
+#: of these for ``bfinance.trendlyne`` itself; this list describes the module.
+__all__ = [
+    "OHLC_TOKEN_RE",
+    "PROVENANCE",
+    "SIGNATURES",
+    "TableSignature",
+    "classify_table",
+    "extract_ohlc_token",
+    "find_ohlc_tokens",
+    "find_table",
+    "find_table_elements",
+    "find_tables",
+    "known_signatures",
+    "normalize_header",
+    "page_signatures",
+    "register_signature",
+
+]
 logger = logging.getLogger("bfinance")
 
 #: Provenance tag recorded on every frame this package returns, matching the convention already
