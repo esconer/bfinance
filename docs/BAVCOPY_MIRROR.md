@@ -64,11 +64,34 @@ A real mirror was built from **20 live files (57,703 rows)** and both paths time
 
 | | |
 |---|---|
-| median **0.039 ms**, p99 0.063 ms, max 0.342 ms | from SQLite |
-| **5,920 ms** | the same read from the network |
+| raw SQL, `SELECT ... WHERE symbol=? AND day BETWEEN ? AND ?` | **0.0156 ms** median, 0.031 ms p99 |
+| **`Mirror.read()`, i.e. what a caller actually pays** | **0.6425 ms** median, 1.26 ms p99 |
+| the same read from the network | **5,920 ms** |
 
-**~152,000x faster on the read path.** Writing the entire 30-year history costs about two
-minutes; only fetching costs anything.
+> **CORRECTION.** An earlier draft of this table quoted 0.039 ms as the read cost. That was
+> a **raw SQL** measurement presented as if it were the caller-facing cost, which it is not.
+> Measured on the implemented `Mirror.read()`, the SQLite query is 0.0156 ms and the
+> remaining **0.627 ms — 97.6% of the total — is pandas DataFrame construction**, which
+> dominates at these row counts. The honest end-to-end figure is **0.64 ms**, and the
+> speedup against the network is **5,920 / 0.64 = ~9,250x**, not ~152,000x.
+>
+> This does not change the design argument: 0.64 ms against 5,920 ms is still four orders of
+> magnitude, and it is still the difference between one file per day and one file per symbol
+> per day. It does change the number a reader should hold, and a benchmark that quotes its
+> fastest internal layer as its headline is not measuring the thing being sold.
+
+**Write** — `DataFrame.to_sql`, on the schema in section 5:
+
+| | |
+|---|---|
+| 20.2 ms per day, 7.0 us per row | |
+| 119 bytes per row on disk | 6.9 MB for 57,703 rows |
+
+> **CORRECTION.** `Mirror.stats()` originally read only the main database file for its size.
+> Under WAL, freshly committed pages live in the `-wal` file until a checkpoint, so it
+> reported **4,096 bytes for a 1,368,064-byte mirror — a 334x under-report.** The
+> implementation now sums `.db`, `.db-wal` and `.db-shm`; measured on the real 4-day
+> mirror it reports **120.7 bytes per row**, consistent with the 119 measured here.
 
 **Extrapolated from the measured bytes/row and rows/day:**
 
@@ -257,21 +280,39 @@ that decompresses in 8 ms.
 
 ## 11a. Resolved: the coverage watermark has an official source
 
-Open question 3 in `UPSTREAM_SOURCES.md` section 9 settles part of section 6 above.
-`https://www.nseindia.com/api/holiday-master?type=trading` returns **HTTP 200, 34,022
-bytes, 12 segments**, each row carrying `tradingDate`, `weekDay`, `description`,
-`morning_session` and `evening_session`.
+> **CORRECTION — this route is a HOLIDAY list, not a trading calendar, and the first draft
+> of this section said otherwise.** `https://www.nseindia.com/api/holiday-master?type=trading`
+> returns **HTTP 200, 34,022 bytes, 12 segment keys** (`CBM`, `CD`, `CM`, `CMOT`, `COM`,
+> `EGR`, `FO`, `IRD`, `MF`, `NDM`, `NTRP`, `SLBS`). The CM segment holds **20 rows and
+> every one of them is a holiday**: "Republic Day", "Holi", "Mahashivratri",
+> "25-Dec-2026", and so on.
 
-So the three-way distinction in section 6 does not need a guessed holiday list:
+Critically, **every one of those rows carries `morning_session: null` and
+`evening_session: null`**. So the session columns are *not* a "was it open" signal on this
+route — null-both means "this row is a holiday", not "no session information".
+
+An earlier draft of `mirror.py` read null-both as "therefore a trading day" and returned
+all 20 holidays as trading days. Consequence, had it shipped: the mirror would have demanded
+roughly **twenty files a year that are never published**, sending every caller to the
+network for a 404, forever. That is the exact failure the watermark exists to prevent, and
+it was caught only by running the end-to-end path against the live payload.
+
+The route is still exactly what the mirror needs, with the polarity reversed:
 
 | question | answered by |
 |---|---|
-| is this date a trading day at all? | `/holiday-master` |
+| is this date a weekend? | the calendar, unconditionally, no payload needed |
+| is this date a published holiday? | `holidays_from_calendar()` on `/holiday-master` |
 | have I downloaded it? | `mirror_days` |
-| did the security not exist / not trade? | absence from `ohlc` on a day that *is* in `mirror_days` |
+| did the security not list or not trade? | absence from `ohlc` on a day that *is* held |
 
-**The watermark should be seeded from that route**, which also means a caller can be told
-"2026-01-26 was a holiday" rather than merely "no data".
+Two further limits, both measured and both recorded in the code:
+
+- **The payload covers one calendar year.** The CM rows run 15-Jan-2026 to 25-Dec-2026. A
+  weekday in any other year returns `None` — *unknown*, not a trading day and not a
+  holiday. Guessing either way would invent gaps or hide real ones, so the mirror refuses.
+- **A weekend is decided before the holiday list is consulted**, because Saturday and Sunday
+  are knowable with no calendar at all.
 
 ## 12. Why it is worth doing beyond speed
 

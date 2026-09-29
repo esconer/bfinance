@@ -725,7 +725,7 @@ Verified on 2026-09-29, `www.nseindia.com/api` with a primed cookie, >= 2s pacin
 
 | route | verdict | what came back |
 |---|---|---|
-| `/holiday-master?type=trading` | **200, 34,022 B** | 12 segments, each with `tradingDate`, `weekDay`, `description`, `morning_session`, `evening_session` |
+| `/holiday-master?type=trading` | **200, 34,022 B** | 12 segment keys, CM = 20 rows, **all holidays** |
 | `/historicalOR/indicesHistory` | **200, 19,021 B** | 70 rows x 9 columns of index OHLC for NIFTY 50 |
 | `/option-chain-v3` **with `symbol` + `expiry`** | **200, 941 B** | `expiryDates` and `strikePrices` fully populated |
 | `/public-past-issues` | **200, `[]`** | empty for a 2014-2015 window |
@@ -734,12 +734,18 @@ Verified on 2026-09-29, `www.nseindia.com/api` with a primed cookie, >= 2s pacin
 
 ### What this changes
 
-**The trading calendar exists, and the mirror needs exactly that.** `docs/BAVCOPY_MIRROR.md`
-section 6 records the open problem: a bhavcopy mirror cannot distinguish "a holiday, so no
-file was ever published" from "I have not downloaded that day yet", because both answer
-with zero rows. `/holiday-master` makes the first answerable from an official source rather
-than from a hardcoded holiday list. **The mirror's coverage watermark should be seeded from
-this route, not from a guess.**
+**The exchange holiday list exists, and bfinance was reading it backwards.** `/holiday-master?type=trading`
+returns 12 segment keys (`CBM`, `CD`, `CM`, `CMOT`, `COM`, `EGR`, `FO`, `IRD`, `MF`, `NDM`,
+`NTRP`, `SLBS`). The CM segment is **20 rows and every one is a holiday** — "Republic Day",
+"Holi", "Mahashivratri", "25-Dec-2026". It is a **holiday list, not a trading calendar**,
+and the correction matters: **every one of those rows carries `morning_session: null` and
+`evening_session: null`**, so the session columns are not an "was it open" signal here.
+
+`docs/BAVCOPY_MIRROR.md` section 11a records what that cost: a first implementation read
+null-both as "therefore a trading day" and would have made the mirror demand ~20 files a
+year that are never published. The route is still what the mirror needs, with the polarity
+reversed, and the payload covers **one calendar year** (15-Jan-2026 to 25-Dec-2026), so a
+date outside it is *unknown* rather than assumed either way.
 
 **Index OHLC history is available and bfinance does not read it.**
 `/historicalOR/indicesHistory` returns, per session: `EOD_INDEX_NAME`, `EOD_OPEN_INDEX_VAL`,
