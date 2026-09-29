@@ -242,7 +242,7 @@ equity rule and a stock or group page never carries that literal prefix.
 The code agrees with the robots file and gates on it, which is why the docstring, not the prose, was
 right: `ROBOTS_DISALLOWED_ROUTES` is exactly `{"/member/api/ac_snames/": "Disallow: */member/"}`,
 `TrendlyneClient._require_member_search` raises `TrendlyneRobotsDisallowedError` **before a socket
-opens**, and `allow_member_search` defaults to `False`. The stated consequence is that **ETFs are
+opens**, and `allow_member_search` now defaults to `True` -- see the three-tier table below. The stated consequence is that **ETFs are
 unreachable through this package by default**: `resolve_any` skips the fallback explicitly and records
 it rather than reporting the instrument as unknown. A legal-posture claim that errs toward "permitted"
 is the dangerous direction to be wrong in, so this is recorded as a correction rather than an edit.
@@ -265,6 +265,30 @@ observation, but a heavy page does not lower a stated `Crawl-delay`, so it was n
 robots-derived argument. Pinned by `tests/test_trendlyne_pacing.py`, which fails if the number
 is tidied back toward 750 -- including if 750 reappears as a live literal anywhere in the
 module, which that file checks by AST rather than by line grep.
+
+### OPERATOR DECISION, 2026-09-30: the member route is now fetched by default
+
+This package **requests a path trendlyne's robots.txt disallows**, on any lookup for a
+symbol the equity sitemap omits, unless a caller passes `allow_member_search=False`.
+That is a standing compliance choice and it is the operator's, not a default arrived at
+by accident, so it is stated here rather than inferred from a resolution order.
+
+The reason is coverage, and the tension is real. The sitemap carries **no ETF at all**,
+so with the route closed every ETF is unreachable. Measured on a mixed list of six real
+symbols -- `ntpc`, `cipla`, `wipro`, `indgn`, `mafang`, `hngsngbees` -- the strict
+default resolved four and refused two, and **both refusals were ETFs that resolve fine**
+once the route is open (`MAFANG` 1,334 bars, `HNGSNGBEES` 2,602 bars, both categorised
+`etf` by the vendor's own field). A default that fails a third of a realistic portfolio
+cannot be shipped, so the route is open and the strict setting remains one argument away.
+
+| configuration | behaviour |
+|---|---|
+| the default | equities and ETFs both resolve |
+| `allow_full_search=True` | adds the categorised 22-field discovery route |
+| `allow_member_search=False` | strict: allowed paths only, every ETF refused |
+
+The other constraint is unchanged either way: `Crawl-delay: 1` applies, the pacing floor
+is 1000 ms, and the `GPTBot`/`ClaudeBot` `Crawl-delay: 10` is scoped to those crawlers.
 
 **Two of the disallowed rules are load-bearing for planned sections:**
 `Disallow: */equity/technical-analysis-*` and `*/alerts/addStockAlert/`. So **Technicals and Alerts
@@ -315,7 +339,7 @@ Full     https://trendlyne.com/member/api/ac_snames/all/?term={q}&all-results=tr
 
 Same robots rule as the plain search — `Disallow: */member/` covers `/member/api/ac_snames/all/`
 too, so it is not a cleaner path. It is a second path, not a permitted one, and the package gates it
-behind a **second** opt-in (`allow_full_search` on top of `allow_member_search`).
+behind a **second** opt-in (`allow_full_search`), which stays `False` even though the plain route beneath it is now open by default.
 
 It returns **22 fields** where the plain route returns 4. One real record, verbatim:
 

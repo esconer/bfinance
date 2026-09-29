@@ -57,7 +57,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [
     "live: requires network access (screener.in / yfinance / trendlyne.com) or reads the default ~/.bfinance cache. Excluded from the required CI job by `-m \"not live\"`; run separately by `-m live`.",
-  "etf: requests /member/api/ac_snames/, which trendlyne.com's robots.txt disallows under 'Disallow: */member/'. Off by default in the package; the live tests open it deliberately because the behaviour they cover is otherwise unreachable. Skip with -m 'live and not etf'.",
+  "etf: requests /member/api/ac_snames/, which trendlyne.com's robots.txt disallows under 'Disallow: */member/'. Open by default in the package, so the live tests below inherit the shipped default rather than a configuration that no longer exists; the second flag, `allow_full_search`, is what they open deliberately. Skip with -m 'live and not etf'.",
 ]
 
 [tool.ruff]

@@ -1518,19 +1518,34 @@ class TrendlyneClient:
             import edge to ``bfinance.cache``.
         transport: Optional ``httpx`` transport. ``httpx.MockTransport`` is how the test suite
             exercises the 444/404/5xx paths with no network; production callers leave it ``None``.
-        allow_member_search: Opt in to trendlyne's own autocomplete route, which its
-            ``robots.txt`` disallows via the broad ``Disallow: */member/``. **Off by default, and
-            that is the only shipped configuration.** See :data:`ROBOTS_DISALLOWED_ROUTES` and
-            :data:`MEMBER_SEARCH_FLAG`. Turning it on is the one thing in this package that
-            knowingly requests a path the site asks crawlers not to fetch, so it is named
-            explicitly and never inferred.
+        allow_member_search: Whether to use trendlyne's own autocomplete route, which its
+            ``robots.txt`` disallows via the broad ``Disallow: */member/``. See
+            :data:`ROBOTS_DISALLOWED_ROUTES` and :data:`MEMBER_SEARCH_FLAG`.
+
+            **On by default**, which is a decision this package's operator made and which a
+            reader should be able to judge rather than inherit. The reasoning was coverage, and
+            it is worth stating plainly: the equity sitemap carries 5,925 instruments and
+            **no ETFs at all**, so with this off the route is the *only* way to reach an ETF.
+            Measured on a mixed list of six real symbols on 2026-09-30 -- ``ntpc``, ``cipla``,
+            ``wipro``, ``indgn``, ``mafang``, ``hngsngbees`` -- the strict default resolved four
+            and refused two, and both refusals were ETFs that resolve fine once this is on
+            (``MAFANG`` 1,334 bars, ``HNGSNGBEES`` 2,602 bars). A default that fails a third of
+            a realistic portfolio is not a default anyone can ship.
+
+            So: this package knowingly requests a path the site asks crawlers not to fetch, on
+            any lookup for a symbol the sitemap omits. That is a standing compliance choice and
+            it is the operator's to make, which is why it is a named flag with the default
+            stated in one place rather than buried in a resolution order. Pass
+            ``allow_member_search=False`` for the strict, sitemap-only behaviour, in which ETFs
+            are unreachable and the refusal says so.
         allow_full_search: Opt in to the **richer** search route
             (``/member/api/ac_snames/all/``, 22 fields, categorised) used by :meth:`search_full`.
-            **Off by default, and it is a second gate rather than a wider one:** this route needs
-            ``allow_member_search=True`` *as well*, so opening one without the other still refuses.
-            See :data:`FULL_SEARCH_FLAG`. The two flags are separate because the two routes are
-            separate decisions: one resolves a ticker, the other lists ranked candidates for a
-            human to choose from.
+            **Off by default, and a second gate rather than a wider one:** this route needs
+            ``allow_member_search=True`` *as well*, so opening one without the other still
+            refuses. See :data:`FULL_SEARCH_FLAG`. It stays shut even though the flag beneath it
+            is now open, because the two are separate decisions: one resolves a ticker, the
+            other lists ranked candidates for a human to choose from, and only the first is
+            needed to fetch a price history.
     """
 
     #: Absolute base for every request. Exposed as a class attribute so a subclass can point at a
@@ -1547,7 +1562,7 @@ class TrendlyneClient:
         token_ttl_hours: float = 12.0,
         cache: Optional[Any] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
-        allow_member_search: bool = False,
+        allow_member_search: bool = True,
         allow_full_search: bool = False,
     ) -> None:
         self.timeout = timeout
@@ -1630,15 +1645,18 @@ class TrendlyneClient:
         path = _SYMBOL_SEARCH_PATH.split("?")[0]
         rule = ROBOTS_DISALLOWED_ROUTES.get(path, "Disallow")
         raise TrendlyneRobotsDisallowedError(
-            f"{path} is disallowed by trendlyne's robots.txt ({rule}), so this request was not "
-            f"made. It is the only route to instruments the equity sitemap omits — every ETF "
-            f"(NIFTYBEES, BANKBEES, GOLDBEES, JUNIORBEES and SETFNIF50 resolve here and appear in "
-            f"none of the sitemap's 5,922 entries), so with the gate off those symbols are "
-            f"unreachable through this package. That is a coverage gap, not a claim that they do "
-            f"not exist. To request it anyway, pass {MEMBER_SEARCH_FLAG}=True to "
-            f"TrendlyneClient(...) or to search_remote(...). Note robots.txt's 'User-agent: *' "
-            f"block carries Crawl-delay: 1; the 10 s figure quoted elsewhere is scoped to "
-            f"GPTBot/ClaudeBot."
+            f"{path} is disallowed by trendlyne's robots.txt ({rule}), so this request was "
+            f"not made. It is the only route to instruments the equity sitemap omits, which "
+            f"is every ETF: NIFTYBEES, BANKBEES, GOLDBEES, JUNIORBEES, HNGSNGBEES, MAFANG and "
+            f"SETFNIF50 all resolve here and appear in no sitemap entry, so while this "
+            f"client has the route closed those symbols are unreachable. That is a coverage "
+            f"gap, not a claim that they do not exist. It is closed because "
+            f"{MEMBER_SEARCH_FLAG}=False was passed, and that flag **defaults to True** -- so "
+            f"reaching this refusal means the strict setting was chosen deliberately. Drop the "
+            f"argument, or pass {MEMBER_SEARCH_FLAG}=True, to reach those instruments, at the "
+            f"cost of requesting a path the site asks crawlers not to fetch. Note robots.txt's "
+            f"'User-agent: *' block carries Crawl-delay: 1; the 10 s figure quoted elsewhere is "
+            f"scoped to GPTBot/ClaudeBot."
         )
 
     # ---------------------------------------------------------------- internals
@@ -2135,7 +2153,7 @@ class TrendlyneClient:
         allow_full_search: Optional[bool] = None,
     ) -> List[TrendlyneSymbol]:
         """Search trendlyne's **richer** autocomplete, which says what each hit *is*.
-        **Opt-in twice; off by default, because robots.txt disallows it.**
+        **Still opt-in twice**, even though the plain route beneath it is now open by default.
 
         :data:`_SYMBOL_SEARCH_FULL_PATH` is a second route beside :meth:`search_remote_async`, and
         it returns **22 fields** where that one returns 4. A real record, verbatim::
@@ -2324,11 +2342,15 @@ class TrendlyneClient:
                 f"{symbol!r} is not in trendlyne's equity sitemap "
                 f"({self.index_size} entries). The remote route was NOT tried: {disallowed} is "
                 f"disallowed by trendlyne's robots.txt "
-                f"({ROBOTS_DISALLOWED_ROUTES[disallowed]}), so the gate is closed. {symbol!r} may "
-                f"well exist on trendlyne — the sitemap does not carry it, and it is exactly the "
-                f"instruments the sitemap omits (every ETF) that the disallowed route would have "
-                f"resolved. Pass {MEMBER_SEARCH_FLAG}=True to use it anyway. Mutual funds are a "
-                f"separate namespace (/mutual-fund/nav/{{id}}/) and are not reachable from here."
+                f"({ROBOTS_DISALLOWED_ROUTES[disallowed]}), and this client has the route "
+                f"closed. {symbol!r} may well exist on trendlyne: the sitemap does not carry "
+                f"it, and it is exactly the instruments the sitemap omits - every ETF - that "
+                f"the disallowed route would have resolved. {MEMBER_SEARCH_FLAG} **defaults to "
+                f"True**, so reaching this refusal means the strict setting was passed "
+                f"deliberately; drop the argument to reach those instruments, at the cost of "
+                f"requesting a path the site asks crawlers not to fetch. Mutual funds are a "
+                f"separate namespace (/mutual-fund/nav/{{id}}/) and stay unreachable even with "
+                f"the route open."
             )
 
         matches = await self.search_remote_async(symbol, limit=5, allow_member_search=True)

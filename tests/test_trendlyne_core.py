@@ -52,15 +52,35 @@ def payload(name: str = "ohlc_motherson.json") -> dict:
 
 @pytest.fixture
 def client() -> tl.TrendlyneClient:
-    """A client with pacing disabled (the real 1 s robots floor would add nothing to a mock)."""
+    """A client with pacing disabled (the real 1 s robots floor would add nothing to a mock).
+
+    The member-search route is OPEN by default, so a test that wants the refusal has to ask
+    for the strict setting explicitly. That is the point: the default moved, and a test that
+    still read `False` off the constructor was reading the wrong thing.
+    """
     return tl.TrendlyneClient(min_request_interval_ms=0.0, max_retries=2)
 
 
 @pytest.fixture
-def indexed_client(client: tl.TrendlyneClient) -> tl.TrendlyneClient:
-    """A client whose symbol index is already loaded from the recorded sitemap excerpt."""
-    client.load_symbol_index(text("sitemap_excerpt.xml"))
-    return client
+def strict_client() -> tl.TrendlyneClient:
+    """The strict, sitemap-only configuration: ``allow_member_search=False``.
+
+    Every test that asserts a refusal uses this rather than the default client, so the
+    refusal path stays guarded even though it is no longer the default.
+    """
+    return tl.TrendlyneClient(min_request_interval_ms=0.0, max_retries=2,
+                              allow_member_search=False)
+
+
+@pytest.fixture
+def indexed_client(strict_client: tl.TrendlyneClient) -> tl.TrendlyneClient:
+    """Strict, with the symbol index already loaded from the recorded sitemap excerpt.
+
+    Strict because the tests using it assert what happens when the member route is closed, and
+    that is no longer the default -- so it is asked for rather than assumed.
+    """
+    strict_client.load_symbol_index(text("sitemap_excerpt.xml"))
+    return strict_client
 
 
 def mock_client(handler, **kwargs) -> tl.TrendlyneClient:
@@ -1475,14 +1495,34 @@ class TestNoDeadScaffolding:
 
 
 class TestRobotsGate:
-    """A path trendlyne's robots.txt disallows must not be fetched by default.
+    """The route trendlyne's robots.txt disallows, which this package now fetches by default.
 
     ``/member/api/ac_snames/?term=`` sits under the **broad** ``Disallow: */member/``. It was the
     ETF fallback inside ``resolve_any``, so it was reachable from any ``ohlc()`` call for a symbol
-    the equity sitemap omitted. That is a live violation in shipped code, and closing it costs
-    something real: the sitemap carries no ETF at all, so with the gate off those symbols are
-    unreachable. The tests below pin both halves - the refusal and the cost - because closing a
-    violation while hiding what it cost would just move the dishonesty.
+    the equity sitemap omitted. That was a live violation in shipped code, and it was closed --
+    and then reopened by the operator on 2026-09-30, deliberately, for a stated reason.
+
+    The reason is coverage, and it is worth keeping visible because the tension is real rather
+    than rhetorical. The equity sitemap carries 5,925 instruments and **no ETF at all**, so with
+    the route closed, every ETF is unreachable. Measured on a mixed list of six real symbols --
+    ``ntpc``, ``cipla``, ``wipro``, ``indgn``, ``mafang``, ``hngsngbees`` -- the closed default
+    resolved four and refused two, and both refusals were ETFs that resolve fine once it is open
+    (``MAFANG`` 1,334 bars, ``HNGSNGBEES`` 2,602 bars). A default that fails a third of a
+    realistic portfolio is not one that can be shipped.
+
+    So the contract these tests pin is a **three-tier** one, and all three tiers are guarded:
+
+    ==========================================  ==========================================
+    configuration                                behaviour
+    ==========================================  ==========================================
+    the default                                  equities and ETFs both resolve
+    ``allow_full_search=True``                   adds the categorised 22-field route
+    ``allow_member_search=False``                strict: allowed paths only, ETFs refused
+    ==========================================  ==========================================
+
+    Opening the route does not make the refusal stop matter, it makes it *chosen*. Every test
+    below that asserts a refusal therefore builds a client with ``allow_member_search=False``
+    explicitly, so the guard cannot rot into passing by accident.
     """
 
     def test_the_disallowed_path_and_its_rule_are_recorded_as_facts(self):
@@ -1502,12 +1542,33 @@ class TestRobotsGate:
         assert not path.endswith("/stock/")
         assert tl.ROBOTS_DISALLOWED_ROUTES[path] != "Disallow: */member/api/ac_snames/stock/"
 
-    def test_the_gate_is_off_by_default(self):
-        assert tl.TrendlyneClient().allow_member_search is False
+    def test_the_route_is_open_by_default_and_the_strict_setting_is_available(self):
+        """The decision, pinned in both directions.
+
+        Default open, because a mixed portfolio is the normal case and the sitemap carries no
+        ETF. Strict available and unchanged, because a deployment that does not want to request
+        a disallowed path must be able to say so in one argument.
+        """
+        assert tl.TrendlyneClient().allow_member_search is True
         assert tl.TrendlyneClient(allow_member_search=False).allow_member_search is False
         assert tl.TrendlyneClient(allow_member_search=True).allow_member_search is True
 
-    def test_search_remote_raises_a_typed_error_naming_the_conflict(self, client):
+    def test_the_richer_route_stays_shut_even_though_the_one_beneath_it_is_open(self):
+        """
+        The two flags are separate decisions, and only the first was reopened.
+
+        The plain route resolves a ticker; the full route lists 20 ranked candidates for a human
+        to choose between. Reopening the first is what was needed to fetch a price history, and
+        it says nothing about the second.
+        """
+        assert tl.TrendlyneClient().allow_full_search is False
+        assert tl.TrendlyneClient(allow_full_search=True).allow_full_search is True
+        assert tl.TrendlyneClient(allow_full_search=True).allow_member_search is True, (
+            "opening the rich route implies the plain one is open too, so the pair is coherent"
+        )
+
+    def test_search_remote_raises_a_typed_error_naming_the_conflict(self, strict_client):
+        client = strict_client
         with pytest.raises(tle.TrendlyneRobotsDisallowedError) as excinfo:
             client.search_remote("NIFTYBEES")
         message = str(excinfo.value)
@@ -1522,12 +1583,18 @@ class TestRobotsGate:
     def test_the_refusal_costs_no_request(self):
         """Raised locally, before a socket opens - honouring robots has to be free."""
         calls = []
-        client = mock_client(lambda r: calls.append(str(r.url)) or httpx.Response(200, json=[]))
+        # Strict explicitly: the default now opens the route, so a refusal test that relied on
+        # the old default would silently stop testing anything.
+        client = mock_client(
+            lambda r: calls.append(str(r.url)) or httpx.Response(200, json=[]),
+            allow_member_search=False,
+        )
         with pytest.raises(tle.TrendlyneRobotsDisallowedError):
             client.search_remote("NIFTYBEES")
         assert calls == [], f"a disallowed path was requested: {calls}"
 
-    def test_it_raises_rather_than_returning_an_empty_list(self, client):
+    def test_it_raises_rather_than_returning_an_empty_list(self, strict_client):
+        client = strict_client
         """An empty list is the wrong answer twice over.
 
         trendlyne answers a genuine miss with ``[{"headline": "No matches found"}]``, so ``[]``
@@ -1546,7 +1613,7 @@ class TestRobotsGate:
                 {"k": 1588, "id": "NIFTYBEES", "slugname": "niftybees"},
             ])
 
-        client = mock_client(handler)  # constructor gate left closed
+        client = mock_client(handler, allow_member_search=False)  # strict, explicitly
         with pytest.raises(tle.TrendlyneRobotsDisallowedError):
             client.search_remote("NIFTYBEES")
         assert calls == []
@@ -1571,7 +1638,12 @@ class TestRobotsGate:
         assert client.symbol_resolution == "member_search"
 
     def test_resolve_any_skips_the_fallback_explicitly_and_records_it(self, indexed_client):
-        """The skip is a stated fact in two places, never a silent miss."""
+        """The skip is a stated fact in two places, never a silent miss.
+
+        ``indexed_client`` is strict, so this is the opt-in setting rather than the
+        default. The default reaches the fallback; this proves that when a caller closes
+        it, the refusal is still explicit rather than a silent miss.
+        """
         with pytest.raises(tle.TrendlyneSymbolNotFoundError) as excinfo:
             indexed_client.resolve_any("NIFTYBEES")
         message = str(excinfo.value)
