@@ -2,7 +2,7 @@
 Tickers container for managing groups of tickers matching yfinance.Tickers.
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 from datetime import datetime
 import pandas as pd
 
@@ -81,10 +81,17 @@ class Tickers:
         auto_adjust: bool = False,
         group_by: str = "column",
         threads: bool = True,
+        source: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
         **kwargs,
     ) -> pd.DataFrame:
         """
         Download historical OHLCV data for all tickers in the group.
+
+        ``source`` (one price source) and ``sources`` (an ordered list to fail over through) mean
+        exactly what they mean on :meth:`bfinance.ticker.Ticker.history` and on
+        :func:`bfinance.download`, and are applied to every symbol in the group. Naming neither is
+        the default. See :meth:`bfinance.market.ohlcv.OHLCVEngine.fetch_history` for the contract.
         """
         kwargs.setdefault("multi_level_index", self.multi_level_index)
         return download(
@@ -97,6 +104,8 @@ class Tickers:
             auto_adjust=auto_adjust,
             group_by=group_by,
             threads=threads,
+            source=source,
+            sources=sources,
             **kwargs,
         )
 

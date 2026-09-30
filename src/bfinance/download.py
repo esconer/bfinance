@@ -4,10 +4,11 @@ High-throughput multi-ticker concurrent batch downloader matching yfinance downl
 
 import asyncio
 import logging
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 from datetime import datetime
 import pandas as pd
 
+from bfinance.market.ohlcv import resolve_price_source_names
 from bfinance.ticker import Ticker
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ async def _download_single(
     rounding: bool,
     proxy: Optional[str] = None,
     raise_errors: bool = False,
+    source: Optional[str] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     t = Ticker(symbol, proxy=proxy)
     try:
@@ -43,6 +46,8 @@ async def _download_single(
             prepost=prepost,
             repair=repair,
             rounding=rounding,
+            source=source,
+            sources=sources,
         )
     except (NotImplementedError, ValueError):
         raise
@@ -70,6 +75,8 @@ async def _download_batch_async(
     max_concurrency: int = 5,
     proxy: Optional[str] = None,
     raise_errors: bool = False,
+    source: Optional[str] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     sem = asyncio.Semaphore(max_concurrency)
 
@@ -90,6 +97,8 @@ async def _download_batch_async(
                 rounding=rounding,
                 proxy=proxy,
                 raise_errors=raise_errors,
+                source=source,
+                sources=sources,
             )
             return sym, df
 
@@ -180,6 +189,8 @@ def download(
     session: Optional[object] = None,
     multi_level_index: bool = True,
     raise_errors: bool = False,
+    source: Optional[str] = None,
+    sources: Optional[Sequence[str]] = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -202,6 +213,17 @@ def download(
         proxy: Optional HTTP/HTTPS/SOCKS5 proxy URL string.
         raise_errors: Re-raise upstream failures instead of returning an empty frame
             (default False, matching yfinance's lenient default).
+        source / sources: **one** price source, or an **ordered list to fail over through**,
+            by :mod:`bfinance.sources.registry` name (``"nse-bhavcopy"``,
+            ``"marketlens-close"``, ``"trendlyne-ohlc"``, ...), applied to every symbol in the
+            batch. Naming neither is the default and does not engage the cascade.
+
+            An unknown name raises :class:`ValueError` here, **before a single Ticker is
+            constructed** -- the same guarantee ``test_download_rejects_before_doing_any_work``
+            pins for an unknown keyword, and for the same reason: a source name is a local
+            vocabulary, so spending one request per symbol to discover a typo is the one outcome
+            this package will not produce. ``raise_errors=False`` does not soften it, exactly as
+            it does not soften an unknown keyword: a wrong argument is not an upstream failure.
 
     Returns:
         pd.DataFrame: MultiIndex (or single) DataFrame with OHLCV data.
@@ -245,6 +267,12 @@ def download(
     if not ticker_list:
         return pd.DataFrame()
 
+    # Validated here, not left to each symbol's history() call, because the batch fans out: a
+    # refusal that only surfaced inside the worker would have constructed N Tickers and spent N
+    # requests before the first complaint. This is the same ordering test_download_rejects_
+    # before_doing_any_work pins for an unknown keyword.
+    price_names = resolve_price_source_names(source, sources)
+
     coro = _download_batch_async(
         tickers=ticker_list,
         period=period,
@@ -263,6 +291,8 @@ def download(
         max_concurrency=10 if threads else 1,
         proxy=proxy,
         raise_errors=raise_errors,
+        source=price_names[0] if len(price_names) == 1 else None,
+        sources=list(price_names) if price_names else None,
     )
 
     try:

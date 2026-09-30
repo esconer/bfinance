@@ -4,7 +4,7 @@ Master Ticker facade providing 100% yfinance drop-in compatibility + Indian mark
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
 from datetime import datetime
 import pandas as pd
 
@@ -274,6 +274,8 @@ class Ticker:
         raise_errors: bool = False,
         ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
         adjust_corporate_actions: bool = True,
+        source: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """
         Historical OHLCV DataFrame matching exact yfinance `ticker.history()` signature and schema.
@@ -285,6 +287,28 @@ class Ticker:
                 and flags the frame ``attrs["bfinance_synthetic_ohlc"] = False``. Pass
                 ``"synthetic"`` to opt in to the legacy close-only path, whose Open/High/Low
                 are derived from Close (flagged ``True``).
+
+                **Kept, not replaced.** It chooses the bar *shaping*; ``source``/``sources``
+                choose the *vendor*; the two are orthogonal. ``ohlc="synthetic"`` combined with
+                a named source raises, because the synthetic path is not a source in the price
+                registry and routing it through the cascade would mean either inventing a row
+                that does not exist or silently swapping in a different vendor's real O/H/L.
+            source / sources: **one** price source, or an **ordered list to fail over through**,
+                by :mod:`bfinance.sources.registry` name (``"nse-bhavcopy"``,
+                ``"marketlens-close"``, ``"trendlyne-ohlc"``, ``"screener-chart"``,
+                ``"vendor-b-adjustments"``). ``sources=["nse-bhavcopy", "marketlens-close"]`` is
+                a genuine second attempt on the same price basis; the call raises only if every
+                one of them fails. Naming neither is the default and does not engage the cascade.
+
+                An unknown name raises ``ValueError`` **before any request is spent**.
+
+                Four attrs keys report what the cascade did, on the returned frame and on an
+                empty one alike -- ``bfinance_price_source`` (the winning **vendor**, which is not
+                ``bfinance_source``: that key is the transport), ``bfinance_price_source_attempts``,
+                ``bfinance_price_source_degraded`` and ``bfinance_price_source_detail``. The
+                return type does not change -- a failover is an ordinary DataFrame. See
+                :meth:`bfinance.market.ohlcv.OHLCVEngine.fetch_history` for the full contract,
+                including why an as-traded request never reaches ``"trendlyne-ohlc"``.
             adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
                 cumulative share-count factor over the instrument's whole corporate-action
                 history, so the default path matches yfinance's own ``auto_adjust=False`` series
@@ -294,6 +318,11 @@ class Ticker:
                 therefore not always equal to ``Close`` (it is, when no dividend ex-date falls in
                 the window). Volume is restated by the *inverse* of the share-count factor, so that
                 ``price * volume`` stays the rupee value traded across a bonus or sub-division.
+
+                When a named source published bars that already carry a share-count restatement,
+                bfinance applies no further factor and ``price_basis`` reads
+                ``as_traded_split_bonus_adjusted`` rather than claiming an adjustment it did not
+                make.
 
                 Three attrs keys describe the result and are present on every frame:
                 ``bfinance_corporate_actions_applied`` (a complete adjustment was made),
@@ -309,6 +338,10 @@ class Ticker:
         Raises:
             AdjustmentNotAvailableError: ``auto_adjust=True``.
             RealOHLCUnavailableError: default source could not serve the window.
+            ValueError: an unknown ``source``/``sources`` name, refused before any request.
+            bfinance.sources.errors.SourceUnavailableError: the cascade ran and every named or
+                eligible source failed. An ``UpstreamServiceError`` subclass, so existing
+                ``except UpstreamServiceError`` handlers need nothing new.
         """
         return self._run_async(
             self.ohlcv_engine.fetch_history(
@@ -328,6 +361,8 @@ class Ticker:
                 raise_errors=raise_errors,
                 ohlc=ohlc,
                 adjust_corporate_actions=adjust_corporate_actions,
+                source=source,
+                sources=sources,
             )
         )
 
@@ -348,8 +383,14 @@ class Ticker:
         raise_errors: bool = False,
         ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
         adjust_corporate_actions: bool = True,
+        source: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
-        """Async variant of history()."""
+        """Async variant of history().
+
+        ``source`` and ``sources`` mean exactly what they mean on :meth:`history`, and the
+        attribute docstring there is the contract.
+        """
         return await self.ohlcv_engine.fetch_history(
             self.symbol,
             period=period,
@@ -367,6 +408,8 @@ class Ticker:
             raise_errors=raise_errors,
             ohlc=ohlc,
             adjust_corporate_actions=adjust_corporate_actions,
+            source=source,
+            sources=sources,
         )
 
     # --------------------------------------------------- Financial Statements API

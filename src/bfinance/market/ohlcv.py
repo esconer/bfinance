@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
@@ -125,6 +126,13 @@ VOLUME_COLUMN = "Volume"
 #: reaches O/H/L/C. The name states what was actually done.
 PRICE_BASIS_AS_TRADED = "as_traded"
 PRICE_BASIS_SHARE_COUNT_ADJUSTED = "as_traded_share_count_adjusted"
+#: A vendor's own split/bonus-adjusted series, used whole. The spelling is the vendor's, copied
+#: verbatim from ``bfinance.sources.price_provider.PRICE_BASIS``, so a frame bfinance built carries
+#: the same basis label the source published rather than a paraphrase of it. It is a distinct
+#: member because it is a *different promise* from :data:`PRICE_BASIS_SHARE_COUNT_ADJUSTED`: the
+#: one says bfinance applied the share-count factor over the whole action history, the other says
+#: the source applied splits and bonuses but NOT demergers and bfinance applied nothing further.
+PRICE_BASIS_VENDOR_SPLIT_ADJUSTED = "as_traded_split_bonus_adjusted"
 #: The synthetic path is not a price basis at all: Close and Volume are real Screener.in values and
 #: Open/High/Low are *derived* from Close (previous close open, +/-0.2% envelope). It is named as
 #: what it is rather than dressed up as an as-traded series.
@@ -425,6 +433,174 @@ def _interval_mismatch_detail(requested: str, delivered: Optional[str]) -> Optio
     )
 
 
+# --------------------------------------------------------------------------------------
+# The price-source cascade: the seam, the request vocabulary, and the four attrs keys.
+#
+# WHAT IS HERE AND WHY IT IS OPT-IN
+# --------------------------------------------------------------------------------------
+# :mod:`bfinance.sources.cascade` is a complete, tested, multi-source failover engine for price
+# history: a try-order, a health ledger, a price-basis check that never spends a request on a
+# source that cannot serve the requested basis, and an attempt list. It was not on this path, so a
+# ``history()`` call could not fail over even in principle, and the machinery was unreachable from
+# the public API.
+#
+# It is wired in here **opt-in**, and the reason is a measurement rather than caution. The four
+# price sources are on three different bases, and they are not interchangeable: HDFCBANK's close
+# is exactly 0.5x the bhavcopy's on all 62 sessions of 2024-12-16..2025-03-13, a 1:1 bonus
+# back-applied, because the one vendor back-adjusts and the exchange print does not. A default that
+# failed over between them would produce a series containing a move that never happened, so the
+# try-order is chosen per call by ``source=``/``sources=`` rather than baked in here.
+#
+# What the cascade changes is the *vendor*, never the bar shaping and never the basis of the
+# answer. The winner's frame is used whole, and its real basis is published. Nothing is blended
+# and nothing is invented: :func:`bfinance.sources.cascade.is_empty_payload` already treats an
+# empty frame as a failure rather than as data, and this module refuses that frame again on its
+# own terms before touching it.
+#
+# FOUR ATTRS KEYS, and why they are four and not one
+# --------------------------------------------------------------------------------------
+# Failover is **loud in attrs, quiet in the return type**: the caller gets an ordinary DataFrame
+# and reads the provenance off it. The keys are separate because the four questions are separate,
+# and one packed dict would make a consumer parse prose to find a boolean it branches on.
+#
+# * ``bfinance_price_source`` -- the winning **vendor**, read off the registry row that served.
+#   Distinct from ``bfinance_source``, which is the TRANSPORT (``network``/``mirror``/
+#   ``mirror+network``) and whose vocabulary is a published contract that this change does not
+#   touch. A frame can be real bhavcopy and have been read off disk a week ago; "which vendor
+#   printed this" and "how stale can it be" are different questions.
+# * ``bfinance_price_source_attempts`` -- every source considered, asked or not, with its outcome.
+# * ``bfinance_price_source_degraded`` -- ``True`` only when a source ahead of the winner was
+#   **asked and failed**. A source skipped because it cannot serve the requested basis is the
+#   system working, and counting it here would train callers to ignore the flag.
+# * ``bfinance_price_source_detail`` -- one sentence naming what was tried and what failed.
+#
+# All four are set on the populated frame AND the empty one, because a frame with no bars is
+# exactly the frame a consumer is most likely to treat as "nothing went wrong".
+
+#: The capability the registry publishes daily prices under. Spelled once because it appears in
+#: the routing call, in the validation error, and in whatever refusal the cascade raises.
+PRICE_CAPABILITY = "price_history"
+
+#: The registry row whose values are the exchange print. Named here rather than left as a bare
+#: string in the comparison that routes a mirror-free frame, so the assertion in
+#: :meth:`OHLCVEngine._price_source_record` cannot drift from the row it is asserting about.
+BHAVCOPY_SOURCE = "nse-bhavcopy"
+
+#: The basis an unqualified request is routed on, as the registry spells it. bfinance post-processes
+#: the bars it is handed -- it applies the share-count factor itself -- so it needs an UNADJUSTED
+#: series to start from. It is also the only price basis in the default registry with real
+#: redundancy (``nse-bhavcopy`` and ``marketlens-close``), so it is the one a failsafe can fail
+#: over on at all. A bare string rather than a :class:`~bfinance.sources.model.Basis` because this
+#: module must not import :mod:`bfinance.sources` at module level
+#: (``tests/test_public_surface.py`` requires ``import bfinance`` not to pull that layer in), and
+#: because the comparison that needs it is a string comparison on a value the cascade returned.
+DEFAULT_PRICE_BASIS = "as_traded"
+
+#: The four attrs keys. Module constants so a consumer, a test and this module all spell them
+#: identically, and so a rename is a one-line edit that the compiler then forces everywhere.
+PRICE_SOURCE_ATTR = "bfinance_price_source"
+PRICE_SOURCE_ATTEMPTS_ATTR = "bfinance_price_source_attempts"
+PRICE_SOURCE_DEGRADED_ATTR = "bfinance_price_source_degraded"
+PRICE_SOURCE_DETAIL_ATTR = "bfinance_price_source_detail"
+
+
+@dataclass(frozen=True)
+class PriceSourceRouter:
+    """
+    The injection seam: how :class:`OHLCVEngine` reaches the source cascade, and what it may
+    substitute for it.
+
+    Exists because of a concrete measurement, not a preference. Roughly 130 offline call sites
+    across ten test files construct ``OHLCVEngine(screener_client, corporate_actions_client=...)``
+    and stub those two objects directly, because that is the only door into this engine today.
+    :func:`bfinance.sources.cascade.load_provider` does ``importlib.import_module(spec.module)`` at
+    **call time**, so the moment the cascade is on the path every one of those stubs is bypassed
+    and the offline suite starts reaching the real NSE. The seam is added before the cascade is
+    switched on for exactly that reason: it is what keeps "no regression" checkable instead of
+    aspirational.
+
+    Every field is optional and the default is the real thing, so ``PriceSourceRouter()`` and
+    ``None`` behave identically. What the router does **not** do is change the shipped default:
+    with no router and no ``source=``/``sources=``, :meth:`OHLCVEngine.fetch_history` still calls
+    :meth:`_fetch_bhavcopy_bars` directly and no registry is consulted at all.
+
+    Attributes:
+        registry: A :class:`bfinance.sources.registry.Registry` to route against. ``None`` uses
+            :data:`bfinance.sources.registry.DEFAULT`, so the real try-order and the real
+            basis-eligibility rules are what a test exercises by default.
+        fetch: ``(spec, request) -> value``, the same contract as
+            :func:`bfinance.sources.cascade.resolve`'s ``fetch``. It may raise, and a raise is a
+            fall-through rather than a failure of the call, which is what makes a stub the
+            failover case. ``None`` lets the cascade import each row's module at call time.
+        health: A :class:`bfinance.sources.health.HealthLedger`. ``None`` uses the process-wide
+            one, which learns from real failures -- and which a test must therefore override, or
+            one test's recorded failure reorders a later test's try-order.
+    """
+
+    registry: Optional[Any] = None
+    fetch: Optional[Any] = None
+    health: Optional[Any] = None
+
+
+def resolve_price_source_names(
+    source: Optional[str] = None,
+    sources: Optional[Sequence[str]] = None,
+    registry: Optional[Any] = None,
+) -> tuple:
+    """
+    The ordered, de-duplicated price-source names a call asked for, validated up front.
+
+    Refused **before any request is spent**, for the same reason an unrecognised ``ohlc`` or
+    ``period`` is: a source name is knowable locally, so discovering it is invalid by asking a
+    vendor. ``tests/test_silent_fallbacks.py::test_download_rejects_before_doing_any_work`` pins
+    that *timing* for ``download()``, and this is the same guarantee for a price source -- one
+    typo must not cost one request per symbol in a 5,000-symbol batch.
+
+    ``source=`` and ``sources=`` are merged rather than treated as alternatives, in that order, with
+    duplicates collapsed. ``source="nse-bhavcopy", sources=["nse-bhavcopy"]`` is redundant rather
+    than contradictory, and raising on it would be refusing a call with one unambiguous meaning.
+    Two *different* names is not redundant, and the merged order is the try-order, so it is
+    accepted and honoured.
+
+    Returns:
+        The names in the order they would be tried. Empty when the caller named none, which is
+        the signal that the direct path is in force and the registry must not even be imported.
+
+    Raises:
+        ValueError: a name is not registered for ``"price_history"``. A
+            :class:`bfinance.sources.errors.SourceCapabilityError` would also be defensible, but
+            this is a caller bug in a caller-facing argument, and :class:`ValueError` is what the
+            neighbouring ``ohlc`` and ``period`` refusals raise, so one ``except`` covers all three.
+    """
+    ordered: List[str] = []
+    for candidate in ((source,) if source is not None else ()) + tuple(sources or ()):
+        name = str(candidate).strip()
+        if name and name not in ordered:
+            ordered.append(name)
+    if not ordered:
+        # Nothing named. Returning here rather than importing the registry is deliberate: with no
+        # source selected the direct path runs, and `tests/test_public_surface.py` requires that
+        # `import bfinance` not pull this layer in.
+        return ()
+
+    from bfinance.sources.registry import DEFAULT  # lazy: opt-in isolation
+
+    reg = DEFAULT if registry is None else registry
+    registered = tuple(reg.names_for(PRICE_CAPABILITY))
+    unknown = [name for name in ordered if name not in registered]
+    if unknown:
+        raise ValueError(
+            f"price source(s) {unknown} are not registered for {PRICE_CAPABILITY!r}. "
+            f"Registered, in try-order: {list(registered)}.\n\n"
+            f"Named here, before any request: a source name is a local vocabulary, so spending a "
+            f"request to discover it is invalid is the one outcome this package will not produce. "
+            f"Note that a name is not a promise of availability -- pass several with sources= and "
+            f"the cascade tries them in order, and attrs['{PRICE_SOURCE_ATTR}'] on the returned "
+            f"frame names the one that actually answered."
+        )
+    return tuple(ordered)
+
+
 class OHLCVEngine:
     """
     Historical OHLCV data builder converting deep price feeds into yfinance-identical DataFrames.
@@ -530,6 +706,24 @@ class OHLCVEngine:
     ``"mirror+network"``) and ``attrs["bfinance_mirror"]`` (the full record, including
     ``days_missing``) are published on every frame, the empty one included. The decision table
     is in :meth:`_fetch_bhavcopy_bars`.
+
+    Failing over between price sources
+    ----------------------------------
+    :mod:`bfinance.sources` is a complete, tested failover engine over the price sources -- a
+    try-order, a health ledger, a basis check, and an attempt ledger. It is reachable from
+    ``history()`` through ``source=`` (one vendor) and ``sources=`` (an ordered list to fail over
+    through), and it is reached ONLY through one of those or through an injected
+    :class:`PriceSourceRouter`. **With neither, the direct bhavcopy reader runs and the registry
+    is never imported**, so the shipped default is unchanged and every existing two-argument
+    ``OHLCVEngine(...)`` construction behaves exactly as it did.
+
+    It is opt-in for a measured reason, not a cautious one. The price sources are on three
+    different bases and are not interchangeable: HDFCBANK's close on the second vendor's feed is
+    exactly 0.5x the bhavcopy's on all 62 sessions of 2024-12-16..2025-03-13, a 1:1 bonus
+    back-applied, so an as-traded request served from it -- or spliced with it -- would carry a
+    move that never happened. The cascade refuses to spend a request on a source that cannot
+    serve the requested basis at all, and the winner's frame is used whole with its own basis
+    published. The section above, on the four price-source attrs keys, is the full contract.
     """
 
     #: The closed vocabulary of ``period`` values, and their lookback in calendar days.
@@ -559,7 +753,8 @@ class OHLCVEngine:
         "max": 10000,
     }
 
-    def __init__(self, screener_client: ScreenerClient, corporate_actions_client=None):
+    def __init__(self, screener_client: ScreenerClient, corporate_actions_client=None,
+                 price_sources: Optional[PriceSourceRouter] = None):
         """Args:
         screener_client: the Screener.in client, used by the legacy close-only path and by the
             labelled fiscal-year-end fallback for corporate actions.
@@ -568,9 +763,18 @@ class OHLCVEngine:
             a caller who wants one configured client (proxy, timeout, pacing) shared across a
             batch. When ``None`` the real client is constructed per history call, so the default
             behaviour is unchanged and no new dependency is introduced.
+        price_sources: optional :class:`PriceSourceRouter` -- the seam onto
+            :mod:`bfinance.sources.cascade`, which is the package's failover engine for price
+            history. It replaces nothing: with ``None`` (the default) a history call still goes
+            straight to :meth:`_fetch_bhavcopy_bars` and the registry is never imported, so every
+            existing two-argument construction is byte-identical. Supplying one -- or naming
+            ``source=``/``sources=`` on a call -- routes the vendor choice through the cascade,
+            and a supplied ``fetch`` is how an offline caller keeps that route from reaching a
+            real vendor.
         """
         self.screener = screener_client
         self.corporate_actions = corporate_actions_client
+        self.price_sources = price_sources
 
     @staticmethod
     def _history_columns(auto_adjust: bool, back_adjust: bool, actions: bool) -> list:
@@ -600,6 +804,8 @@ class OHLCVEngine:
         ohlc: Literal["bhavcopy", "synthetic"] = "bhavcopy",
         adjust_corporate_actions: bool = True,
         mirror=None,
+        source: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV DataFrame matching exact yfinance schema:
@@ -617,6 +823,52 @@ class OHLCVEngine:
                 NSE bhavcopy archive and reports ``attrs["bfinance_synthetic_ohlc"] = False``.
                 ``"synthetic"`` is the explicit opt-in for the legacy close-only Screener path
                 that derives Open/High/Low from Close; it reports the flag as ``True``.
+
+                **Kept, not replaced.** It is the legacy spelling of "which feed", and it is the
+                only one of the two that can ask for a feed which is not in the source registry
+                at all. How the two interact is fixed, and deliberately so:
+
+                * ``ohlc=`` chooses the **bar shaping** (published O/H/L, or O/H/L derived from
+                  Close). ``source=``/``sources=`` choose the **vendor**. They are orthogonal, and
+                  neither implies the other.
+                * Naming neither is the shipped default and does not engage the cascade at all --
+                  the direct bhavcopy reader runs and the registry is never imported.
+                * ``ohlc="synthetic"`` and a named source are **mutually exclusive** and the
+                  combination raises. The synthetic path is not a registry row: it derives
+                  Open/High/Low from Close with a +/-0.2% envelope, and no registry source does
+                  that. Routing it through the cascade would either invent a row that does not
+                  exist or silently swap in a different vendor's real O/H/L, which is the one
+                  thing ``attrs["bfinance_synthetic_ohlc"]`` exists to prevent.
+            source / sources: **one** price source, or an **ordered list to fail over through**,
+                named by its :mod:`bfinance.sources.registry` name (``"nse-bhavcopy"``,
+                ``"marketlens-close"``, ``"trendlyne-ohlc"``, ``"screener-chart"``, ...). This is
+                the opt-in that puts :mod:`bfinance.sources.cascade` on the path; with neither
+                named the call behaves exactly as it did before that layer existed.
+
+                The list is the failsafe: providers are tried in the order given and the first
+                one that answers wins, so ``sources=["nse-bhavcopy", "marketlens-close"]`` is a
+                genuine second attempt on the *same* price basis, and the call raises only if
+                every one of them fails. An unknown name raises :class:`ValueError` **before any
+                request is spent** -- see :func:`resolve_price_source_names`.
+
+                Basis routing is automatic and it is not cosmetic. The registry declares which
+                basis each source publishes, and the cascade **never calls** a source that cannot
+                serve the requested one: asking for as-traded prices skips
+                ``"trendlyne-ohlc"`` on basis, spends zero requests on it, and records the skip
+                in ``attrs["bfinance_price_source_attempts"]``. That is measured, not stylistic --
+                HDFCBANK's close on the second vendor's feed is exactly 0.5x the bhavcopy's on all
+                62 sessions of 2024-12-16..2025-03-13 (the 1:1 bonus back-applied), so an
+                as-traded request served from it would carry a move that never happened. When
+                the winner is a split/bonus-adjusted source, its bars are used **whole**: this
+                engine applies no further share-count factor on top, and
+                ``attrs["price_basis"]`` reads :data:`PRICE_BASIS_VENDOR_SPLIT_ADJUSTED` rather
+                than claiming an adjustment bfinance did not make.
+
+                Four attrs keys report what the cascade did, on the populated frame and the empty
+                one alike -- ``bfinance_price_source`` (the winning **vendor**, not the
+                transport), ``bfinance_price_source_attempts``,
+                ``bfinance_price_source_degraded`` and ``bfinance_price_source_detail``. The
+                return type does not change: a failover is an ordinary DataFrame.
             adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
                 cumulative SHARE-COUNT factor, which is what yfinance's own ``auto_adjust=False``
                 series carries -- bhavcopy is as-traded and Yahoo's raw OHLC are not, so without
@@ -689,14 +941,39 @@ class OHLCVEngine:
                 window. Never answered with fabricated bars.
             TickerNotFoundError: the archive answered but holds no rows for this symbol and
                 ``raise_errors=True``.
-            ValueError: unknown ``ohlc`` source, or a ``period`` that is not in
-                :data:`PERIOD_DAYS_MAP`. Both are caller bugs, decided locally, before any
-                request is spent learning something knowable.
+            bfinance.sources.errors.SourceUnavailableError: the cascade ran and **every** named
+                or eligible source failed. The message names each one and the reason it gave.
+                Note this is an ``UpstreamServiceError`` subclass, so a caller already writing
+                ``except UpstreamServiceError`` around a data fetch needs no new except clause.
+            bfinance.sources.errors.SourceBasisError: the basis the named sources publish is not
+                one bfinance can serve for this request, or no registered source publishes it.
+                Deliberately a ``ValueError``, not an unavailability: nothing is broken, and
+                retrying cannot help.
+            ValueError: unknown ``ohlc`` source, a ``period`` that is not in
+                :data:`PERIOD_DAYS_MAP`, or a ``source=``/``sources=`` name that is not
+                registered for price history. All three are caller bugs, decided locally, before
+                any request is spent learning something knowable.
         """
         if repair:
             raise NotImplementedError("repair=True is not supported by bfinance")
         if ohlc not in OHLC_SOURCES:
             raise ValueError(f"ohlc must be one of {OHLC_SOURCES}, got {ohlc!r}")
+        # Refused here, next to the other "which feed" checks, for the same reason they are: a
+        # source name is a local vocabulary. Validating after the first fetch would spend a
+        # request per symbol discovering a typo, and tests/test_silent_fallbacks.py pins exactly
+        # that timing for download().
+        price_names = resolve_price_source_names(
+            source, sources, registry=getattr(self.price_sources, "registry", None)
+        )
+        if price_names and ohlc == "synthetic":
+            raise ValueError(
+                f"ohlc='synthetic' cannot be combined with source=/sources={list(price_names)}. "
+                f"The synthetic path reads the close-only Screener chart feed and DERIVES "
+                f"Open/High/Low from Close, and no source in the price registry does that -- so "
+                f"there is no row to route it to. Pick one: keep ohlc='synthetic' with its own "
+                f"feed, or keep ohlc='bhavcopy' (the default) and choose the vendor with "
+                f"source=/sources=."
+            )
         if auto_adjust:
             raise AdjustmentNotAvailableError(
                 "auto_adjust=True is still refused by bfinance, but the reason is now a "
@@ -768,6 +1045,11 @@ class OHLCVEngine:
             days = max(days, delta_days)
 
         synthetic = ohlc == "synthetic"
+        # Two independent reasons the cascade can be in force, and both must hold: the caller
+        # named a source, or the engine was built with a PriceSourceRouter. Neither alone is a
+        # default, and with neither the direct bhavcopy reader below runs exactly as it did
+        # before the cascade existed.
+        cascade_on = bool(price_names) or self.price_sources is not None
         if synthetic:
             bars = await self._fetch_synthetic_bars(clean_symbol, days, raise_errors)
             # The mirror holds the bhavcopy tape, not the close-only Screener series, so there is
@@ -777,10 +1059,24 @@ class OHLCVEngine:
                 reason="ohlc='synthetic' reads the close-only Screener feed, which the "
                        "bhavcopy mirror does not hold"
             )
+            price_record = self._direct_price_source_record(
+                "synthetic", router_present=self.price_sources is not None
+            )
+        elif cascade_on:
+            bars, mirror_state, price_record = await self._fetch_cascade_bars(
+                symbol, clean_symbol, start, end, days, price_names, mirror
+            )
+            if price_record["degraded"]:
+                # One line for whoever is watching the log now; the frame carries the same
+                # sentence in attrs. Loud in the log, quiet in the return type.
+                logger.warning(
+                    "%s: price source failover. %s", symbol, price_record["detail"]
+                )
         else:
             bars, mirror_state = await self._fetch_bhavcopy_bars(
                 symbol, clean_symbol, start, end, days, raise_errors, mirror
             )
+            price_record = self._direct_price_source_record("bhavcopy", router_present=False)
         source = mirror_state.get("source") or SOURCE_NETWORK
 
         if bars.empty:
@@ -817,6 +1113,11 @@ class OHLCVEngine:
             # the question of where the answer came from unanswered.
             empty.attrs["bfinance_source"] = source
             empty.attrs["bfinance_mirror"] = mirror_state
+            # The four price-source keys, on the EMPTY frame too. An empty frame is exactly the
+            # frame a consumer is most likely to treat as "nothing went wrong", so it is the
+            # worst place to leave "which vendor, and did anything fail on the way" unanswered.
+            # A consumer reads one key on every frame instead of probing for the absence of one.
+            self._publish_price_source(empty, price_record)
             return empty
 
         df = bars.copy()
@@ -891,8 +1192,20 @@ class OHLCVEngine:
         #
         # Order matters: the dividend step divides by the previous AS-TRADED close, so both
         # factors are derived from the un-scaled frame before any column is multiplied.
+        #
+        # A vendor-adjusted winner is the one case where the share-count factor must NOT be built
+        # at all. `trendlyne-ohlc` publishes as_traded_split_bonus_adjusted, so its bars already
+        # carry the cumulative share-count restatement; multiplying by the same factor again
+        # halves every bar a second time. It is 1.0 here rather than skipped downstream so every
+        # later step -- the column scaling, Adj Close, Volume's inverse -- runs unchanged and the
+        # winner's data is used whole. Measured: HDFCBANK, 2024-12-16..2025-03-13, the vendor
+        # close is exactly 0.5x the bhavcopy's on all 62 sessions.
+        vendor_adjusted = bool(price_record.get("vendor_adjusted"))
         split_source = df.get("Stock Splits") if synthetic else splits_history
-        split_factor = _split_adjustment_factor(df.index, split_source)
+        if vendor_adjusted:
+            split_factor = pd.Series(1.0, index=df.index)
+        else:
+            split_factor = _split_adjustment_factor(df.index, split_source)
         dividend_factor = _dividend_adjustment_factor(df)
         adjusted_close = df["Close"].astype(float) * split_factor * dividend_factor
 
@@ -925,6 +1238,20 @@ class OHLCVEngine:
         )
         scaled = factor_applied
         applied = factor_applied
+        if vendor_adjusted and applied:
+            # _resolve_adjustment cannot know this: it is asked about the actions feed, and the
+            # reason the factor is 1.0 is a property of the WINNING VENDOR, not of the feed. Left
+            # alone it would write "back-adjusted by the cumulative share-count factor from
+            # nse-corporate-actions" on a frame whose prices were not touched here at all.
+            applied_detail = (
+                f"the winning price source ({price_record.get('source')}) already publishes these "
+                f"bars restated for splits and bonuses, with demergers NOT applied, so bfinance "
+                f"applied no further share-count factor -- the two do not compose, and applying "
+                f"both would halve every bar a second time. Adj Close additionally carries the "
+                f"dividend factor for ex-dates inside the window. attrs['price_basis'] reads "
+                f"{PRICE_BASIS_VENDOR_SPLIT_ADJUSTED!r} rather than claiming an adjustment bfinance "
+                f"did not make."
+            )
         if incomplete is not None and applied:
             applied = False
             applied_detail = (
@@ -1047,7 +1374,9 @@ class OHLCVEngine:
         # Which basis the rupee prices in this frame actually sit on. Set on every path, including
         # the empty one, because a frame with no bars is exactly the frame a consumer is most
         # likely to treat as "nothing to worry about".
-        df.attrs["price_basis"] = self._price_basis(synthetic=synthetic, scaled=scaled)
+        df.attrs["price_basis"] = self._price_basis(
+            synthetic=synthetic, scaled=scaled, vendor_adjusted=vendor_adjusted
+        )
         # What the bars actually are spaced at, which is NOT the interval that was
         # requested. Present on every frame, including the empty one (where it is None,
         # because no bars exist to measure), so a consumer reads one key instead of
@@ -1077,10 +1406,373 @@ class OHLCVEngine:
                 "whose ex-dates are ~4-5 months late; O/H/L/C carry the share-count factor and "
                 "Adj Close adds the in-window dividend factor"
             )
+        # The four price-source keys, last so nothing above can overwrite them. Set on the empty
+        # frame too (see the early return), because a consumer must be able to read one key on
+        # every frame this method returns rather than probing for the absence of one.
+        self._publish_price_source(df, price_record)
         return df
 
+    # ------------------------------------------------------------------ the price-source cascade
+    #
+    # Everything below is reached only when `source=`/`sources=` was named or a PriceSourceRouter
+    # was injected. With neither, fetch_history still calls _fetch_bhavcopy_bars directly and the
+    # registry is never imported -- which is the whole reason the shipped default is unchanged
+    # and the reason the ~130 existing two-argument OHLCVEngine(...) constructions keep working.
+
+    async def _fetch_cascade_bars(
+        self,
+        symbol: str,
+        clean_symbol: str,
+        start: Optional[Union[str, datetime]],
+        end: Optional[Union[str, datetime]],
+        days: int,
+        names: Sequence[str],
+        mirror,
+    ) -> tuple:
+        """Bars from the source cascade, plus the transport record and the provenance record.
+
+        Returns ``(rows, mirror_state, price_record)``.
+
+        The whole-market-to-one-symbol narrowing happens here rather than in each source, because
+        the registry rows are deliberately inconsistent about it: ``nse-bhavcopy`` is a whole-market
+        archive with no symbol argument, while the other three are per-symbol. Narrowing in one
+        place is what lets the same post-processing run over any of them.
+
+        The window is clamped to :data:`BHAVCOPY_FIRST_DATE` with the same log line the direct path
+        uses, and deliberately so: the request the cascade carries is a *date range*, and a source
+        that costs one request per day in the span it is handed must never be asked for 25 years
+        because a caller wrote ``period="max"``. Clamping can only ever ask for less, and the
+        per-source window filtering downstream (the ``start``/``end`` filter, and
+        :func:`bfinance.sources.price_provider.narrow` on that vendor's own route) is unaffected.
+        """
+        # Lazy: tests/test_public_surface.py requires that `import bfinance` does not pull this
+        # layer in, and this is the only place in the package that needs it.
+        from bfinance.sources import cascade as sources_cascade
+
+        router = self.price_sources
+        registry = getattr(router, "registry", None) if router is not None else None
+        health = getattr(router, "health", None) if router is not None else None
+        fetch = getattr(router, "fetch", None) if router is not None else None
+
+        start_ts = self._window_start(start, days)
+        end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
+        floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
+        if start_ts < floor:
+            logger.warning(
+                "%s: requested window starts %s, before the bhavcopy archive begins (%s). "
+                "Returning only the covered range; use ohlc='synthetic' for older history.",
+                symbol, start_ts.date(), BHAVCOPY_FIRST_DATE,
+            )
+            start_ts = floor
+
+        request = {
+            "symbol": clean_symbol,
+            # The screener chart adapter reads `ticker`; every other adapter reads `symbol`.
+            # Both are sent rather than one, because the adapters are the layer that knows each
+            # entry point's parameter name and a request is a mapping, not a signature.
+            "ticker": clean_symbol,
+            "start": start_ts.strftime("%Y-%m-%d"),
+            "end": end_ts.strftime("%Y-%m-%d"),
+            "days": days,
+            "capability": PRICE_CAPABILITY,
+        }
+        basis = self._requested_price_basis(names, registry)
+        only = tuple(names) or None
+        # The plan is computed here, not only inside resolve(), and that is the whole reason
+        # `bfinance_price_source_attempts` can be a complete account. resolve() returns the moment
+        # one provider answers, so its own `attempts` stops there -- which is right for a caller
+        # asking "what happened" and wrong for a consumer reading the routing picture off a frame,
+        # because the sources that were passed over AHEAD of the winner would be missing. plan()
+        # computes every exclusion without calling anything, so merging the two gives the whole
+        # try-order in the order it was actually considered.
+        planned = sources_cascade.plan(
+            PRICE_CAPABILITY, basis=basis, registry=registry, health=health, only=only
+        )
+        resolved = sources_cascade.resolve(
+            PRICE_CAPABILITY,
+            request=request,
+            basis=basis,
+            registry=registry,
+            health=health,
+            fetch=fetch,
+            only=only,
+        )
+        # The winner's frame, used WHOLE. Not concatenated with anything, not re-based, not
+        # blended with a fallback's bars: Basis.comparable() already refused the only two
+        # sources that disagree, and stitching a second vendor's bars onto this one would put a
+        # move in the series that never happened.
+        value = resolved.value
+        if not hasattr(value, "empty") or not hasattr(value, "columns"):
+            raise RealOHLCUnavailableError(
+                f"{symbol}: price source {resolved.source!r} answered a {PRICE_CAPABILITY!r} "
+                f"request with {type(value).__name__}, which is not a frame. bfinance builds a "
+                f"history out of bars and will not derive them from a value it does not "
+                f"understand; a real feed serving an unexpected shape is a bug worth raising."
+            )
+        missing = [c for c in ("Open", "High", "Low", "Close") if c not in value.columns]
+        if missing:
+            raise RealOHLCUnavailableError(
+                f"{symbol}: price source {resolved.source!r} answered a {PRICE_CAPABILITY!r} "
+                f"request with a frame missing {missing}. Refusing to synthesize them: a "
+                f"fabricated Open/High/Low is indistinguishable from a real one, which is the "
+                f"defect this package exists to not produce."
+            )
+        bars = self._tidy_bars(
+            symbol,
+            _select_symbol_rows(value, clean_symbol),
+            dict(getattr(value, "attrs", {}) or {}),
+            label=f"{resolved.source} bars",
+        )
+        # The mirror is a transport for ONE vendor, and the cascade's whole job is choosing the
+        # vendor. Recorded rather than silently skipped, because a caller who enabled the mirror
+        # and then named a source would otherwise have no way to know their local tape stopped
+        # being consulted -- and logged, because a silently-ignored cache is the same defect
+        # shape as a silently-ignored cache hit.
+        mirror_state = _mirror_state(
+            reason=(
+                "the price-source cascade was engaged (source=/sources= or an injected "
+                "PriceSourceRouter), which routes the bhavcopy through bfinance.sources rather "
+                "than through this module's mirror-aware reader; the local mirror is not consulted "
+                "on that path"
+            )
+        )
+        if self._mirror_spec(mirror) is not None:
+            logger.warning(
+                "%s: a local mirror is configured but the price-source cascade is in force, so the "
+                "mirror is not consulted on this call. Drop source=/sources= to keep reading it, "
+                "or accept that the vendor attrs['%s'] names is being fetched over the network.",
+                symbol, PRICE_SOURCE_ATTR,
+            )
+        return bars, mirror_state, self._price_source_record(resolved, planned)
+
     @staticmethod
-    def _price_basis(synthetic: bool, scaled: bool) -> str:
+    def _requested_price_basis(names: Sequence[str], registry) -> Any:
+        """The vendor basis this call must be served on, or a refusal naming the conflict.
+
+        Derived from the sources the caller NAMED, not from the registry's first row, and that
+        difference is the whole design. ``plan()``'s own default is "the first registered source's
+        basis", which is right for a caller who named nothing and wrong for one who named
+        ``sources=["trendlyne-ohlc"]``: taking it there would request as-traded prices from a
+        source that publishes only split-adjusted ones, and the honest answer to that is a refusal
+        rather than a silent substitution.
+
+        Two named sources that publish different bases are refused for the same reason, with the
+        conflict spelled out -- a failsafe list has to be on ONE basis to be a failsafe, and the
+        error says which bases are actually on offer rather than making the caller read the
+        registry.
+        """
+        from bfinance.sources.model import basis_from  # lazy: opt-in isolation
+
+        reg = registry
+        if not names:
+            # The engine post-processes what it is given -- it applies the share-count factor
+            # itself -- so it needs an UNADJUSTED series to start from. as_traded is also the only
+            # price basis in the default registry with genuine redundancy (bhavcopy and
+            # MarketLens), so it is the basis a failsafe can actually fail over on.
+            return basis_from(DEFAULT_PRICE_BASIS)
+        if reg is None:
+            from bfinance.sources.registry import DEFAULT
+
+            reg = DEFAULT
+        shared: Optional[set] = None
+        published: Dict[str, list] = {}
+        for name in names:
+            spec = reg.source(name)
+            if spec is None:  # pragma: no cover - resolve_price_source_names already refused it
+                continue
+            published[name] = [b.value for b in spec.bases]
+            available = {b.value for b in spec.bases}
+            shared = available if shared is None else (shared & available)
+        if not shared:
+            raise ValueError(
+                f"the price sources named publish bases that do not overlap, so they are not a "
+                f"failsafe for one another and cannot be tried in order: {published}. A failsafe "
+                f"list has to be on a single price basis, because bfinance will not splice two of "
+                f"them into one series -- a 1:2 split would then read as a -50% move that never "
+                f"happened. Name the sources for one basis, or run two calls."
+            )
+        if len(shared) > 1:
+            raise ValueError(
+                f"the price sources named publish several bases ({sorted(shared)}), so the basis "
+                f"of this request is ambiguous: {published}. Name a single source, or name sources "
+                f"that agree."
+            )
+        return basis_from(next(iter(shared)))
+
+    @staticmethod
+    def _price_source_record(resolved, planned=None) -> dict:
+        """The four attrs values, as one dict the caller can inspect and the engine can spread.
+
+        Built in one place so a frame cannot claim ``degraded=False`` while its own attempt list
+        contains a failure -- the same rule :func:`bfinance.sources.cascade._finish` applies, for
+        the same reason.
+
+        ``degraded`` is taken from the cascade rather than recomputed, because the cascade's rule is
+        the careful one: a source SKIPPED for being on the wrong basis is not degradation (the
+        system did the only thing available) while a source ASKED and failed is (the caller wanted
+        that answer and did not get it). Recomputing it here as "was anything skipped?" would make
+        every as-traded request look degraded, because the adjusted sources are always skipped.
+
+        ``planned`` is the cascade's own pre-computed exclusion list, merged in so the published
+        ``attempts`` covers the WHOLE try-order rather than the prefix up to the winner. The
+        resolution's own record wins on any source both know about, so this can add rows and never
+        overwrite one; the order is the try-order either way, which is the order a reader needs.
+        """
+        records: Dict[str, dict] = {}
+
+        def _payload(attempt) -> dict:
+            return {
+                "source": attempt.provider,
+                "outcome": attempt.outcome,
+                "called": attempt.called,
+                "reason": attempt.reason,
+                "basis": attempt.basis.value if attempt.basis is not None else None,
+            }
+
+        for attempt in resolved.attempts:
+            records[attempt.provider] = _payload(attempt)
+        for attempt in getattr(planned, "attempts", ()) or ():
+            records.setdefault(attempt.provider, _payload(attempt))
+        rank = {
+            spec.name: index
+            for index, spec in enumerate(getattr(planned, "ordered", ()) or ())
+        }
+        attempts = sorted(records.values(), key=lambda row: rank.get(row["source"], len(rank)))
+        return {
+            "source": resolved.source,
+            "attempts": attempts,
+            "degraded": bool(resolved.degraded),
+            "detail": OHLCVEngine._price_source_detail(resolved, attempts),
+            # Read by the adjustment step, not published as a key: it decides whether a
+            # share-count factor may be applied at all. True when the winner published bars that
+            # already carry one.
+            "vendor_adjusted": resolved.basis.value != DEFAULT_PRICE_BASIS,
+        }
+
+    @staticmethod
+    def _price_source_detail(resolved, attempts: Sequence[Mapping]) -> str:
+        """One sentence naming what was tried and what failed, in the order it happened.
+
+        A sentence and not a list, because the list is already on the frame under
+        ``bfinance_price_source_attempts`` and this key exists for the reader who will not parse
+        that. It distinguishes the three cases that must never be confused: answered first time,
+        answered after a failure, and answered after everything eligible was passed over. The
+        MERGED attempt list is passed in rather than ``resolved.attempts``, because the cascade
+        stops recording the moment a provider answers and a sentence that omitted the sources
+        passed over would describe a routing decision the frame's own list contradicts.
+
+        A source passed over contributes only the FIRST sentence of its reason, and that is not
+        cosmetics. A basis skip's reason is "<one authored sentence>. <the row's whole registry
+        note>", and a registry note is a measured essay by design -- the one for the split-adjusted
+        row is 900 characters of arithmetic about HDFCBANK. Pasting that into a key documented as
+        a sentence produces a 4 KB "sentence" nobody reads, on every as-traded call. The ledger
+        under ``bfinance_price_source_attempts`` keeps the whole reason, so the measurement still
+        travels with the frame; this key is the summary.
+        """
+        failed = [a for a in attempts if a["outcome"] == "failed"]
+        skipped = [a for a in attempts if not a["called"]]
+        if not failed:
+            passed = (
+                "nothing ahead of it failed, so this is first choice and the frame is not "
+                "degraded"
+            )
+        else:
+            names = ", ".join(
+                f"{a['source']} ({OHLCVEngine._brief(a['reason'])})" if a["reason"] else a["source"]
+                for a in failed
+            )
+            passed = (
+                f"it was asked first, failed ({names}), and the frame is therefore DEGRADED -- "
+                f"second choice, not first"
+            )
+        tail = ""
+        if skipped:
+            tail = " " + "; ".join(
+                f"{a['source']} was not asked: {OHLCVEngine._first_sentence(a['reason'])}"
+                for a in skipped
+            )
+        return (
+            f"{resolved.source} answered the {resolved.basis.value} price history on the "
+            f"{resolved.basis_requested.value} basis, {passed}.{tail}"
+        )
+
+    @staticmethod
+    def _brief(reason: Optional[str]) -> str:
+        """A failure reason on one line, whole.
+
+        :func:`bfinance.sources.cascade._short` already collapses a traceback into
+        ``"ClassName: message"`` and caps it at 300 characters, so a failure needs no trimming --
+        only whitespace, since these strings travel into ``attrs``.
+        """
+        return " ".join((reason or "").split())
+
+    @staticmethod
+    def _first_sentence(reason: Optional[str]) -> str:
+        """The leading sentence of a skip reason, with the registry's note taken back off it.
+
+        A basis skip reads ``"publishes only the split_adjusted basis, and the as_traded basis was
+        requested. <the row's whole note>"``. The note is measured evidence and it is worth
+        carrying -- in ``bfinance_price_source_attempts``, where a machine reads it. It is not
+        worth carrying twice, in a key documented as a sentence.
+        """
+        text = OHLCVEngine._brief(reason)
+        head, separator, _tail = text.partition(". ")
+        if separator and head:
+            return f"{head}."
+        return text
+
+    @staticmethod
+    def _direct_price_source_record(ohlc: str, router_present: bool) -> dict:
+        """The four attrs values for a frame the cascade did not build.
+
+        Every value is the honest one rather than a plausible one. ``source`` is ``None`` and
+        ``attempts`` is empty because no registry row was asked -- publishing a vendor name here
+        would be a claim about a routing decision that was never made, and the feed is already
+        named, truthfully, by ``attrs["bfinance_ohlc_source"]``. ``degraded`` is ``False``
+        because there is no alternative to have been denied: the caller got the only thing this
+        path can produce.
+        """
+        note = (
+            " A PriceSourceRouter was injected on this engine, so the cascade WOULD have run; "
+            "ohlc='synthetic' is the legacy close-only path and is deliberately not routed through "
+            "it."
+            if ohlc == "synthetic" and router_present
+            else (
+                " No PriceSourceRouter was injected and no source= / sources= was named, so the "
+                "shipped direct path ran and no source was tried and no fallback was available."
+                if ohlc != "synthetic"
+                else ""
+            )
+        )
+        return {
+            "source": None,
+            "attempts": [],
+            "degraded": False,
+            "detail": (
+                f"the direct ohlc={ohlc!r} reader answered; no price-source cascade ran, so there "
+                f"is no try-order, no attempt list and nothing to be degraded from.{note} The feed "
+                f"is attrs['bfinance_ohlc_source'] and the transport is attrs['bfinance_source']; "
+                f"name a vendor with source= / sources= to engage the cascade."
+            ),
+            "vendor_adjusted": False,
+        }
+
+    @staticmethod
+    def _publish_price_source(frame: pd.DataFrame, record: Mapping) -> pd.DataFrame:
+        """Write the four price-source keys onto a frame, populated or empty, and return it.
+
+        All four are always present. A consumer reads ``attrs["bfinance_price_source_degraded"]``
+        rather than probing for the key's absence, and an empty frame is precisely the frame a
+        consumer is most likely to treat as "nothing went wrong".
+        """
+        frame.attrs[PRICE_SOURCE_ATTR] = record.get("source")
+        frame.attrs[PRICE_SOURCE_ATTEMPTS_ATTR] = list(record.get("attempts") or ())
+        frame.attrs[PRICE_SOURCE_DEGRADED_ATTR] = bool(record.get("degraded"))
+        frame.attrs[PRICE_SOURCE_DETAIL_ATTR] = record.get("detail")
+        return frame
+
+    @staticmethod
+    def _price_basis(synthetic: bool, scaled: bool, vendor_adjusted: bool = False) -> str:
         """Name the rupee-price basis of this frame, as one of the ``PRICE_BASIS_*`` constants.
 
         This is the attribute a consumer should branch on instead of inferring the basis from the
@@ -1093,9 +1785,17 @@ class OHLCVEngine:
         buy-back, rights issue or per-unit distribution is applied, and no dividend reaches
         O/H/L/C. ``as_traded_share_count_adjusted`` says what was done instead of claiming parity
         that the unconverted-row gap makes untrue.
+
+        ``vendor_adjusted`` is the third case and is checked BEFORE ``scaled``, because the two
+        would otherwise report the same string. When the cascade's winner published split/bonus
+        restated bars, ``scaled`` can legitimately be ``True`` -- bfinance did derive a factor --
+        while having multiplied by 1.0, so ``as_traded_share_count_adjusted`` would be a false
+        claim about this frame. The winner's own basis is published instead.
         """
         if synthetic:
             return PRICE_BASIS_SYNTHETIC
+        if vendor_adjusted:
+            return PRICE_BASIS_VENDOR_SPLIT_ADJUSTED
         return (
             PRICE_BASIS_SHARE_COUNT_ADJUSTED if scaled else PRICE_BASIS_AS_TRADED
         )
@@ -1557,13 +2257,18 @@ class OHLCVEngine:
         )
 
     @staticmethod
-    def _tidy_bars(symbol: str, rows: pd.DataFrame, attrs: Optional[dict] = None) -> pd.DataFrame:
+    def _tidy_bars(
+        symbol: str, rows: pd.DataFrame, attrs: Optional[dict] = None, label: str = "bhavcopy",
+    ) -> pd.DataFrame:
         """
         Localise, coerce and provenance-stamp a per-symbol slice, from either source.
 
-        Shared by the network and mirror paths on purpose: the two must be indistinguishable
-        once they are in, or "the mirror serves the same bars" would be a claim about values
-        and a difference in dtypes.
+        Shared by the network, mirror and source-cascade paths on purpose: the three must be
+        indistinguishable once they are in, or "the mirror serves the same bars" -- and "the
+        second vendor's bars drop into the same consumers" -- would be a claim about values and a
+        difference in dtypes. ``label`` only names the feed in the one log line that can fire, so
+        a drop is attributable to the source that lost the rows rather than to "bhavcopy" whatever
+        actually answered.
         """
         rows = _localize_ist(rows)
         # Carry the source's own provenance record (provenance string, schema, dates the NSE
@@ -1578,7 +2283,7 @@ class OHLCVEngine:
             ).fillna(0).astype(np.int64)
         unpriced = int(rows["Close"].isna().sum())
         if unpriced:
-            logger.warning("%s: dropped %d bhavcopy row(s) with no usable close.", symbol, unpriced)
+            logger.warning("%s: dropped %d %s row(s) with no usable close.", symbol, unpriced, label)
             rows = rows[rows["Close"].notna()]
         return rows
 

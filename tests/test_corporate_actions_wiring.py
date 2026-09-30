@@ -436,17 +436,48 @@ async def test_auto_adjust_is_still_refused_but_no_longer_claims_there_are_no_fa
 
 
 def test_history_signature_and_dispatch_are_untouched():
-    """The actions path must not have moved the public contract.
+    """The actions path must not have moved the public contract, and the price-source seam did
+    exactly one thing to it: appended two optional parameters at the end.
 
-    ``fetch_history``'s signature, the ``ohlc`` parameter and the bhavcopy dispatch belong to
-    another agent's work; a change here would be an unrequested contract edit.
+    The previous version of this docstring said a change here "would be an unrequested contract
+    edit" and that ``fetch_history``'s signature, the ``ohlc`` parameter and the bhavcopy dispatch
+    "belong to another agent's work". That is no longer true, and the reason is worth recording
+    rather than quietly overwriting:
+
+    * ``source=`` (one price source) and ``sources=`` (an ordered list to fail over through) were
+      **requested**, by plans/trendlyne-default-failsafe-yfinance.md task T3a. They put the
+      existing :mod:`bfinance.sources.cascade` on the price path so ``history()`` can fail over
+      instead of having exactly one vendor and one failure mode.
+    * Everything this test pins about the *actions* contract is unchanged, and is still asserted:
+      ``ohlc`` still defaults to ``"bhavcopy"``, ``OHLC_SOURCES`` is still
+      ``("bhavcopy", "synthetic")``, the bhavcopy dispatch is still the default, and the real
+      archive reader is still wired in. The new parameters are **appended, optional, and default
+      to ``None``**, so every existing call -- positional or keyword -- resolves to what it did.
+      That is asserted below by position as well as by default, because a default that is right
+      while the parameter has been inserted in the middle would break every positional caller and
+      no default-value assertion would notice.
     """
     import inspect
+
+    names = list(inspect.signature(ohlcv_mod.OHLCVEngine.fetch_history).parameters)
+    assert names[1:] == [
+        "symbol", "period", "interval", "start", "end", "prepost", "actions", "auto_adjust",
+        "back_adjust", "repair", "keepna", "rounding", "timeout", "raise_errors", "ohlc",
+        "adjust_corporate_actions", "mirror", "source", "sources",
+    ], (
+        f"the existing parameters must keep their positions and order; the source parameters are "
+        f"appended, never inserted: {names}"
+    )
 
     params = inspect.signature(ohlcv_mod.OHLCVEngine.fetch_history).parameters
     assert params["ohlc"].default == "bhavcopy"
     assert params["actions"].default is True
     assert params["auto_adjust"].default is False
+    assert params["source"].default is None, (
+        "a default other than None would silently put every existing caller on the source cascade, "
+        "which is a contract change and not a seam"
+    )
+    assert params["sources"].default is None
     assert ohlcv_mod.OHLC_SOURCES == ("bhavcopy", "synthetic")
     assert ohlcv_mod.bhavcopy_range is not None
 
