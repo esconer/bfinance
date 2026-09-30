@@ -171,6 +171,18 @@ async def _history(actions_client, profile=None, **kwargs):
     )
 
 
+async def _fetch(actions_client, profile=None, **kwargs):
+    """``_history`` with ``auto_adjust`` left to the caller, for the two auto_adjust=True tests.
+
+    The two are separate rather than one with a default, because every other caller in this file
+    is asserting the ``auto_adjust=False`` contract and a shared default would let a future test
+    inherit it without meaning to.
+    """
+    return await _engine(actions_client, profile=profile).fetch_history(
+        symbol="RELIANCE.NS", period="5d", actions=True, **kwargs
+    )
+
+
 # --------------------------------------------------------------------- 1. provenance
 
 
@@ -409,27 +421,66 @@ async def _record(symbol):
 # --------------------------------------------------------------------- 4. auto_adjust
 
 
-async def test_auto_adjust_is_still_refused_but_no_longer_claims_there_are_no_factors(bars):
-    """The refusal stays; the reason changed, and the old reason was false.
+async def test_auto_adjust_true_applies_the_real_factor_rather_than_refusing(bars):
+    """
+    This test asserted the opposite, and the reason it gave is no longer true.
 
-    The old message said no adjustment factor existed. One does now — the NSE feed supplies real
-    ex-dated ones and they drive Adj Close. What is unproven is *coverage*: an Indian split is
-    published as a bonus issue or a face-value sub-division, and recall was checked on a sample,
-    not a census, so rescaling every OHLC column is not yet a promise bfinance should make.
+    The old docstring said the refusal "stayed" because *coverage* was unproven -- an Indian split
+    is published as a bonus issue or a face-value sub-division, so recall was sampled rather than
+    censused, and rescaling every OHLC column was not yet a promise bfinance should make. That is a
+    real and still-published caveat, and it is carried by
+    ``attrs["bfinance_adjustment_incomplete"]`` -- it was never a reason to refuse the *keyword*,
+    because yfinance 1.7 defaults ``auto_adjust`` to ``True`` and a drop-in that dies on the value
+    its closest competitor reaches by saying nothing is not a drop-in.
+
+    So the call now does what yfinance does, with the factors this feed already supplies: scale
+    Open/High/Low/Close by ``Adj Close / Close`` and drop ``Adj Close``. The fixture's three bars
+    straddle RELIANCE's real 19-Aug-2024 Rs 10 dividend, so the ratio is 0.99661764 on the bar
+    before the ex-date and 1.0 after -- a column drop that scaled nothing cannot pass this.
+    """
+    adjusted = await _fetch(_StubActionsClient(), auto_adjust=False)
+    auto = await _fetch(_StubActionsClient(), auto_adjust=True)
+
+    assert "Adj Close" not in auto.columns
+    assert list(auto.columns) == [
+        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+    ]
+    assert auto["Close"].tolist() == pytest.approx(adjusted["Adj Close"].tolist(), rel=1e-12)
+    ratio = (adjusted["Adj Close"] / adjusted["Close"]).tolist()
+    assert ratio == pytest.approx([1.0 - 10.0 / 2956.40, 1.0, 1.0], rel=1e-12)
+    assert auto["Volume"].tolist() == adjusted["Volume"].tolist()
+
+
+async def test_auto_adjust_true_is_still_refused_when_the_feed_is_not_ex_dated(bars):
+    """
+    The refusal this change KEEPS, on the case the old docstring was really about.
+
+    The "coverage" caveat above has a concrete face: when the feed cannot be reached, or does not
+    index the instrument, ``Adj Close`` is not an adjusted series and scaling four price columns
+    by it would restate history with a number that never existed. That is the one output this
+    package exists to not produce, so ``True`` still refuses -- but the message now names WHICH
+    case it is, instead of claiming there are no factors at all. There are: they are real when the
+    feed answers, and absent when it does not, and the message has to be able to tell the two.
     """
     from bfinance.market.ohlcv import AdjustmentNotAvailableError
 
     with pytest.raises(AdjustmentNotAvailableError) as exc:
-        await _engine(_StubActionsClient()).fetch_history(
-            symbol="RELIANCE.NS", period="5d", auto_adjust=True
-        )
+        await _fetch(_StubActionsClient(error=RuntimeError("feed down")), auto_adjust=True)
     message = str(exc.value)
-    # Substrings two existing suites assert on.
-    assert "adjustment factor" in message.lower()
-    assert "corporate-actions" in message
-    # And it must not still claim the input is missing.
+    # And it must not still claim the input is missing: a real factor DOES exist, it just was not
+    # fetched on this call.
     assert "carries no dividend or split series" not in message
-    assert "corporate-actions feed" in message
+    assert "no corporate-actions feed with real" in message
+    assert "would fabricate history" in message
+    # The approximation is a refusal too, and for a different reason -- the two are not the same
+    # defect and a single "it raises" test could not tell them apart.
+    with pytest.raises(AdjustmentNotAvailableError) as approx_exc:
+        await _fetch(
+            _StubActionsClient(payload=[]), profile=_screener_profile(), auto_adjust=True
+        )
+    approx_message = str(approx_exc.value)
+    assert "fiscal-year-end approximation" in approx_message
+    assert "corporate-actions" in approx_message
 
 
 # --------------------------------------------------------------------- 5. engine surface

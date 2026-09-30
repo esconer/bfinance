@@ -366,18 +366,67 @@ async def test_symbol_suffixes_are_normalised(stub_bhavcopy):
 
 
 # --------------------------------------------------------------- auto_adjust
-async def test_auto_adjust_true_is_rejected_not_faked(stub_bhavcopy):
+async def test_auto_adjust_true_now_works_and_is_not_a_column_drop(stub_bhavcopy):
     """
-    auto_adjust=True used to be a column drop: frames were byte-identical either way while the
-    column list said "adjusted". It now raises, pointing at the corporate-actions work.
+    This test used to assert that ``auto_adjust=True`` raises. It asserted a real defect, but the
+    defect it named had stopped being true: the NSE ex-dated corporate-actions feed supplies real
+    dividends and real bonus ratios, they already drive ``Adj Close`` on the default path, and
+    ``Adj Close`` is by construction the share-count factor times the dividend factor. Meanwhile
+    yfinance 1.7 DEFAULTS ``auto_adjust`` to ``True``, so the package died on the value its closest
+    competitor reaches by saying nothing.
+
+    So the assertion is replaced rather than deleted, and it is replaced with the opposite claim:
+    ``True`` must WORK. The first version of a fix like this is to accept the keyword and let
+    ``_history_columns`` do its already-implemented column drop -- the tests about columns go
+    green and every price is untouched -- so the assertion here is deliberately about VALUES. This
+    stub carries RELIANCE's real 19-Aug-2024 Rs 10 dividend against a prior close of 2956.40, so
+    the ratio is 0.99661764 and not 1.0, and a column drop cannot satisfy it.
     """
-    calls = stub_bhavcopy()
+    stub_bhavcopy(result=_market_frame({
+        "RELIANCE": [
+            ("2024-08-16", 2900.0, 2970.0, 2890.0, 2956.40, 1_000),
+            ("2024-08-19", 2956.40, 2990.0, 2940.0, 2976.80, 2_000),
+            ("2024-08-20", 2976.80, 3010.0, 2960.0, 3000.00, 3_000),
+        ]
+    }))
+    window = {"symbol": "RELIANCE", "start": "2024-08-16", "end": "2024-08-21", "actions": True}
+    # The recorded NSE payload through the real parser, so the ex-date and the rupee amount under
+    # test are NSE's. The default StubCorporateActionsClient carries nothing, which is the other
+    # half of this file's story and is asserted in the refusal test just below.
+    engine = _engine(actions_client=_RecordedActionsClient())
+
+    adjusted = await engine.fetch_history(auto_adjust=False, **window)
+    auto = await engine.fetch_history(auto_adjust=True, **window)
+
+    assert "Adj Close" not in auto.columns
+    assert list(auto.columns) == [
+        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+    ]
+    # The load-bearing assertion: True returns the ADJUSTED prices, so its Close is the other
+    # frame's Adj Close. The fixture's ratio is not 1.0, so a pure column drop fails this.
+    assert auto["Close"].tolist() == pytest.approx(adjusted["Adj Close"].tolist(), rel=1e-12)
+    ratio = (adjusted["Adj Close"] / adjusted["Close"]).tolist()
+    assert ratio == pytest.approx([1.0 - 10.0 / 2956.40, 1.0, 1.0], rel=1e-12)
+    # Volume and the action columns are not prices and do not move.
+    assert auto["Volume"].tolist() == adjusted["Volume"].tolist()
+    assert auto["Stock Splits"].tolist() == adjusted["Stock Splits"].tolist()
+
+
+async def test_auto_adjust_true_still_refuses_when_no_real_actions_exist(stub_bhavcopy):
+    """
+    The refusal that was KEPT, deliberately, and the case that makes it necessary.
+
+    With no ex-dated corporate-actions feed, ``Adj Close`` is not an adjusted series, and scaling
+    Open/High/Low/Close by it would return unadjusted prices under an adjusted column list -- the
+    exact defect ``auto_adjust=True`` is supposed to mean "not". The stub feeds a single 2024-06
+    bar and the client carries no recorded actions, so no factor is derived and the call refuses.
+    """
+    stub_bhavcopy()
     with pytest.raises(AdjustmentNotAvailableError) as exc:
-        await _engine().fetch_history(symbol="RELIANCE", auto_adjust=True)
-    message = str(exc.value).lower()
-    assert "adjustment factor" in message
-    assert "corporate-actions" in message or "corporate actions" in message
-    assert calls == [], "the rejection must happen before any request is made"
+        await _engine().fetch_history(symbol="RELIANCE", auto_adjust=True, actions=True)
+    message = str(exc.value)
+    assert "no corporate-actions feed with real" in message, message
+    assert "would fabricate history" in message, message
 
 
 def test_auto_adjust_is_typed_and_derived_from_the_package_base():
@@ -473,12 +522,40 @@ def test_ticker_history_returns_real_bars_and_flags_them(stub_bhavcopy):
     assert df.attrs["bfinance_synthetic_ohlc"] is False
 
 
-def test_ticker_history_forwards_the_source_choice(stub_bhavcopy):
-    calls = stub_bhavcopy()
+def test_ticker_history_forwards_auto_adjust_without_dying_on_it(stub_bhavcopy):
+    """
+    This test used to assert that ``Ticker.history(auto_adjust=True)`` raises and spends no request.
+
+    Both halves of that were consequences of the unconditional raise, and both are now wrong. The
+    public entry point must not die on a keyword yfinance accepts by default, and the call must
+    spend its request -- the refusal that is still correct (``actions=False`` has no factor to
+    apply) is decided locally and is covered in
+    ``tests/test_ohlcv_auto_adjust_true.py::test_the_refusal_still_fires_when_a_request_would_have_been_wasted``.
+
+    What is asserted here is the forwarding, which is this layer's only job: the flag reaches
+    ``fetch_history`` and the frame that comes back is the adjusted one.
+    """
+    calls = stub_bhavcopy(result=_market_frame({
+        "RELIANCE": [
+            ("2024-08-16", 2900.0, 2970.0, 2890.0, 2956.40, 1_000),
+            ("2024-08-19", 2956.40, 2990.0, 2940.0, 2976.80, 2_000),
+        ]
+    }))
     t = _ticker(stub_bhavcopy)
-    with pytest.raises(AdjustmentNotAvailableError):
-        t.history(auto_adjust=True)
-    assert calls == []
+    t.ohlcv_engine = OHLCVEngine(
+        t.screener_client, corporate_actions_client=_RecordedActionsClient()
+    )
+    df = t.history(
+        period="5d", start="2024-08-16", end="2024-08-20", actions=True, auto_adjust=True
+    )
+    assert calls, "the request is now made, because the call is answered rather than refused"
+    assert "Adj Close" not in df.columns
+    # The two-frame identity: the same window with auto_adjust=False puts exactly these closes in
+    # its Adj Close column. That is the whole of yfinance's auto_adjust=True.
+    plain = t.history(
+        period="5d", start="2024-08-16", end="2024-08-20", actions=True, auto_adjust=False
+    )
+    assert df["Close"].tolist() == pytest.approx(plain["Adj Close"].tolist(), rel=1e-12)
 
 
 async def test_ticker_history_async_reports_real_bars(stub_bhavcopy):

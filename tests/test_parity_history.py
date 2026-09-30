@@ -9,7 +9,8 @@ Live tests are marked @pytest.mark.live and capped at RELIANCE.NS 5d.
 import pandas as pd
 import pytest
 
-from bfinance.market.corporate import CorporateActionsEngine
+import bfinance.market.ohlcv as ohlcv_mod
+from bfinance.market.corporate import ACTIONS_SOURCE_NSE, CorporateActionsEngine
 from bfinance.market.ohlcv import OHLCVEngine
 from bfinance.models.company import CompanyProfile
 from bfinance.models.statements import FinancialStatement
@@ -75,7 +76,8 @@ async def _fetch(chart_df, profile=None, actions_client=None, **kwargs):
     # explicit opt-in. The default source is the NSE bhavcopy (real O/H/L) -- see
     # tests/test_nse_bhavcopy_wiring.py for that path.
     # auto_adjust=False: these tests assert the unadjusted contract (Adj Close == Close when
-    # no actions are supplied). auto_adjust=True is now rejected rather than faked.
+    # no actions are supplied). auto_adjust=True works and is exercised below; on the synthetic
+    # path it is refused, because that path is never back-adjusted at all.
     params = {
         "symbol": "TEST", "period": "5d", "actions": False,
         "auto_adjust": False, "ohlc": "synthetic",
@@ -334,18 +336,90 @@ def test_live_history_parity_reliance():
     assert bool((pct <= 0.02).all()), f"max pct diff {float(pct.max()):.4f}"
 
 
-async def test_offline_auto_adjust_true_is_rejected_not_faked():
+async def test_offline_auto_adjust_true_is_refused_on_the_synthetic_path():
     """
-    yfinance's default is auto_adjust=True, which drops "Adj Close" and rescales OHLC. bfinance
-    used to copy that signature while rescaling nothing at all (frames were byte-identical either
-    way, factor 1.0 vs yfinance's measured 0.9954) -- a column list claiming an adjustment that
-    never happened. There is no authoritative factor to apply, so the request is refused loudly.
+    yfinance's default is auto_adjust=True, which drops "Adj Close" and rescales OHLC.
+
+    bfinance used to copy that signature while rescaling nothing at all (frames were
+    byte-identical either way, factor 1.0 vs yfinance's measured 0.9954) -- a column list claiming
+    an adjustment that never happened. That was fixed by refusing the keyword outright, which had
+    a second defect: yfinance 1.7 DEFAULTS auto_adjust to True, so a drop-in that dies on the
+    value its closest competitor reaches by saying nothing is not a drop-in.
+
+    So ``True`` is now implemented (see the next test, and
+    ``tests/test_ohlcv_auto_adjust_true.py`` for the full matrix). What is left of the refusal is
+    the case that is decidable before a request is spent, and the one this file's helper can
+    reach: ``_fetch`` pins ``ohlc="synthetic"``, that path is never back-adjusted, and its
+    Open/High/Low are derived from Close. Scaling an invented high and low by an invented ratio
+    would invent the rest of the bar.
     """
     from bfinance.market.ohlcv import AdjustmentNotAvailableError
 
     with pytest.raises(AdjustmentNotAvailableError) as exc:
         await _fetch(_synthetic_chart_frame(), auto_adjust=True)
-    assert "adjustment factor" in str(exc.value).lower()
+    message = str(exc.value)
+    assert "ohlc='synthetic'" in message, message
+    assert "DERIVES Open/High/Low from Close" in message, message
+
+
+async def test_offline_auto_adjust_true_lands_on_the_adjusted_series_on_the_bhavcopy_path(
+    monkeypatch,
+):
+    """
+    The positive half, on the path where the factors are real: the default works and ``True`` now
+    works too, and ``True``'s Close is ``False``'s Adj Close.
+
+    Offline, so the honest limit of the claim is recorded rather than hidden. The split stub
+    declares a 2:1 ratio, which halves every earlier bar exactly, so the ratio the two frames
+    disagree by is 0.5 rather than something that could be float noise. No dividend is declared, so
+    this is the share-count half of the rescaling; the dividend half -- the one that makes
+    ``Adj Close`` differ from ``Close`` at all, and so the half a 1.0-ratio fixture cannot see --
+    is asserted against RELIANCE's recorded NSE payload in ``tests/test_ohlcv_auto_adjust_true.py``.
+    """
+    from bfinance.nse.corporate_actions import ACTION_COLUMNS
+
+    index = pd.DatetimeIndex(
+        pd.to_datetime(["2024-03-28", "2024-03-31", "2024-04-01"]), name="Date"
+    )
+    bars = pd.DataFrame(
+        [[100.0, 102.0, 99.0, 101.0, 1000], [101.0, 103.0, 100.0, 102.0, 2000],
+         [102.0, 104.0, 101.0, 103.0, 1500]],
+        columns=["Open", "High", "Low", "Close", "Volume"],
+        index=pd.MultiIndex.from_arrays(
+            [index, pd.Index(["TEST"] * 3, dtype=object, name="Symbol")],
+            names=["Date", "Symbol"],
+        ),
+    )
+    bars["Volume"] = bars["Volume"].astype("int64")
+    monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda start, end, **kw: bars)
+
+    ex_date = pd.DatetimeIndex(["2024-04-02"], name="Date", tz="Asia/Kolkata")
+    rows = {column: pd.Series(0.0, index=ex_date, dtype="float64") for column in ACTION_COLUMNS}
+    rows["Stock Splits"] = pd.Series([2.0], index=ex_date, dtype="float64")
+
+    class _SplitActions:
+        async def actions_async(self, symbol, start=None, end=None, **kwargs):
+            return pd.DataFrame(rows, index=ex_date)
+
+    engine = OHLCVEngine(
+        _StubScreener(_synthetic_chart_frame()), corporate_actions_client=_SplitActions()
+    )
+    window = {"symbol": "TEST", "period": "5d", "actions": True, "start": "2024-03-28",
+              "end": "2024-04-02"}
+
+    unadjusted = await engine.fetch_history(auto_adjust=False, **window)
+    auto = await engine.fetch_history(auto_adjust=True, **window)
+
+    assert list(auto.columns) == [
+        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+    ]
+    assert auto["Close"].tolist() == pytest.approx(unadjusted["Adj Close"].tolist(), rel=1e-12)
+    # The 2:1 ratio is real, so the identity above is not satisfiable by a column drop. The ex-date
+    # is one day past the last bar, so the share-count factor restates every bar in the window.
+    assert unadjusted.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_NSE
+    assert unadjusted["Close"].tolist() == pytest.approx([50.5, 51.0, 51.5])
+    assert unadjusted["Adj Close"].tolist() == pytest.approx([50.5, 51.0, 51.5])
+    assert auto["Volume"].tolist() == [2000, 4000, 3000] == unadjusted["Volume"].tolist()
 
 
 async def test_offline_auto_adjust_false_keeps_the_adjusted_column():

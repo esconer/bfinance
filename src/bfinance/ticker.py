@@ -233,7 +233,7 @@ class Ticker:
     @property
     def info(self) -> Dict[str, Any]:
         """
-        Unified 180+ key metrics dictionary matching yfinance `ticker.info`.
+        Unified 76-key metrics dictionary matching yfinance `ticker.info`.
         """
         if self._info is None or self._profile_degraded:
             profile = self._ensure_profile()

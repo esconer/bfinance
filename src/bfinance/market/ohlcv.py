@@ -90,6 +90,13 @@ def _mirror_state(**overrides) -> dict:
 #: absent: it is a share count, not a rupee price, and it is restated separately by the rule below.
 ADJUSTED_PRICE_COLUMNS = ("Open", "High", "Low", "Close")
 
+#: The one column that carries the full adjusted series, and the only one ``auto_adjust=True``
+#: removes. Named because three places now have to agree about whether it is in the frame --
+#: :meth:`OHLCVEngine._history_columns` (which builds the list), the ``auto_adjust`` scaling (which
+#: reads it), and the rounding step (which rounds it) -- and three string literals is three chances
+#: for them to stop agreeing.
+ADJ_CLOSE_COLUMN = "Adj Close"
+
 #: The one share-count column, and the only column scaled by the **inverse** of the price factor.
 #:
 #: A share-count back-adjustment restates prices onto today's share count, so
@@ -153,7 +160,14 @@ class RealOHLCUnavailableError(BFinanceError):
 
 
 class AdjustmentNotAvailableError(BFinanceError):
-    """auto_adjust=True was requested but no authoritative adjustment factors exist."""
+    """``auto_adjust=True`` was requested and this frame's ``Adj Close`` is not an adjusted series.
+
+    The gate is on the PROVENANCE of the actions, not on the keyword: yfinance's own
+    ``auto_adjust=True`` is implemented, in yfinance's shape, whenever NSE's ex-dated
+    corporate-actions feed answered. It is raised when it could not -- see
+    :func:`_auto_adjust_refusal`, which names which of the four cases applies, because a refusal
+    the caller cannot act on is a different failure from one they can.
+    """
 
 
 def _localize_ist(df: pd.DataFrame) -> pd.DataFrame:
@@ -434,6 +448,125 @@ def _interval_mismatch_detail(requested: str, delivered: Optional[str]) -> Optio
 
 
 # --------------------------------------------------------------------------------------
+# auto_adjust: yfinance's own answer, and the one condition under which bfinance refuses it.
+#
+# yfinance 1.7 DEFAULTS auto_adjust to True and answers it the only way it can: scale the four
+# price columns by ``Adj Close / Close`` and drop "Adj Close" (see yfinance's own
+# ``utils.auto_adjust``). bfinance already carries that exact series -- O/H/L/Close on the
+# cumulative share-count factor and "Adj Close" on that plus the dividend factor, from NSE's
+# own ex-dated corporate-actions feed -- so accepting True is applying a real adjustment in
+# yfinance's shape, not inventing a number. bfinance's own default stays False (pinned by
+# tests/test_adjust_default_drift.py) precisely so that omitting the kwarg keeps the richer
+# frame; the refusal below is a gate on the PROVENANCE of the actions, not on the keyword.
+# --------------------------------------------------------------------------------------
+
+
+def _auto_adjust_refusal(
+    symbol: str,
+    *,
+    synthetic: bool,
+    actions: bool,
+    actions_source: Optional[str],
+    actions_detail: str,
+) -> Optional[str]:
+    """
+    Why ``auto_adjust=True`` cannot be answered honestly on this call, or ``None`` when it can.
+
+    The distinction this draws is "no adjustment available" against "adjustment available but
+    the caller refused it". yfinance's ``auto_adjust=True`` is the second case and it is
+    implemented; the first still refuses, because scaling Open/High/Low/Close by an
+    ``Adj Close`` that is not an adjusted series would restate history with a number that
+    never existed -- the one output this package exists to not produce.
+
+    Every message names WHICH of the cases it is. "It did not work" is not actionable; "your
+    actions series is the Screener.in fiscal-year-end approximation, whose ex-dates run 4-5
+    months late and which carries no share-count data at all" is.
+    """
+    if synthetic:
+        return (
+            f"{symbol}: auto_adjust=True is refused on ohlc='synthetic'. That path reads the "
+            f"close-only Screener.in chart feed and DERIVES Open/High/Low from Close, and it is "
+            f"never back-adjusted, so its 'Adj Close' is not an adjusted series: there is no "
+            f"adjustment factor to apply, and scaling an invented high/low by one would invent "
+            f"the rest of the bar too. Use ohlc='bhavcopy' (the default), which reads the real "
+            f"NSE archive and does carry ex-dated corporate-actions factors."
+        )
+    if not actions:
+        return (
+            f"{symbol}: auto_adjust=True is refused with actions=False. With no "
+            f"corporate-actions series requested, bfinance derives no adjustment factor at "
+            f"all, so 'Adj Close' is a copy of 'Close', the ratio would be exactly 1.0, and "
+            f"the call would return the UNADJUSTED prices under an adjusted column list -- the "
+            f"precise defect this refusal exists to prevent. Pass actions=True (the default) "
+            f"to ask for the adjustment."
+        )
+    if actions_source in (None, ACTIONS_SOURCE_NONE):
+        return (
+            f"{symbol}: auto_adjust=True is refused because no corporate-actions feed with real "
+            f"ex-dates answered, so 'Adj Close' is not an adjusted series and scaling "
+            f"Open/High/Low/Close by Adj Close / Close would fabricate history rather than "
+            f"restore it. attrs['bfinance_actions_source'] reads {ACTIONS_SOURCE_NONE!r} on the "
+            f"auto_adjust=False frame this same call would have returned. {actions_detail}"
+        )
+    if actions_source == ACTIONS_SOURCE_SCREENER:
+        return (
+            f"{symbol}: auto_adjust=True is refused because the corporate-actions series behind "
+            f"'Adj Close' is the Screener.in fiscal-year-end approximation and not a real "
+            f"ex-dated feed: its dividend dates run 4-5 months late and it carries no "
+            f"share-count data at all, so the adjustment factor implied by Adj Close / Close is "
+            f"a guess. yfinance's factor is a measurement; bfinance will not restate four price "
+            f"columns by an approximation. The same call with auto_adjust=False returns the "
+            f"frame it has always returned, labelled with "
+            f"attrs['bfinance_actions_source'] == {ACTIONS_SOURCE_SCREENER!r}. {actions_detail}"
+        )
+    return None
+
+
+# --------------------------------------------------------------------------------------
+# The window the caller asked for, and the window the archive can hold.
+#
+# BHAVCOPY_FIRST_DATE is a real upstream limit, so clamping to it is correct. What was not
+# correct was clamping SILENTLY: period='max' and period='5y' both resolved to 2024-01-01 and
+# came back as a frame with a perfect schema, a plausible bar count and no warning in the
+# object at all. A caller cannot tell a truncated window from a complete one by looking at the
+# values, which is the same defect class as the missing bar-interval label -- so the frame now
+# carries it, on the populated frame and the empty one alike.
+# --------------------------------------------------------------------------------------
+
+
+def _window_truncation_detail(requested_start, floor) -> str:
+    """
+    The one sentence naming the requested window and what was delivered instead.
+
+    One function, so the log line and ``attrs`` carry the same text and cannot drift apart --
+    the same rule :func:`_interval_mismatch_detail` follows for the bar-spacing case.
+    """
+    return (
+        f"the requested window starts {requested_start.date()}, but the NSE bhavcopy archive "
+        f"only publishes a full O/H/L tape from {floor.date()} (BHAVCOPY_FIRST_DATE), so the "
+        f"request was clamped to that floor. The bars this frame holds are real and complete "
+        f"for the range they cover, and no bar was invented to cover the gap. The frame is "
+        f"therefore SHORTER than the request asked for while carrying a correct schema and a "
+        f"plausible bar count, so nothing in the values alone reveals it -- which is why it "
+        f"publishes attrs['bfinance_window_truncated']. Ask for start= within the floor, or use "
+        f"ohlc='synthetic' (real Close and Volume, derived O/H/L) for older history."
+    )
+
+
+def _window_truncation_record(requested_start, floor) -> dict:
+    """
+    ``{"truncated": bool, "detail": str}`` for one history call, published on both frames.
+
+    Built inside the two readers that actually clamp rather than recomputed from the caller's
+    arguments. A second copy of that comparison would be a second source of truth, and the day
+    the two disagreed the published flag would be describing a clamp that never happened.
+    """
+    if requested_start is None or floor is None or requested_start >= floor:
+        return {"truncated": False, "detail": ""}
+    return {"truncated": True, "detail": _window_truncation_detail(requested_start, floor)}
+
+
+# --------------------------------------------------------------------------------------
 # The price-source cascade: the seam, the request vocabulary, and the four attrs keys.
 #
 # WHAT IS HERE AND WHY IT IS OPT-IN
@@ -650,6 +783,31 @@ class OHLCVEngine:
     produced the ``Dividends`` / ``Stock Splits`` columns, so a frame built on the legacy
     fiscal-year-end approximation can never be mistaken for one carrying real ex-dates.
 
+    The ``auto_adjust`` keyword, and why the default is not yfinance's
+    ------------------------------------------------------------------
+    yfinance 1.7 **defaults** ``auto_adjust`` to ``True`` and answers it by scaling the four price
+    columns by ``Adj Close / Close`` and dropping ``Adj Close``. bfinance's default is ``False``,
+    and that divergence is deliberate, documented in ``docs/API_REFERENCE.md`` and pinned by
+    ``tests/test_adjust_default_drift.py``: ``False`` is the **strictly richer** answer, because it
+    carries ``Adj Close``, from which every adjusted price in the frame is recoverable. A caller who
+    says nothing therefore loses nothing, and the caller who wants yfinance's literal column set
+    is the one who has to ask for it.
+
+    ``True`` is implemented, in yfinance's own shape, and it is not a second code path: it is the
+    measured ratio between two columns of the frame this method has already built. On the adjusted
+    path that ratio is the dividend factor; on the as-traded path it is the full share-count x
+    dividend factor, which is what ``True`` is asking for anyway -- so the two spellings of the
+    same request give the same answer, which is why the ratio is used rather than the factors
+    re-multiplied. Volume and the action columns are left alone: a share count is not a price.
+
+    What is still refused is ``True`` where ``Adj Close`` is not an adjusted series, because
+    scaling four price columns by a non-adjustment fabricates history. That is a gate on the
+    provenance of the actions rather than on the keyword, and :func:`_auto_adjust_refusal` names
+    which of the four cases applies: the synthetic path, ``actions=False`` (no factor derived at
+    all, so the ratio would be exactly 1.0), no ex-dated feed, and the fiscal-year-end
+    approximation. The first two are refused before a request is spent; the other two can only be
+    decided after the feed has been asked.
+
     Degradation
     -----------
     If the actions feed is unreachable, errors, or does not index the instrument, the frame
@@ -724,6 +882,27 @@ class OHLCVEngine:
     move that never happened. The cascade refuses to spend a request on a source that cannot
     serve the requested basis at all, and the winner's frame is used whole with its own basis
     published. The section above, on the four price-source attrs keys, is the full contract.
+
+    A window the archive cannot fill
+    ---------------------------------
+    :data:`BHAVCOPY_FIRST_DATE` is 2024-01-01, the first date the cookie-free NSE archive
+    publishes a full O/H/L tape, and a request reaching further back is clamped to it. The clamp is
+    a real upstream limit and it is never padded over: no bar is invented to make a ``period="max"``
+    frame look long enough. What it used to be is only a ``logger.warning``, which left the returned
+    object with a correct schema, a plausible bar count and nothing anywhere saying that most of the
+    window was absent -- and nothing in the values reveals it either, because a 2.7-year series is
+    exactly what a 2.7-year series looks like. A five-year volatility computed on it would be
+    wrong with nothing to indicate why.
+
+    So the clamp is published, following the ``bfinance_bar_interval_mismatch`` precedent:
+    ``attrs["bfinance_window_truncated"]`` is a ``bool`` and
+    ``attrs["bfinance_window_truncated_detail"]`` is a sentence naming the requested window start
+    and the floor it was clamped to, so ``period="max"`` and ``period="5y"`` -- which lose
+    different amounts of history -- are tellable apart. Both keys are on **every** frame, the empty
+    one included, and the detail is a ``str`` on all of them, following
+    ``bfinance_price_source_degraded`` / ``_detail`` rather than the detail-or-``None`` spelling of
+    the bar-interval key. The log line and the attrs value are rendered by the same function so
+    they cannot drift apart.
     """
 
     #: The closed vocabulary of ``period`` values, and their lookback in calendar days.
@@ -778,9 +957,18 @@ class OHLCVEngine:
 
     @staticmethod
     def _history_columns(auto_adjust: bool, back_adjust: bool, actions: bool) -> list:
+        """
+        The column list, in yfinance's order: ``Adj Close`` sits at index 4, BETWEEN ``Close``
+        and ``Volume``, not after ``Volume``.
+
+        Spelled as an ``insert(4, ...)`` on a list that does not yet contain "Adj Close", so the
+        index is a position in ``["Open", "High", "Low", "Close", "Volume"]`` -- the gap between
+        ``Close`` and ``Volume``. It reads like an index past the end and is not; yfinance
+        returns ``["Open", "High", "Low", "Close", "Adj Close", "Volume"]`` and so does this.
+        """
         cols = ["Open", "High", "Low", "Close", "Volume"]
         if not auto_adjust and not back_adjust:
-            cols.insert(4, "Adj Close")
+            cols.insert(4, ADJ_CLOSE_COLUMN)
         if actions:
             cols.extend(["Dividends", "Stock Splits"])
         return cols
@@ -887,7 +1075,31 @@ class OHLCVEngine:
                 unconverted. ``attrs["bfinance_adjustment_incomplete"]`` is then a dict naming why
                 (``None`` when the adjustment is complete), and ``attrs["price_basis"]`` names the
                 basis in a machine-readable form.
-            auto_adjust: Refused when True (:class:`AdjustmentNotAvailableError`) -- see below.
+            auto_adjust: ``False`` (default, and **deliberately not** yfinance's ``True``) returns
+                Open/High/Low/Close plus the ``Adj Close`` column. ``True`` performs yfinance's
+                own adjustment -- scale the four price columns by ``Adj Close / Close`` and drop
+                ``Adj Close`` -- and keeps Volume and the action columns untouched, so the columns
+                are exactly ``["Open", "High", "Low", "Close", "Volume"]`` (+ the action columns).
+                That is yfinance's shape, not a bfinance one: the factors are real (NSE ex-dated
+                dividends and bonus / sub-division ratios), so this restates history with the same
+                arithmetic yfinance uses rather than fabricating one.
+
+                The default stays ``False`` on purpose, and the divergence is documented in
+                ``docs/API_REFERENCE.md``. ``False`` is the **strictly richer** answer -- it
+                carries ``Adj Close``, and every adjusted price in the frame can be recovered from
+                it -- so a caller who says nothing gets more, and a caller who wants yfinance's
+                literal column set says so.
+
+                ``True`` still raises :class:`AdjustmentNotAvailableError` in the four cases where
+                ``Adj Close`` is not an adjusted series, because scaling four price columns by a
+                non-adjustment is exactly the fabrication this package exists to prevent:
+                ``ohlc="synthetic"`` (derived O/H/L, never back-adjusted), ``actions=False`` (no
+                factor derived at all, so the ratio would be exactly 1.0 and the call would return
+                unadjusted prices under an adjusted column list), an actions feed that answered with
+                no ex-dated rows, and the Screener.in fiscal-year-end approximation (ex-dates 4-5
+                months late and no share-count data whatsoever). Each message names which case it
+                is. The first two are decided before any request is spent; the other two can only
+                be decided after the feed has been asked.
             mirror: opt in to reading the local :mod:`bfinance.mirror` SQLite tape before the
                 network. ``None`` (the default) consults :data:`MIRROR_ENV_VAR` instead and, with
                 that unset, is **off**: no ``Mirror`` is constructed, no file is opened, no query
@@ -905,10 +1117,13 @@ class OHLCVEngine:
 
         yfinance 1.7.0 parity notes (measured live, bhavcopy / yfinance over
         2024-09-01..2024-11-15):
-        - auto_adjust defaults to False and True is refused -- but for a *column-set* reason now,
-          not a missing-input one. The default path already returns yfinance's adjusted basis, so
-          the only thing auto_adjust=True would change is dropping "Adj Close" and the action
-          columns, which bfinance keeps.
+        - auto_adjust defaults to False, which is a documented divergence from yfinance (whose own
+          default is True) and the safer one: False is the strictly richer column set, carrying
+          "Adj Close", from which every adjusted price is recoverable. auto_adjust=True is
+          IMPLEMENTED, in yfinance's own shape -- scale O/H/L/C by "Adj Close" / "Close", drop
+          "Adj Close", leave Volume and the action columns alone -- because the factors it needs
+          are already computed and already real. It is still REFUSED in the four cases listed
+          under the argument above, where "Adj Close" is not an adjusted series.
         - The default path is back-adjusted and matches yfinance bar-for-bar: RELIANCE and
           HDFCBANK were 14/53 and 0/53 before the fix and 53/53 (all four of O/H/L/C, to within
           1e-4) after. With no dividend ex-date inside the window -- which is the case for both --
@@ -924,6 +1139,13 @@ class OHLCVEngine:
           size: RELIANCE 0.86%, HDFCBANK 3.03% on 2024-09-02. O/H/L/C are unaffected (dividends
           are not on them), and the share-count factor has no such gap because it needs no price.
         - back_adjust=True drops "Adj Close" (no-op scale, same reason).
+        - A window older than the bhavcopy archive is CLAMPED to :data:`BHAVCOPY_FIRST_DATE`,
+          never refused and never padded, and the clamp is published on the frame:
+          ``attrs["bfinance_window_truncated"]`` is a bool and
+          ``attrs["bfinance_window_truncated_detail"]`` is a sentence naming the requested
+          window start and the floor it was clamped to. Both keys are on every frame, the empty
+          one included, so ``period="max"`` and ``period="5y"`` cannot return a plausible-looking
+          short series without saying so.
         - end dates are exclusive (start inclusive), matching yfinance.
         - interval="1wk" resamples daily bars into Monday-labeled weekly
           bars (Open=first, High=max, Low=min, Close=last, Volume=sum,
@@ -936,7 +1158,10 @@ class OHLCVEngine:
           daily bars (yfinance returns identical frames for them here).
 
         Raises:
-            AdjustmentNotAvailableError: ``auto_adjust=True``.
+            AdjustmentNotAvailableError: ``auto_adjust=True`` on a call where ``Adj Close`` is
+                not an adjusted series -- ``ohlc="synthetic"``, ``actions=False``, an empty
+                frame, no ex-dated actions feed, or the Screener.in fiscal-year-end
+                approximation. The message names which of the five it is.
             RealOHLCUnavailableError: ``ohlc="bhavcopy"`` and the archive could not serve the
                 window. Never answered with fabricated bars.
             TickerNotFoundError: the archive answered but holds no rows for this symbol and
@@ -975,25 +1200,20 @@ class OHLCVEngine:
                 f"source=/sources=."
             )
         if auto_adjust:
-            raise AdjustmentNotAvailableError(
-                "auto_adjust=True is still refused by bfinance, but the reason is now a "
-                "column-set difference rather than a missing input. Adjustment factors DO "
-                "exist and are real: bfinance reads dividends (true ex-date, rupees actually "
-                "payable) and bonus / face-value-sub-division ratios from NSE's own "
-                "corporate-actions feed (bfinance.nse.corporate_actions), and it already "
-                "applies them -- the default auto_adjust=False path returns a back-adjusted "
-                "series, with Open/High/Low/Close carrying the cumulative share-count factor "
-                "over the instrument's whole history and 'Adj Close' carrying that plus the "
-                "dividend factor, which is the yfinance basis. yfinance's "
-                "auto_adjust=True answers the same question with a DIFFERENT column set: it "
-                "drops 'Adj Close' and the corporate-action columns. bfinance keeps them, so "
-                "accepting True would silently change which columns come back -- a worse "
-                "surprise than a refusal. For the as-traded series (what actually printed on "
-                "the exchange) pass adjust_corporate_actions=False; either way "
-                "df.attrs['bfinance_corporate_actions_applied'] records the basis of the "
-                "prices you got, and df.attrs['bfinance_actions_source'] records where the "
-                "factor came from."
-            )
+            # Two of the four refusals are decidable LOCALLY, before a request is spent: the pair
+            # (ohlc, actions) is a local vocabulary that fetching more cannot change. The other two
+            # depend on which actions feed actually answered, which is not knowable until it has
+            # been asked, and they are raised further down. Deciding them here would mean refusing
+            # every auto_adjust=True call, which is the defect this replaces: yfinance 1.7 DEFAULTS
+            # auto_adjust to True, and a drop-in that dies on the value it defaults to is not a
+            # drop-in.
+            if ohlc == "synthetic" or not actions:
+                raise AdjustmentNotAvailableError(
+                    _auto_adjust_refusal(
+                        symbol, synthetic=ohlc == "synthetic", actions=actions,
+                        actions_source=ACTIONS_SOURCE_NONE, actions_detail="",
+                    )
+                )
         norm_interval = (interval or "1d").lower()
         if norm_interval in ("1d", "1day", "daily"):
             resample = None
@@ -1062,8 +1282,12 @@ class OHLCVEngine:
             price_record = self._direct_price_source_record(
                 "synthetic", router_present=self.price_sources is not None
             )
+            # The archive floor is a property of the bhavcopy tape, and this path does not read
+            # that tape, so there is nothing to clamp and nothing to report. Said explicitly so a
+            # consumer reading one key on every frame does not have to know which feed was used.
+            window_record = {"truncated": False, "detail": ""}
         elif cascade_on:
-            bars, mirror_state, price_record = await self._fetch_cascade_bars(
+            bars, mirror_state, price_record, window_record = await self._fetch_cascade_bars(
                 symbol, clean_symbol, start, end, days, price_names, mirror
             )
             if price_record["degraded"]:
@@ -1073,13 +1297,30 @@ class OHLCVEngine:
                     "%s: price source failover. %s", symbol, price_record["detail"]
                 )
         else:
-            bars, mirror_state = await self._fetch_bhavcopy_bars(
+            bars, mirror_state, window_record = await self._fetch_bhavcopy_bars(
                 symbol, clean_symbol, start, end, days, raise_errors, mirror
             )
             price_record = self._direct_price_source_record("bhavcopy", router_present=False)
         source = mirror_state.get("source") or SOURCE_NETWORK
 
         if bars.empty:
+            if auto_adjust:
+                # No bars means no actions were resolved, so "Adj Close" was never an adjusted
+                # series and there is nothing to scale by. Returning an empty frame here instead
+                # would hand back a frame whose column list says "adjusted" without a single
+                # adjustment having happened -- the exact shape this argument used to produce
+                # silently. Refused, and the reason is the same one the populated path gives when
+                # the actions feed comes back empty.
+                raise AdjustmentNotAvailableError(
+                    _auto_adjust_refusal(
+                        symbol, synthetic=synthetic, actions=actions,
+                        actions_source=ACTIONS_SOURCE_NONE,
+                        actions_detail=(
+                            "No bars were returned for the requested window, so no corporate "
+                            "actions were resolved and no adjustment factor could be derived."
+                        ),
+                    )
+                )
             cols = self._history_columns(auto_adjust, back_adjust, actions)
             empty = pd.DataFrame(
                 columns=cols,
@@ -1118,6 +1359,11 @@ class OHLCVEngine:
             # worst place to leave "which vendor, and did anything fail on the way" unanswered.
             # A consumer reads one key on every frame instead of probing for the absence of one.
             self._publish_price_source(empty, price_record)
+            # The two window keys, on the EMPTY frame too. An empty frame is exactly the frame a
+            # consumer is most likely to treat as "nothing went wrong" -- and a caller who asked
+            # for period='max' and got nothing back needs to know whether the archive floor is
+            # why, which is a question the empty frame was previously unable to answer.
+            self._publish_window_truncation(empty, window_record)
             return empty
 
         df = bars.copy()
@@ -1201,6 +1447,17 @@ class OHLCVEngine:
         # winner's data is used whole. Measured: HDFCBANK, 2024-12-16..2025-03-13, the vendor
         # close is exactly 0.5x the bhavcopy's on all 62 sessions.
         vendor_adjusted = bool(price_record.get("vendor_adjusted"))
+        if auto_adjust:
+            # The two refusals that could not be decided locally, now that the feed has answered.
+            # Placed BEFORE any column is scaled so a refusal can never leave a half-adjusted
+            # frame behind it, and before `scaled` so the share-count work below is not done for a
+            # call that is about to raise.
+            auto_refusal = _auto_adjust_refusal(
+                symbol, synthetic=synthetic, actions=actions,
+                actions_source=actions_source, actions_detail=actions_detail,
+            )
+            if auto_refusal is not None:
+                raise AdjustmentNotAvailableError(auto_refusal)
         split_source = df.get("Stock Splits") if synthetic else splits_history
         if vendor_adjusted:
             split_factor = pd.Series(1.0, index=df.index)
@@ -1288,7 +1545,36 @@ class OHLCVEngine:
         # the adjusted path it is Close x the dividend factor, and on the as-traded path it is the
         # full adjusted series, recoverable from the published prices. The flag, not the column,
         # tells the two apart.
-        df["Adj Close"] = adjusted_close
+        df[ADJ_CLOSE_COLUMN] = adjusted_close
+
+        if auto_adjust:
+            # yfinance's own shape, reproduced rather than approximated: utils.auto_adjust scales
+            # Open/High/Low/Close by "Adj Close" / "Close" and drops the "Adj Close" column, leaving
+            # Volume and the action columns exactly as they were. The drop is not written here --
+            # _history_columns below already omits it whenever auto_adjust is True, the same way it
+            # omits it for back_adjust -- so there is one place that decides the column set.
+            #
+            # The ratio, and not split_factor * dividend_factor, because the ratio is the definition
+            # and it is measured off this frame's own two columns. On the adjusted path Close
+            # already carries split_factor, so the ratio reduces to the dividend factor and the two
+            # spellings agree; on the as-traded path (adjust_corporate_actions=False) Close carries
+            # nothing and the ratio is the full share-count x dividend factor, which is what
+            # auto_adjust=True is asking for anyway. Spelling it as the ratio is what makes the two
+            # paths identical instead of two slightly different answers to one question.
+            #
+            # Volume is deliberately NOT scaled. It has already been restated by the inverse
+            # share-count factor above, which is what keeps price * volume continuous across a
+            # share-count event, and a dividend is a rupee amount paid out of the price -- not a
+            # change in the number of shares that traded. yfinance leaves it alone for the same
+            # reason, and a share count multiplied by a dividend ratio is not a share count.
+            ratio = (df[ADJ_CLOSE_COLUMN] / df["Close"]).astype(float)
+            # A zero or absent close would make the ratio inf/NaN, and a NaN here would silently
+            # poison an entire price column. 1.0 is the only defensible fallback: a bar with no
+            # close carries no information about its own adjustment, and the alternative -- letting
+            # the NaN through -- would destroy a real value to express a real absence.
+            ratio = ratio.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+            for column in ADJUSTED_PRICE_COLUMNS:
+                df[column] = df[column].astype(float) * ratio
 
         # The one part of the adjustment this call cannot make, named rather than buried in a
         # docstring: a dividend with an ex-date after the last bar needs the close on the day
@@ -1306,11 +1592,16 @@ class OHLCVEngine:
                 ]
 
         if rounding:
-            df["Open"] = df["Open"].round(2)
-            df["High"] = df["High"].round(2)
-            df["Low"] = df["Low"].round(2)
-            df["Close"] = df["Close"].round(2)
-            df["Adj Close"] = df["Adj Close"].round(2)
+            # Rounded AFTER the auto_adjust scaling, so what is rounded is what is returned.
+            for column in ADJUSTED_PRICE_COLUMNS:
+                df[column] = df[column].round(2)
+            # "Adj Close" is rounded only when it survives into the frame, and the question of
+            # whether it survives is asked of _history_columns rather than of df.columns here --
+            # one function owns the column set, and a second spelling of the same condition is a
+            # second thing that can drift. auto_adjust=True has already removed the column by
+            # this point, and rounding one that is not there is a KeyError.
+            if ADJ_CLOSE_COLUMN in self._history_columns(auto_adjust, back_adjust, actions):
+                df[ADJ_CLOSE_COLUMN] = df[ADJ_CLOSE_COLUMN].round(2)
 
         df = df[self._history_columns(auto_adjust, back_adjust, actions)]
         df.index.name = "Date"
@@ -1410,6 +1701,11 @@ class OHLCVEngine:
         # frame too (see the early return), because a consumer must be able to read one key on
         # every frame this method returns rather than probing for the absence of one.
         self._publish_price_source(df, price_record)
+        # And the two window keys, on the populated frame for the same reason: a consumer must be
+        # able to read one key on every frame this method returns, truncated or not, rather than
+        # probing for the absence of one -- and the truncated frame is the populated one, since a
+        # period='max' request that was clamped still comes back full of real, correct bars.
+        self._publish_window_truncation(df, window_record)
         return df
 
     # ------------------------------------------------------------------ the price-source cascade
@@ -1429,21 +1725,25 @@ class OHLCVEngine:
         names: Sequence[str],
         mirror,
     ) -> tuple:
-        """Bars from the source cascade, plus the transport record and the provenance record.
+        """Bars from the source cascade, plus the transport, provenance and window records.
 
-        Returns ``(rows, mirror_state, price_record)``.
+        Returns ``(rows, mirror_state, price_record, window_record)``.
 
         The whole-market-to-one-symbol narrowing happens here rather than in each source, because
         the registry rows are deliberately inconsistent about it: ``nse-bhavcopy`` is a whole-market
         archive with no symbol argument, while the other three are per-symbol. Narrowing in one
         place is what lets the same post-processing run over any of them.
 
-        The window is clamped to :data:`BHAVCOPY_FIRST_DATE` with the same log line the direct path
-        uses, and deliberately so: the request the cascade carries is a *date range*, and a source
-        that costs one request per day in the span it is handed must never be asked for 25 years
-        because a caller wrote ``period="max"``. Clamping can only ever ask for less, and the
-        per-source window filtering downstream (the ``start``/``end`` filter, and
+        The window is clamped to :data:`BHAVCOPY_FIRST_DATE`, and the decision is reported rather
+        than only logged -- the cascade clamps here for the same reason the direct reader does: the
+        request it carries is a *date range*, and a source that costs one request per day in the
+        span it is handed must never be asked for 25 years because a caller wrote ``period="max"``.
+        Clamping can only ever ask for less, and the per-source window filtering downstream (the
+        ``start``/``end`` filter, and
         :func:`bfinance.sources.price_provider.narrow` on that vendor's own route) is unaffected.
+        ``window_record`` is returned rather than logged-and-forgotten so the caller can publish it
+        on the frame; a clamp that only reaches the log is a clamp the returned object cannot
+        report, which is the whole defect.
         """
         # Lazy: tests/test_public_surface.py requires that `import bfinance` does not pull this
         # layer in, and this is the only place in the package that needs it.
@@ -1457,12 +1757,11 @@ class OHLCVEngine:
         start_ts = self._window_start(start, days)
         end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
         floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
-        if start_ts < floor:
-            logger.warning(
-                "%s: requested window starts %s, before the bhavcopy archive begins (%s). "
-                "Returning only the covered range; use ohlc='synthetic' for older history.",
-                symbol, start_ts.date(), BHAVCOPY_FIRST_DATE,
-            )
+        window_record = _window_truncation_record(start_ts, floor)
+        if window_record["truncated"]:
+            # The SAME sentence the frame will carry, from the same function, so the log and
+            # attrs cannot drift apart -- the rule _interval_mismatch_detail follows.
+            logger.warning("%s: %s", symbol, window_record["detail"])
             start_ts = floor
 
         request = {
@@ -1543,7 +1842,7 @@ class OHLCVEngine:
                 "or accept that the vendor attrs['%s'] names is being fetched over the network.",
                 symbol, PRICE_SOURCE_ATTR,
             )
-        return bars, mirror_state, self._price_source_record(resolved, planned)
+        return bars, mirror_state, self._price_source_record(resolved, planned), window_record
 
     @staticmethod
     def _requested_price_basis(names: Sequence[str], registry) -> Any:
@@ -1772,6 +2071,23 @@ class OHLCVEngine:
         return frame
 
     @staticmethod
+    def _publish_window_truncation(frame: pd.DataFrame, record: Mapping) -> pd.DataFrame:
+        """Write the two window keys onto a frame, populated or empty, and return it.
+
+        ``bfinance_window_truncated`` is the bool a consumer branches on and
+        ``bfinance_window_truncated_detail`` is always a ``str`` -- empty when nothing was clamped,
+        a sentence when it was. Both are present on every frame, following
+        ``bfinance_price_source_degraded`` / ``_detail`` rather than
+        ``bfinance_bar_interval_mismatch``, because a detail-or-``None`` key forces the reader to
+        know that ``None`` means "fine" and ``""`` means "fine" is a different answer, while a
+        stable ``str`` does not. The check is
+        ``df.attrs["bfinance_window_truncated"] is True`` and never a probe for absence.
+        """
+        frame.attrs["bfinance_window_truncated"] = bool(record.get("truncated"))
+        frame.attrs["bfinance_window_truncated_detail"] = record.get("detail") or ""
+        return frame
+
+    @staticmethod
     def _price_basis(synthetic: bool, scaled: bool, vendor_adjusted: bool = False) -> str:
         """Name the rupee-price basis of this frame, as one of the ``PRICE_BASIS_*`` constants.
 
@@ -1926,16 +2242,18 @@ class OHLCVEngine:
         """
         Real published Open/High/Low/Close/Volume for one symbol, and where they were read from.
 
-        Returns ``(rows, state)``; ``state["source"]`` is one of :data:`SOURCE_NETWORK`,
-        :data:`SOURCE_MIRROR` or :data:`SOURCE_MIRROR_NETWORK`, and the whole dict is published
-        on ``df.attrs["bfinance_mirror"]``.
+        Returns ``(rows, state, window_record)``; ``state["source"]`` is one of
+        :data:`SOURCE_NETWORK`, :data:`SOURCE_MIRROR` or :data:`SOURCE_MIRROR_NETWORK`, and the
+        whole dict is published on ``df.attrs["bfinance_mirror"]``. ``window_record`` is
+        ``{"truncated": bool, "detail": str}`` and is published as the two
+        ``bfinance_window_truncated*`` keys.
 
         The whole-market range is fetched ONCE and sliced to ``clean_symbol`` here, because a
         single daily file already covers every NSE scrip: one request per symbol would
-        multiply traffic for no extra data. A window older than the archive is clamped with a
-        warning (logged, not silent); an archive that cannot answer at all raises rather than
-        returning fabricated bars, since an empty frame would be indistinguishable from
-        "this instrument has no data".
+        multiply traffic for no extra data. A window older than the archive is clamped, with the
+        clamp both logged and returned so the frame can say so; an archive that cannot answer at
+        all raises rather than returning fabricated bars, since an empty frame would be
+        indistinguishable from "this instrument has no data".
 
         THE MIRROR DECISION, which is the whole reason this method has a mirror argument
         ---------------------------------------------------------------------------
@@ -1983,12 +2301,11 @@ class OHLCVEngine:
         start_ts = self._window_start(start, days)
         end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
         floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
-        if start_ts < floor:
-            logger.warning(
-                "%s: requested window starts %s, before the bhavcopy archive begins (%s). "
-                "Returning only the covered range; use ohlc='synthetic' for older history.",
-                symbol, start_ts.date(), BHAVCOPY_FIRST_DATE,
-            )
+        window_record = _window_truncation_record(start_ts, floor)
+        if window_record["truncated"]:
+            # The SAME sentence the frame will carry, from the same function, so the log and
+            # attrs cannot drift apart -- the rule _interval_mismatch_detail follows.
+            logger.warning("%s: %s", symbol, window_record["detail"])
             start_ts = floor
 
         start_iso = start_ts.strftime("%Y-%m-%d")
@@ -2009,7 +2326,7 @@ class OHLCVEngine:
                 "%s: no bhavcopy rows in %s..%s. Returning empty DataFrame.",
                 symbol, start_ts.date(), end_ts.date(),
             )
-        return rows, state
+        return rows, state, window_record
 
     # ------------------------------------------------------------------ the mirror decision
     @staticmethod
