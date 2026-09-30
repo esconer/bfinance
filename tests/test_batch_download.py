@@ -161,6 +161,18 @@ def test_download_raise_errors_true_still_collects_good_symbols_first(stub_ticke
 
     The failure is recorded and logged, but the surviving symbols are still returned -- the
     batch is a partial result, not an all-or-nothing operation.
+
+    THE OLD ASSERTION HERE WAS WRONG. It read ``assert not df.empty``, which is satisfied by any
+    frame with one live column -- so it never checked that ``BAD`` appeared at all, and the symbol
+    was in fact being dropped entirely: ``download.py`` did ``continue`` on an upstream exception
+    and on an empty frame, where yfinance 1.7.0 unions ``utils.empty_df()`` and the ticker shows up
+    as an all-NaN column. The test passed over a real divergence from yfinance.
+
+    So the assertion is now that BOTH tickers are columns, with BAD's values all NaN and TCS's
+    real. ``group_by`` is left at its default here on purpose: ``multi_level_index=False`` only
+    takes effect for a single ticker, and a two-ticker request is always a MultiIndex.
+    ``tests/test_download_failed_symbol_column.py`` carries the full shape contract, including
+    ``group_by="ticker"``, the derived column set, and the mutation control.
     """
     calls = {"n": 0}
     orig = _StubTicker.history_async
@@ -175,8 +187,19 @@ def test_download_raise_errors_true_still_collects_good_symbols_first(stub_ticke
 
     stub_ticker.history_async = flaky
     try:
-        df = download(["GOOD", "BAD"], period="5d", multi_level_index=False)
-        assert not df.empty
+        df = download(["GOOD", "BAD"], period="5d")
+        tickers = list(dict.fromkeys(df.columns.get_level_values(1)))
+        assert tickers == ["BAD", "GOOD"], (
+            f"both requested tickers must be columns; got {tickers!r}. A dropped symbol is "
+            "invisible to a caller iterating the columns, and df[('Close','BAD')] raises KeyError "
+            "where yfinance returns NaNs."
+        )
+        bad = df.xs("BAD", axis=1, level=1)
+        assert bad.isna().all().all(), (
+            f"BAD must be all NaN -- not 0.0, which would read as a flat-traded price; got\n{bad}"
+        )
+        good = df.xs("GOOD", axis=1, level=1)
+        assert not good.isna().any().any(), f"GOOD answered and must stay answered; got\n{good}"
     finally:
         stub_ticker.history_async = orig
 

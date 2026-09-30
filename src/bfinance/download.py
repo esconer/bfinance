@@ -8,10 +8,43 @@ from typing import List, Optional, Sequence, Union
 from datetime import datetime
 import pandas as pd
 
-from bfinance.market.ohlcv import resolve_price_source_names
+from bfinance.market.ohlcv import OHLCVEngine, resolve_price_source_names
 from bfinance.ticker import Ticker
 
 logger = logging.getLogger(__name__)
+
+
+def _all_nan_frame(columns: Sequence[str]) -> pd.DataFrame:
+    """
+    The stand-in for a symbol that produced nothing: every column, every value ``NaN``.
+
+    yfinance's ``yfinance.utils.empty_df()``, which ``multi._download_one`` puts in ``ctx.dfs``
+    for any ticker whose ``history()`` raised, and which ``download()`` then unions in with the
+    survivors. Read from yfinance 1.7.0 in this env::
+
+        def empty_df(index=None):
+            if index is None:
+                index = []
+            empty = _pd.DataFrame(index=index, data={
+                'Open': _np.nan, 'High': _np.nan, 'Low': _np.nan,
+                'Close': _np.nan, 'Adj Close': _np.nan, 'Volume': _np.nan})
+            empty.index.name = 'Date'
+            return empty
+
+    Two properties are load-bearing and both are why this is not a zero-filled frame. The index is
+    empty, so the union contributes no rows and the shared index is the survivors'; and the values
+    are ``NaN``, not ``0.0``, because a zero is a price. A frame of zeros is a claim about the
+    market; ``NaN`` is an admission that there is no data, and ``df[("Close", "BAD")].isna()`` can
+    tell them apart.
+
+    ``columns`` is supplied by the caller rather than hardcoded, and deliberately: yfinance's own
+    six-column list is not the right answer here, because ``auto_adjust`` defaults to ``True``
+    (commit e6b4913) and a ``True`` frame has no ``Adj Close``. See :meth:`OHLCVEngine.
+    _history_columns`.
+    """
+    frame = pd.DataFrame(index=[], data={name: float("nan") for name in columns})
+    frame.index.name = "Date"
+    return frame
 
 
 async def _download_single(
@@ -105,10 +138,26 @@ async def _download_batch_async(
     tasks = [_worker(sym) for sym in tickers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # The column set an absent symbol is given is the one THIS call asked for, not a constant.
+    # yfinance's own empty_df() hardcodes six columns including "Adj Close", which is only right for
+    # auto_adjust=False; with auto_adjust=True (the default since e6b4913) a real frame has five.
+    # Hardcoding six would give a failed symbol a column no surviving symbol has, so the frame would
+    # be internally inconsistent on the very path most callers take. _history_columns is the single
+    # place that decides this list, so it is asked rather than re-spelled.
+    empty_columns = OHLCVEngine._history_columns(
+        auto_adjust=auto_adjust, back_adjust=back_adjust, actions=actions
+    )
+
     data_frames = {}
     first_upstream_error: Optional[BaseException] = None
     empty_symbols: list = []
-    for res in results:
+    failed_symbols: list = []
+    answered_symbols = 0
+    # asyncio.gather preserves the order of the awaitables it was given, so results[i] is the answer
+    # for tickers[i]. That correspondence is the only way to name a symbol whose call raised: the
+    # exception object carries no symbol of its own, and a column with no name to put it under is
+    # the bug being fixed here.
+    for sym, res in zip(tickers, results):
         if isinstance(res, (NotImplementedError, ValueError)):
             raise res
         if isinstance(res, BaseException):
@@ -118,26 +167,44 @@ async def _download_batch_async(
             logger.warning("download: symbol failed: %s: %s", type(res).__name__, res)
             if first_upstream_error is None:
                 first_upstream_error = res
+            failed_symbols.append(sym)
+            # yfinance unions empty_df() here, so the ticker appears as an all-NaN column. Dropping
+            # it instead made the frame disagree with the request: a caller looping over
+            # df.columns.get_level_values(1) saw fewer tickers than it asked for, and indexing the
+            # missing one raised KeyError where yfinance returns NaNs.
+            data_frames[sym.upper()] = _all_nan_frame(empty_columns)
             continue
         if isinstance(res, tuple):
             sym, df = res
             if df is None or df.empty:
                 empty_symbols.append(sym)
+                # Same union as above. An empty answer is an answer: the symbol was asked about and
+                # it had no bars, which is a fact about the window, not a reason to remove its name
+                # from the result.
+                data_frames[sym.upper()] = _all_nan_frame(empty_columns)
                 continue
             data_frames[sym.upper()] = df
+            answered_symbols += 1
 
     if first_upstream_error is not None and raise_errors:
         raise first_upstream_error
 
     if not data_frames:
-        if empty_symbols and logger.isEnabledFor(logging.WARNING):
+        return pd.DataFrame()
+
+    if not answered_symbols:
+        # Every requested symbol is now present as an all-NaN column. The warning stays: a frame of
+        # columns is not a frame of data, and "which symbols produced nothing" is still the first
+        # question of a fully-blank result. Counted across both ways of not answering, which is what
+        # the old single list could no longer do once the failed symbols were kept.
+        absent = empty_symbols + failed_symbols
+        if absent and logger.isEnabledFor(logging.WARNING):
             logger.warning(
                 "download: no data for %d/%d symbol(s): %s",
-                len(empty_symbols),
+                len(absent),
                 len(tickers),
-                ", ".join(sorted(empty_symbols)[:10]),
+                ", ".join(sorted(absent)[:10]),
             )
-        return pd.DataFrame()
 
     def _yf_naive(frame: pd.DataFrame) -> pd.DataFrame:
         # yfinance download()/Tickers.history return tz-naive indexes in this
@@ -231,6 +298,15 @@ def download(
 
     Returns:
         pd.DataFrame: MultiIndex (or single) DataFrame with OHLCV data.
+
+        Every requested ticker appears as a column, including one that failed or came back empty:
+        such a column is all-``NaN``, exactly as yfinance 1.7.0 answers (``utils.empty_df()`` unioned
+        in by ``multi._download_one``). It used to be dropped instead, so ``df.columns`` disagreed
+        with the request and ``df[("Close", "BAD")]`` raised ``KeyError`` where yfinance returns
+        NaNs -- the worst outcome for a caller swapping symbols in, because a renamed ticker would
+        look like a column-set change rather than a failure. The empty columns are the ones the call
+        asked for (so no ``Adj Close`` when ``auto_adjust=True``), taken from
+        :meth:`bfinance.market.ohlcv.OHLCVEngine._history_columns` rather than a hardcoded list.
 
     Note:
         ``raise_errors`` is an EXPLICIT parameter. It was previously reachable only through
