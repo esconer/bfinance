@@ -461,6 +461,10 @@ async def test_auto_adjust_true_is_still_refused_when_the_feed_is_not_ex_dated(b
     package exists to not produce, so ``True`` still refuses -- but the message now names WHICH
     case it is, instead of claiming there are no factors at all. There are: they are real when the
     feed answers, and absent when it does not, and the message has to be able to tell the two.
+
+    The screener approximation is the case that is NOT in this set, and that is the second half
+    of the test below: there the prices are real and only the adjustment is missing, so the frame
+    comes back labelled rather than raised.
     """
     from bfinance.market.ohlcv import AdjustmentNotAvailableError
 
@@ -472,15 +476,25 @@ async def test_auto_adjust_true_is_still_refused_when_the_feed_is_not_ex_dated(b
     assert "carries no dividend or split series" not in message
     assert "no corporate-actions feed with real" in message
     assert "would fabricate history" in message
-    # The approximation is a refusal too, and for a different reason -- the two are not the same
-    # defect and a single "it raises" test could not tell them apart.
-    with pytest.raises(AdjustmentNotAvailableError) as approx_exc:
-        await _fetch(
-            _StubActionsClient(payload=[]), profile=_screener_profile(), auto_adjust=True
-        )
-    approx_message = str(approx_exc.value)
-    assert "fiscal-year-end approximation" in approx_message
-    assert "corporate-actions" in approx_message
+    # The approximation used to be a refusal too, and the operator measured that wrong. NSE's
+    # feed has no index for an ETF, so MAFANG / HNGSNGBEES / NIFTYBEES all degrade to the
+    # approximation, and the auto_adjust=True default made every one of them RAISE while the same
+    # call returned 21 real bars for NTPC, RELIANCE, WIPRO, CIPLA and INDGN -- a mixed equity +
+    # ETF portfolio lost every ETF, and yfinance returns a frame for the same symbols. So it is
+    # answered unadjusted and labelled instead of thrown away, and this half of the test now pins
+    # that half. The guess is still never multiplied into a price column, which is what
+    # tests/test_ohlcv_approximation_unadjusted.py measures value by value.
+    answered = await _fetch(_StubActionsClient(payload=[]), profile=_screener_profile())
+    assert not answered.empty
+    assert "Adj Close" not in answered.columns
+    assert answered.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_SCREENER
+    assert answered.attrs["bfinance_adjustment_applied"] is False
+    assert "fiscal-year-end approximation" in answered.attrs[
+        "bfinance_adjustment_applied_detail"
+    ], answered.attrs["bfinance_adjustment_applied_detail"]
+    # The as-traded prints, untouched: the frame carries yfinance's column set and bfinance's
+    # prices, which is the whole point of answering rather than refusing.
+    assert answered["Close"].tolist() == pytest.approx([2956.40, 2976.80, 3000.00])
 
 
 # --------------------------------------------------------------------- 5. engine surface

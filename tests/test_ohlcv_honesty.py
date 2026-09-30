@@ -321,6 +321,43 @@ async def test_the_incomplete_key_exists_on_every_frame_so_the_check_needs_no_pr
     assert empty.attrs["bfinance_adjustment_incomplete"] is None
 
 
+async def test_the_adjustment_applied_pair_is_on_every_frame_too(bars):
+    """
+    The second honesty key, and the same rule as the first: present everywhere, never a probe.
+
+    ``bfinance_adjustment_applied`` answers "were the four price columns restated on THIS call",
+    which is not the question ``bfinance_corporate_actions_applied`` answers -- that one is about
+    whether the adjustment is COMPLETE. Both states are real and they disagree on purpose: ITC's
+    demerger means a factor was applied and the frame still does not claim completeness, while a
+    frame returned as-traded under an ``auto_adjust=True`` request was not restated at all. So the
+    pair has to be readable on the complete frame, the incomplete one, the opt-out one and the
+    empty one, with the detail a stable ``str`` -- empty meaning "it was applied", never ``None``,
+    which would force a reader to know two different ways of saying fine.
+    """
+    bars(ITC_DEMERGER_BARS)
+
+    incomplete = await _history(ITC_DEMERGER_BARS, ITC_PAYLOAD)
+    assert incomplete.attrs["bfinance_corporate_actions_applied"] is False
+    assert incomplete.attrs["bfinance_adjustment_applied"] is True, (
+        "a factor WAS applied to these prices; the frame just does not claim to be complete"
+    )
+    assert incomplete.attrs["bfinance_adjustment_applied_detail"] == ""
+
+    as_traded = await _history(ITC_DEMERGER_BARS, ITC_PAYLOAD, adjust_corporate_actions=False)
+    assert as_traded.attrs["bfinance_adjustment_applied"] is False
+    assert isinstance(as_traded.attrs["bfinance_adjustment_applied_detail"], str)
+
+    empty_engine = OHLCVEngine(
+        _Screener(chart_df=pd.DataFrame()), corporate_actions_client=_ActionsClient(ITC_PAYLOAD)
+    )
+    empty = await empty_engine.fetch_history(
+        symbol="ITC", ohlc="synthetic", auto_adjust=False
+    )
+    assert empty.empty
+    assert empty.attrs["bfinance_adjustment_applied"] is False
+    assert "no bars in the requested window" in empty.attrs["bfinance_adjustment_applied_detail"]
+
+
 async def test_the_degradation_is_reported_once_per_frame_and_never_raises(bars, caplog):
     """
     Non-fatal and non-spammy: one line per frame, not one per declined row, and no exception.

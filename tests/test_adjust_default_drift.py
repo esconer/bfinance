@@ -34,6 +34,20 @@ that ``False`` had won by being the strictly richer column set.
 The guard is unchanged in kind: the five layers must still AGREE, because the failure mode it
 exists to catch is a disagreement, not the value. Two distinct failures are now guarded --
 the values drifting apart again, and a layer silently dropping the keyword.
+
+What ``True`` now costs, and the one case it does not answer
+-----------------------------------------------------------
+``True`` is refused where ``Adj Close`` is not an adjusted series AND there is nothing real to
+return instead -- ``ohlc="synthetic"``, an empty frame, and no ex-dated corporate-actions feed
+at all. That set used to include the Screener.in fiscal-year-end approximation, and the cost
+was measured: NSE's feed has no index for an ETF, so MAFANG, HNGSNGBEES and NIFTYBEES all
+degrade to the approximation, and the default this file pins made all three raise while the
+same call returned 21 real bars for NTPC, RELIANCE, WIPRO, CIPLA and INDGN. That is the
+swallowing failure above, at the top of a mixed portfolio, and it is why a refusal is now a
+statement about the ANSWER and not about the keyword. Those three symbols are answered
+as-traded instead, with yfinance's column set and ``attrs["bfinance_adjustment_applied"] is
+False``; see ``tests/test_ohlcv_approximation_unadjusted.py``. The guard does not move either
+way -- the value is still ``True``, and the layers must still agree on it.
 """
 
 import inspect

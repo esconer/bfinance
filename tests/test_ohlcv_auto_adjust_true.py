@@ -23,9 +23,18 @@ What is still refused
 ---------------------
 Scaling four price columns by an ``Adj Close`` that is not an adjusted series is the one output
 this package exists to not produce: it would restate history by a number that never existed. The
-refusal therefore became a gate on the PROVENANCE of the actions, not on the keyword, and it
-still names which of the cases it is. Each case has a test below; a refusal nobody can act on is
-just a different failure.
+refusal is therefore a gate on the PROVENANCE of the actions, not on the keyword, and it still
+names which of the cases it is. Each case has a test below; a refusal nobody can act on is just
+a different failure.
+
+There are **three**. It was four: the Screener.in fiscal-year-end approximation was the fourth
+and is now answered rather than refused, because NSE's corporate-actions feed has no index for
+an ETF, so MAFANG, HNGSNGBEES and NIFTYBEES all land on it -- and the default path raised on all
+three while holding 21 real bars each, which cost an operator with a mixed equity + ETF
+portfolio every one of their ETFs. Those frames come back as-traded, with yfinance's column set
+and ``attrs["bfinance_adjustment_applied"] is False``; the values, the kept refusals and the
+real-feed control are pinned in ``tests/test_ohlcv_approximation_unadjusted.py``, and the test
+below is the pointer from the refusal list.
 
 Offline by construction. The bhavcopy reader is stubbed and the actions stub replays a
 **recorded** NSE payload through the real parser, so the ex-date and rupee amount under test are
@@ -359,16 +368,26 @@ async def test_auto_adjust_true_is_refused_when_no_ex_dated_feed_answered(bars):
     assert ACTIONS_SOURCE_NONE_TXT in message, message
 
 
-async def test_auto_adjust_true_is_refused_on_the_screener_fiscal_year_end_approximation(bars):
+async def test_auto_adjust_true_on_the_screener_approximation_returns_unadjusted(bars):
     """
-    The other feed that answers and is still not an adjustment.
+    The case this file used to pin as the fourth refusal, and which is no longer one.
 
-    The Screener.in fallback dates dividends at fiscal year end, 4-5 months after the true
-    ex-date, and carries no share-count data at all. The ratio it implies is therefore a guess
-    with the right shape, and a guess is exactly what must not be multiplied into four price
-    columns. This is a *different* refusal from the one above with a *different* reason, which is
-    why it is a separate test: a single "it raises" test would pass whichever of the two the code
-    happened to implement.
+    It asserted that ``auto_adjust=True`` raised when the corporate-actions series is the
+    Screener.in fiscal-year-end approximation: dates 4-5 months late, no share-count data at all,
+    so the ratio it implies is a guess with the right shape. The first half of that is still
+    exactly right and is still enforced -- the guess is not multiplied into a price column, and
+    that half of the contract now has its own file. The raise itself was wrong, and the reason
+    is measured rather than argued: NSE's corporate-actions feed has no index for an ETF, so
+    MAFANG, HNGSNGBEES and NIFTYBEES all land here, and the default path raised on all three
+    while the same call returned 21 real bars for NTPC, RELIANCE, WIPRO, CIPLA and INDGN.
+    Refusing returned nothing where the caller had real prices, and yfinance returns a frame for
+    the same symbols.
+
+    So the approximation is ANSWERED: the as-traded prints, yfinance's column set, and
+    ``attrs["bfinance_adjustment_applied"] is False`` with a reason on the frame. The values, the
+    disclosure, the kept refusals and the real-feed control are all pinned in
+    ``tests/test_ohlcv_approximation_unadjusted.py``; what is left here is the shortcut from the
+    refusal list, because this file is where a reader looks for "which cases raise".
     """
     bars()
     engine = OHLCVEngine(
@@ -381,12 +400,14 @@ async def test_auto_adjust_true_is_refused_on_the_screener_fiscal_year_end_appro
     assert plain.attrs["bfinance_actions_source"] == "screener_fy_end_approximation"
     assert plain.attrs["bfinance_actions_share_count_observable"] is False
 
-    with pytest.raises(AdjustmentNotAvailableError) as exc:
-        await engine.fetch_history(symbol="RELIANCE", actions=True, auto_adjust=True, **WINDOW)
-    message = str(exc.value)
-    assert "fiscal-year-end approximation" in message, message
-    assert "4-5 months late" in message, message
-    assert "no share-count data at all" in message, message
+    auto = await engine.fetch_history(
+        symbol="RELIANCE", actions=True, auto_adjust=True, **WINDOW
+    )
+    assert not auto.empty
+    assert "Adj Close" not in auto.columns
+    assert auto.attrs["bfinance_adjustment_applied"] is False
+    assert "fiscal-year-end approximation" in auto.attrs["bfinance_adjustment_applied_detail"]
+    assert "auto_adjust=False" in auto.attrs["bfinance_adjustment_applied_detail"]
 
 
 async def test_auto_adjust_true_is_not_refused_for_actions_false(bars, monkeypatch):
