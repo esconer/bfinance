@@ -668,8 +668,12 @@ async def test_the_four_keys_are_present_on_the_empty_frame_too(monkeypatch):
             {"SOMETHINGELSE": [(date, 1.0, 1.0, 1.0, 1.0, 1) for date in _DATES]}
         ),
     )
+    # auto_adjust=False restores the pre-2026-09-30 default. It has to be explicit here: with
+    # auto_adjust now True by default, an EMPTY frame raises AdjustmentNotAvailableError (there is
+    # no Adj Close to scale by), which would turn a test about attrs keys on an empty frame into a
+    # test about that refusal.
     frame = await OHLCVEngine(_NoScreener()).fetch_history(
-        symbol="RELIANCE", period="5d", actions=False
+        symbol="RELIANCE", period="5d", actions=False, auto_adjust=False
     )
 
     assert frame.empty, "this test is about the EMPTY frame; the archive stub answered"
@@ -695,7 +699,9 @@ async def test_the_four_keys_are_present_on_an_empty_frame_from_the_cascade_too(
     unusable["Close"] = "n/a"
     fetch = _Fetch({BHAVCOPY_SOURCE: unusable})
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, auto_adjust=False
+    )
 
     assert frame.empty
     assert frame.attrs[PRICE_SOURCE_ATTR] == BHAVCOPY_SOURCE, (

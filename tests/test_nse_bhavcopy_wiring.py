@@ -150,6 +150,15 @@ def _engine(chart_df=None, profile=None, actions_client=None):
 
 
 # --------------------------------------------------------------- provenance of the bars
+#
+# ``auto_adjust=False`` is spelled out on every call below because auto_adjust became True by
+# default on 2026-09-30 (it now matches yfinance 1.7). It has to be explicit rather than implied:
+# the default StubCorporateActionsClient here carries no rows, so auto_adjust=True would resolve
+# an actions_source of "none" and refuse, and several of these tests assert the exact AS-TRADED
+# prints or the "Adj Close" column that True drops. Restoring False puts each call back exactly
+# where it was.
+
+
 async def test_default_history_is_real_bhavcopy_bars(stub_bhavcopy):
     """
     The core of the fix: the default path returns the published O/H/L, not an envelope.
@@ -161,7 +170,7 @@ async def test_default_history_is_real_bhavcopy_bars(stub_bhavcopy):
     stub_bhavcopy()
     engine = _engine()
 
-    df = await engine.fetch_history(symbol="RELIANCE", period="1mo", actions=False)
+    df = await engine.fetch_history(symbol="RELIANCE", period="1mo", actions=False, auto_adjust=False)
 
     assert list(df.columns) == ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
     assert df["Open"].tolist() == [100.0, 110.0, 109.0]
@@ -181,7 +190,7 @@ async def test_default_path_never_touches_the_close_only_screener(stub_bhavcopy)
             index=pd.DatetimeIndex(pd.to_datetime(["2024-06-03", "2024-06-04"]), name="Date"),
         )
     )
-    df = await OHLCVEngine(screener).fetch_history(symbol="RELIANCE", actions=False)
+    df = await OHLCVEngine(screener).fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
 
     assert screener.chart_calls == [], "the close-only chart API must not drive the default path"
     assert df["High"].tolist() == [112.0, 113.5, 118.0]
@@ -196,7 +205,7 @@ async def test_one_range_fetch_serves_the_symbol_and_filters_the_market(stub_bha
     calls = stub_bhavcopy()
     engine = _engine()
 
-    df = await engine.fetch_history(symbol="RELIANCE", actions=False)
+    df = await engine.fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
 
     assert len(calls) == 1, "one history() call must not fan out per symbol or per day"
     assert df["Close"].tolist() == [110.0, 109.0, 117.5], "TCS rows leaked into RELIANCE"
@@ -212,7 +221,7 @@ async def test_synthetic_path_is_retained_behind_explicit_opt_in(stub_bhavcopy):
     )
     screener = _StubScreener(chart_df=chart)
     df = await OHLCVEngine(screener).fetch_history(
-        symbol="RELIANCE", period="1mo", actions=False, ohlc="synthetic"
+        symbol="RELIANCE", period="1mo", actions=False, auto_adjust=False, ohlc="synthetic"
     )
 
     assert screener.chart_calls, "the opt-in path must still use the screener feed"
@@ -230,7 +239,10 @@ def test_ohlc_parameter_defaults_to_bhavcopy_everywhere():
     ):
         param = inspect.signature(target).parameters["ohlc"]
         assert param.default == "bhavcopy", f"{target.__qualname__} default changed"
-        assert inspect.signature(target).parameters["auto_adjust"].default is False
+        # Was False, flipped to True on 2026-09-30 to match yfinance 1.7's own default. Pinned
+        # here as well as in tests/test_adjust_default_drift.py because this loop is about the
+        # THREE layers that could drift apart from each other, not about the value being right.
+        assert inspect.signature(target).parameters["auto_adjust"].default is True
 
 
 async def test_unknown_ohlc_source_is_rejected(stub_bhavcopy):
@@ -242,7 +254,7 @@ async def test_unknown_ohlc_source_is_rejected(stub_bhavcopy):
 # --------------------------------------------------------------- index/column contract
 async def test_bhavcopy_frame_keeps_the_yfinance_shape(stub_bhavcopy):
     stub_bhavcopy()
-    df = await _engine().fetch_history(symbol="RELIANCE", actions=False)
+    df = await _engine().fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
 
     assert isinstance(df.index, pd.DatetimeIndex)
     assert str(df.index.tz) == "Asia/Kolkata"
@@ -255,7 +267,7 @@ async def test_start_is_inclusive_and_end_exclusive(stub_bhavcopy):
     """yfinance semantics: start inclusive, end exclusive. Kept on the new source."""
     stub_bhavcopy()
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start="2024-06-04", end="2024-06-05", actions=False
+        symbol="RELIANCE", start="2024-06-04", end="2024-06-05", actions=False, auto_adjust=False
     )
     assert df.index.strftime("%Y-%m-%d").tolist() == ["2024-06-04"]
 
@@ -264,7 +276,7 @@ async def test_weekly_resample_uses_the_real_extremes(stub_bhavcopy):
     """A resampled bar must be the max of real highs, not of a synthetic envelope."""
     stub_bhavcopy()
     df = await _engine().fetch_history(
-        symbol="RELIANCE", interval="1wk", actions=False
+        symbol="RELIANCE", interval="1wk", actions=False, auto_adjust=False
     )
     assert len(df) == 1
     row = df.iloc[0]
@@ -276,7 +288,7 @@ async def test_weekly_resample_uses_the_real_extremes(stub_bhavcopy):
 async def test_source_provenance_is_carried_onto_the_result(stub_bhavcopy):
     """attrs is a provenance record, not one boolean: the source identifies itself."""
     stub_bhavcopy()
-    df = await _engine().fetch_history(symbol="RELIANCE", actions=False)
+    df = await _engine().fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
     assert df.attrs["bfinance_provenance"] == "NSE CM bhavcopy (test stub)"
     assert df.attrs["bfinance_synthetic_ohlc"] is False
 
@@ -289,7 +301,7 @@ async def test_bhavcopy_module_missing_raises_a_typed_error(monkeypatch):
     """
     monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", None)
     with pytest.raises(RealOHLCUnavailableError) as exc:
-        await _engine().fetch_history(symbol="RELIANCE", actions=False)
+        await _engine().fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
     assert "synthetic" in str(exc.value), "the error must name the opt-in escape hatch"
 
 
@@ -300,7 +312,7 @@ async def test_archive_failure_raises_and_does_not_fall_back(stub_bhavcopy):
                               index=pd.DatetimeIndex(pd.to_datetime(["2024-06-03"]), name="Date"))
     )
     with pytest.raises(RealOHLCUnavailableError) as exc:
-        await OHLCVEngine(screener).fetch_history(symbol="RELIANCE", actions=False)
+        await OHLCVEngine(screener).fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
     assert "connection reset" in str(exc.value)
     assert screener.chart_calls == [], "an outage must not silently trigger the envelope path"
 
@@ -309,12 +321,12 @@ async def test_empty_archive_raises_rather_than_returning_nothing(stub_bhavcopy)
     """An empty archive is an outage or an unsupported window, not 'the ticker has no data'."""
     stub_bhavcopy(result=pd.DataFrame())
     with pytest.raises(RealOHLCUnavailableError, match="no data"):
-        await _engine().fetch_history(symbol="RELIANCE", actions=False)
+        await _engine().fetch_history(symbol="RELIANCE", actions=False, auto_adjust=False)
 
 
 async def test_window_before_the_archive_explains_itself(stub_bhavcopy):
     calls = stub_bhavcopy()
-    await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+    await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False, auto_adjust=False)
     start, _end, _kwargs = calls[0]
     assert start >= ohlcv_mod.BHAVCOPY_FIRST_DATE, "must not request pre-2024 dead URLs"
 
@@ -322,7 +334,7 @@ async def test_window_before_the_archive_explains_itself(stub_bhavcopy):
 async def test_window_is_clamped_to_the_archive_start_with_a_warning(stub_bhavcopy, caplog):
     calls = stub_bhavcopy()
     with caplog.at_level("WARNING", logger="bfinance"):
-        await _engine().fetch_history(symbol="RELIANCE", period="10y", actions=False)
+        await _engine().fetch_history(symbol="RELIANCE", period="10y", actions=False, auto_adjust=False)
     assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE
     assert any(
         ohlcv_mod.BHAVCOPY_FIRST_DATE in r.getMessage() for r in caplog.records
@@ -335,14 +347,14 @@ async def test_typed_bhavcopy_errors_are_not_blurred(stub_bhavcopy):
 
     stub_bhavcopy(error=NotAnNseSymbolError("BSE scrip codes are not in the NSE CM bhavcopy"))
     with pytest.raises(NotAnNseSymbolError):
-        await _engine().fetch_history(symbol="500112.BO", actions=False)
+        await _engine().fetch_history(symbol="500112.BO", actions=False, auto_adjust=False)
 
 
 # --------------------------------------------------------------- leniency, without fabrication
 async def test_absent_symbol_is_empty_and_flagged_real(stub_bhavcopy):
     """A genuinely missing instrument stays lenient: empty, never filled with invented bars."""
     stub_bhavcopy()
-    df = await _engine().fetch_history(symbol="NOSUCHSCRIP", actions=False)
+    df = await _engine().fetch_history(symbol="NOSUCHSCRIP", actions=False, auto_adjust=False)
 
     assert df.empty
     assert list(df.columns) == ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
@@ -353,14 +365,14 @@ async def test_absent_symbol_raises_under_raise_errors(stub_bhavcopy):
     stub_bhavcopy()
     with pytest.raises(TickerNotFoundError):
         await _engine().fetch_history(
-            symbol="NOSUCHSCRIP", actions=False, raise_errors=True
+            symbol="NOSUCHSCRIP", actions=False, auto_adjust=False, raise_errors=True
         )
 
 
 async def test_symbol_suffixes_are_normalised(stub_bhavcopy):
     stub_bhavcopy()
     for requested in ("RELIANCE", "RELIANCE.NS", "reliance.ns", "  RELIANCE-EQ  "):
-        df = await _engine().fetch_history(symbol=requested, actions=False)
+        df = await _engine().fetch_history(symbol=requested, actions=False, auto_adjust=False)
         assert not df.empty, f"{requested!r} did not resolve to the bhavcopy symbol"
         assert df["Close"].tolist() == [110.0, 109.0, 117.5]
 
@@ -461,7 +473,10 @@ async def test_adj_close_reflects_dividends_on_the_real_bars(stub_bhavcopy):
     )
     engine = OHLCVEngine(_StubScreener(), corporate_actions_client=_RecordedActionsClient())
 
-    df = await engine.fetch_history(symbol="RELIANCE", actions=True)
+    # auto_adjust=False restores the pre-2026-09-30 default and is what this test is about: it
+    # compares "Adj Close" to "Close", and auto_adjust=True -- now the default, matching yfinance
+    # 1.7 -- scales the price columns and drops the column entirely.
+    df = await engine.fetch_history(symbol="RELIANCE", actions=True, auto_adjust=False)
 
     assert df.attrs["bfinance_actions_source"] == "nse_corporate_actions"
     assert float(df.loc[df["Dividends"] != 0.0, "Dividends"].iloc[0]) == pytest.approx(10.0)
@@ -502,7 +517,8 @@ async def test_adj_close_reflects_dividends_on_the_real_bars(stub_bhavcopy):
 async def test_adj_close_equals_close_when_there_are_no_actions(stub_bhavcopy):
     """No actions => factor 1.0. That equality is then a fact, not an unfinished adjustment."""
     stub_bhavcopy()
-    df = await _engine().fetch_history(symbol="RELIANCE", actions=True)
+    # auto_adjust=False keeps "Adj Close" in the frame, which is what this compares.
+    df = await _engine().fetch_history(symbol="RELIANCE", actions=True, auto_adjust=False)
     pd.testing.assert_series_equal(df["Adj Close"], df["Close"], check_names=False)
 
 
@@ -517,7 +533,7 @@ def _ticker(stub_bhavcopy, profile=None):
 
 
 def test_ticker_history_returns_real_bars_and_flags_them(stub_bhavcopy):
-    df = _ticker(stub_bhavcopy).history(period="1mo", actions=False)
+    df = _ticker(stub_bhavcopy).history(period="1mo", actions=False, auto_adjust=False)
     assert df["High"].tolist() == [112.0, 113.5, 118.0]
     assert df.attrs["bfinance_synthetic_ohlc"] is False
 
@@ -528,7 +544,7 @@ def test_ticker_history_forwards_auto_adjust_without_dying_on_it(stub_bhavcopy):
 
     Both halves of that were consequences of the unconditional raise, and both are now wrong. The
     public entry point must not die on a keyword yfinance accepts by default, and the call must
-    spend its request -- the refusal that is still correct (``actions=False`` has no factor to
+    spend its request -- the refusal that is still correct (``actions=False, auto_adjust=False`` has no factor to
     apply) is decided locally and is covered in
     ``tests/test_ohlcv_auto_adjust_true.py::test_the_refusal_still_fires_when_a_request_would_have_been_wasted``.
 
@@ -560,7 +576,7 @@ def test_ticker_history_forwards_auto_adjust_without_dying_on_it(stub_bhavcopy):
 
 async def test_ticker_history_async_reports_real_bars(stub_bhavcopy):
     t = _ticker(stub_bhavcopy)
-    df = await t.history_async(period="1mo", actions=False)
+    df = await t.history_async(period="1mo", actions=False, auto_adjust=False)
     assert df.attrs["bfinance_synthetic_ohlc"] is False
     assert df["Low"].tolist() == [97.5, 108.0, 108.5]
 

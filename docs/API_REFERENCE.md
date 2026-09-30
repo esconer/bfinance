@@ -39,7 +39,7 @@ bfinance.download(
     period: str = "1mo",
     interval: str = "1d",
     group_by: Literal["column", "ticker"] = "column",
-    auto_adjust: bool = False,
+    auto_adjust: bool = True,
     actions: bool = False,
     threads: bool = True,
     proxy: Optional[str] = None,
@@ -58,10 +58,17 @@ is authoritative for the rest.
   - `'column'` (default): MultiIndex columns where level 0 is Price type (`'Close'`), level 1 is Ticker (`'RELIANCE'`).
   - `'ticker'`: MultiIndex columns where level 0 is Ticker (`'RELIANCE'`), level 1 is Price type (`'Close'`).
 * **`actions`** (*bool*): If `True`, includes `'Dividends'` and `'Stock Splits'` columns. Default `False`.
-* **`auto_adjust`** (*bool*): ~~Default `True`.~~ **Default `False`, and that default is pinned by
-  `tests/test_adjust_default_drift.py`** so it cannot drift away from the inner history path
-  unnoticed. `download()`, `Tickers.history`, `Ticker.history` and `OHLCVEngine.fetch_history`
-  all agree on it.
+* **`auto_adjust`** (*bool*): **Default `True`, matching `yfinance` 1.7**, and that default is
+  pinned by `tests/test_adjust_default_drift.py` so it cannot drift away from the inner history
+  path unnoticed. `download()`, `Tickers.history`, `Ticker.history` and `OHLCVEngine.fetch_history`
+  all agree on it. `True` scales `Open/High/Low/Close` by `Adj Close / Close` and drops
+  `Adj Close`; pass `False` for the strictly richer frame that also carries `Adj Close`. It is
+  independent of `actions`: the corporate-actions feed is resolved either way because the factor
+  comes from it, and `actions` alone decides whether the two action columns are published.
+  `True` raises `AdjustmentNotAvailableError` where `Adj Close` is not a real adjusted series
+  (a derived-O/H/L frame, an empty frame, no ex-dated actions feed, or the Screener.in
+  fiscal-year-end approximation) -- measured live, `MAFANG` is in that state, because the NSE
+  corporate-actions feed does not index it.
 * **`threads`** (*bool*): ~~`Optional[int]`, default `None`.~~ **It is a `bool`, default `True`**,
   and it is read as a switch: `max_concurrency=10 if threads else 1`. It is **not** a thread count.
 * **`timeout`** (*int*): ~~`15`.~~ **`10`**, matching `Ticker.history`.
@@ -132,16 +139,22 @@ ticker.history(
     start=None,
     end=None,
     actions=True,
-    auto_adjust=False,
+    auto_adjust=True,
     back_adjust=False,
     rounding=False,
 )
 ```
-* **`auto_adjust`** defaults to **`False`**, not `True`. The default is pinned by
-  `tests/test_adjust_default_drift.py`, which asserts the same value on `Ticker.history`,
-  `Tickers.history`, `download()` and `OHLCVEngine.fetch_history` so the batch wrappers cannot
-  drift away from the inner path.
-* **Columns**: `['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']` (+ `['Dividends', 'Stock Splits']` if `actions=True`).
+* **`auto_adjust`** defaults to **`True`**, matching `yfinance` 1.7. The default was `False`
+  until 2026-09-30 and was changed because it made bfinance column-incompatible with the
+  library it exists to stand in for: a bare `history()` returned
+  `['Open','High','Low','Close','Adj Close','Volume',...]` where `yfinance` returns
+  `['Open','High','Low','Close','Volume',...]`. `False` is still the way to ask for `Adj Close`.
+  The default is pinned by `tests/test_adjust_default_drift.py`, which asserts the same value on
+  `Ticker.history`, `Tickers.history`, `download()` and `OHLCVEngine.fetch_history` so the batch
+  wrappers cannot drift away from the inner path.
+* **Columns**: `['Open', 'High', 'Low', 'Close', 'Volume']` on the default `auto_adjust=True`
+  path (+ `['Dividends', 'Stock Splits']` if `actions=True`); `['Open', 'High', 'Low', 'Close',
+  'Adj Close', 'Volume']` with `auto_adjust=False`.
 * **Index**: `pd.DatetimeIndex` (localized to Asia/Kolkata).
 
 #### `ticker.history_metadata` / `ticker.get_history_metadata()` -> `Dict[str, Any]`

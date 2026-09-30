@@ -174,7 +174,14 @@ class TestPublishedOnEveryFrame:
     async def test_daily_feed_for_a_daily_request_publishes_daily_and_no_mismatch(self, monkeypatch):
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=_chart(DAILY)))
-        df = await engine.fetch_history(symbol="ITC", ohlc="synthetic", actions=False)
+        # auto_adjust=False is explicit on every call in this class because auto_adjust is now
+        # True by default (matching yfinance 1.7) and this path refuses True: it derives
+        # Open/High/Low from Close and is never back-adjusted, so there is no real Adj Close to
+        # scale by. Every assertion below is about the bar interval, not about the adjustment,
+        # and none of them predates that default flip.
+        df = await engine.fetch_history(
+            symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False
+        )
 
         assert df.attrs[INTERVAL_KEY] == "1d"
         assert df.attrs[MISMATCH_KEY] is None
@@ -188,7 +195,9 @@ class TestPublishedOnEveryFrame:
         """
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=_chart(WEEKLY)))
-        df = await engine.fetch_history(symbol="ITC", ohlc="synthetic", actions=False)
+        df = await engine.fetch_history(
+            symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False
+        )
 
         assert len(df) == 5, "the frame is returned, not refused: the values are real"
         assert df.attrs[INTERVAL_KEY] == "1wk"
@@ -207,7 +216,7 @@ class TestPublishedOnEveryFrame:
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=_chart(WEEKLY)))
         df = await engine.fetch_history(
-            symbol="ITC", ohlc="synthetic", actions=False, interval="1wk"
+            symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False, interval="1wk"
         )
         assert df.attrs[INTERVAL_KEY] == "1wk"
         assert df.attrs[MISMATCH_KEY] is None
@@ -218,7 +227,9 @@ class TestPublishedOnEveryFrame:
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=_chart(WEEKLY)))
         with caplog.at_level("WARNING", logger="bfinance"):
-            df = await engine.fetch_history(symbol="ITC", ohlc="synthetic", actions=False)
+            df = await engine.fetch_history(
+                symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False
+            )
 
         logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any(df.attrs[MISMATCH_KEY] in m for m in logged), (
@@ -230,7 +241,9 @@ class TestPublishedOnEveryFrame:
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=_chart(DAILY)))
         with caplog.at_level("WARNING", logger="bfinance"):
-            await engine.fetch_history(symbol="ITC", ohlc="synthetic", actions=False)
+            await engine.fetch_history(
+                symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False
+            )
 
         offenders = [
             r.getMessage() for r in caplog.records
@@ -246,7 +259,9 @@ class TestPublishedOnEveryFrame:
         """
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
         engine = OHLCVEngine(_Screener(chart_df=pd.DataFrame()))
-        empty = await engine.fetch_history(symbol="ITC", ohlc="synthetic")
+        empty = await engine.fetch_history(
+            symbol="ITC", ohlc="synthetic", auto_adjust=False
+        )
 
         assert empty.empty
         assert INTERVAL_KEY in empty.attrs

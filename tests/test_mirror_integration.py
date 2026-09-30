@@ -203,6 +203,14 @@ def _mirror_opted_out(monkeypatch, tmp_path):
 
 
 # ====================================================================== 1. default is unchanged
+#
+# ``auto_adjust=False`` is now spelled out on every fetch_history call in this file. auto_adjust
+# became True by default on 2026-09-30 (it now matches yfinance 1.7), and True needs a real
+# ex-dated corporate-actions feed to scale by -- which none of these tests stubs, because all of
+# them are about where the BARS came from, not about the adjustment. Left implicit, the new
+# default would raise AdjustmentNotAvailableError out of a test about the mirror, which is not
+# evidence about the mirror at all. The explicit False restores exactly the pre-flip call.
+
 
 async def test_default_path_never_constructs_a_mirror(monkeypatch, tmp_path):
     """The default call path must not so much as name the store.
@@ -219,7 +227,7 @@ async def test_default_path_never_constructs_a_mirror(monkeypatch, tmp_path):
     calls = _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False
     )
 
     assert calls == [(DAY_A, DAY_HOLIDAY)], "the network answered, exactly as it does today"
@@ -232,7 +240,7 @@ async def test_default_path_touches_no_disk(monkeypatch, tmp_path):
     _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False
     )
 
     home = tmp_path / "home"
@@ -249,7 +257,7 @@ async def test_mirror_hit_serves_stored_values_exactly(monkeypatch, tmp_path):
     calls = _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [], "a full-coverage mirror must not spend a request"
@@ -271,10 +279,10 @@ async def test_mirror_hit_slices_this_symbol_out_of_the_whole_market(monkeypatch
     calls = _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     reliance = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
     tcs = await _engine().fetch_history(
-        symbol="TCS", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="TCS", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [], "two symbols, one store, still no request"
@@ -293,7 +301,7 @@ async def test_the_env_var_is_the_door_reachable_from_the_public_api(monkeypatch
 
     monkeypatch.setenv(MIRROR_ENV_VAR, path)
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False
     )
 
     assert calls == [], "the env var alone must be enough to reach the mirror"
@@ -307,7 +315,7 @@ async def test_a_mirror_never_creates_its_own_database(monkeypatch, tmp_path):
     calls = _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=str(absent)
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=str(absent)
     )
 
     assert not absent.exists(), "a read must not create the store it could not find"
@@ -331,7 +339,7 @@ async def test_partial_coverage_is_never_silent(monkeypatch, tmp_path):
     calls = _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     # All three days are present. Not two.
@@ -363,7 +371,7 @@ async def test_a_stale_mirror_whose_gaps_span_the_window_reads_the_network_once(
     calls = _stub_bhavcopy(monkeypatch, _simple_bars(WIDE_DAYS))
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=WIDE_DAYS[0], end=WIDE_DAYS[-1], actions=False, mirror=path
+        symbol="RELIANCE", start=WIDE_DAYS[0], end=WIDE_DAYS[-1], actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [(WIDE_DAYS[0], WIDE_DAYS[-1])], (
@@ -392,7 +400,7 @@ async def test_a_mirror_whose_calendar_cannot_classify_a_day_never_assumes_absen
     calls = _stub_bhavcopy(monkeypatch, _simple_bars([DAY_A, DAY_B, DAY_C]))
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_SATURDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_SATURDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     state = df.attrs["bfinance_mirror"]
@@ -420,7 +428,7 @@ async def test_a_holiday_is_not_a_gap(monkeypatch, tmp_path):
     calls = _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_SATURDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_SATURDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [], "neither the seeded holiday nor the weekend may cost a request"
@@ -439,7 +447,7 @@ async def test_a_holiday_does_not_make_an_uncovered_window_a_hit(monkeypatch, tm
     calls = _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     # The holiday is free; the trading day the mirror lacks is not. The frame has all of it.
@@ -464,7 +472,7 @@ async def test_network_failure_on_a_gap_is_raised_not_degraded(monkeypatch, tmp_
 
     with pytest.raises(RealOHLCUnavailableError) as caught:
         await _engine().fetch_history(
-            symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+            symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
         )
 
     message = str(caught.value)
@@ -486,7 +494,7 @@ async def test_a_mirror_failure_falls_back_to_the_network_and_says_why(monkeypat
     monkeypatch.setattr(mirror_mod.Mirror, "coverage", _explode)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert df["Close"].tolist() == [105.0, SENTINEL_CLOSE, 205.0]
@@ -502,7 +510,7 @@ async def test_provenance_is_honest_on_the_non_mirror_path(monkeypatch):
     _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False
     )
 
     assert df.attrs["bfinance_source"] == SOURCE_NETWORK
@@ -521,7 +529,7 @@ async def test_provenance_is_published_on_an_empty_frame_too(monkeypatch, tmp_pa
     _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="NOSUCHSCRIP", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="NOSUCHSCRIP", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert df.empty
@@ -542,7 +550,7 @@ async def test_bar_interval_attributes_survive_a_mirror_served_frame(monkeypatch
     _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1d", actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1d", actions=False, auto_adjust=False, mirror=path
     )
 
     assert df.attrs["bfinance_source"] == SOURCE_MIRROR
@@ -556,7 +564,7 @@ async def test_bar_interval_attributes_survive_a_mixed_frame(monkeypatch, tmp_pa
     _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1d", actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1d", actions=False, auto_adjust=False, mirror=path
     )
 
     assert df.attrs["bfinance_source"] == SOURCE_MIRROR_NETWORK
@@ -584,7 +592,7 @@ async def test_the_interval_mismatch_key_is_still_computed_on_a_mirror_frame(mon
 
     df = await _engine().fetch_history(
         symbol="RELIANCE", start=SPARSE_START, end=SPARSE_END, interval="1d",
-        actions=False, mirror=str(tmp_path / "sparse.db"),
+        actions=False, auto_adjust=False, mirror=str(tmp_path / "sparse.db"),
     )
 
     assert calls == [], "a fully covered window must not spend a request"
@@ -603,7 +611,7 @@ async def test_a_mirror_frame_resamples_when_a_coarser_interval_is_asked_for(
     _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1wk", actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, interval="1wk", actions=False, auto_adjust=False, mirror=path
     )
 
     assert df.attrs["bfinance_source"] == SOURCE_MIRROR
@@ -624,7 +632,7 @@ async def test_a_mirror_with_zero_relevant_days_is_not_a_hit(monkeypatch, tmp_pa
     calls = _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     df = await _engine().fetch_history(
-        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="RELIANCE", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [(DAY_A, DAY_C)], "the network must answer, even though a mirror exists"
@@ -648,7 +656,7 @@ async def test_a_mirror_holding_the_days_but_not_the_symbol_is_a_real_answer(
     calls = _stub_bhavcopy(monkeypatch, NETWORK_BARS)
 
     df = await _engine().fetch_history(
-        symbol="NOSUCHSCRIP", start=DAY_A, end=DAY_HOLIDAY, actions=False, mirror=path
+        symbol="NOSUCHSCRIP", start=DAY_A, end=DAY_HOLIDAY, actions=False, auto_adjust=False, mirror=path
     )
 
     assert calls == [], "full coverage means the mirror may answer, including with an empty frame"

@@ -298,8 +298,14 @@ async def test_the_incomplete_key_exists_on_every_frame_so_the_check_needs_no_pr
     assert as_traded.attrs["bfinance_corporate_actions_applied"] is False
     assert "adjust_corporate_actions=False" in as_traded.attrs["bfinance_corporate_actions_applied_detail"]
 
-    # actions=False: no factor could exist, so there is nothing to be incomplete.
-    no_actions = await _history(ITC_DEMERGER_BARS, ITC_PAYLOAD, actions=False)
+    # actions=False: no factor could exist, so there is nothing to be incomplete. auto_adjust=False
+    # is spelled out because auto_adjust is now True by default (matching yfinance 1.7), and
+    # auto_adjust=True resolves the actions feed on its own -- yfinance's flags are independent --
+    # so leaving it implicit would make this a copy of the adjusted case above rather than the
+    # no-adjustment case it is testing.
+    no_actions = await _history(
+        ITC_DEMERGER_BARS, ITC_PAYLOAD, actions=False, auto_adjust=False
+    )
     assert no_actions.attrs["bfinance_adjustment_incomplete"] is None
     assert "actions=False" in no_actions.attrs["bfinance_corporate_actions_applied_detail"]
 
@@ -307,7 +313,9 @@ async def test_the_incomplete_key_exists_on_every_frame_so_the_check_needs_no_pr
     empty_engine = OHLCVEngine(
         _Screener(chart_df=pd.DataFrame()), corporate_actions_client=_ActionsClient(ITC_PAYLOAD)
     )
-    empty = await empty_engine.fetch_history(symbol="ITC", ohlc="synthetic")
+    empty = await empty_engine.fetch_history(
+        symbol="ITC", ohlc="synthetic", auto_adjust=False
+    )
     assert empty.empty
     assert "bfinance_adjustment_incomplete" in empty.attrs
     assert empty.attrs["bfinance_adjustment_incomplete"] is None
@@ -358,7 +366,7 @@ async def test_price_basis_names_every_path(bars):
         _Screener(chart_df=pd.DataFrame()), corporate_actions_client=_ActionsClient(ITC_PAYLOAD)
     )
     assert (
-        await empty_engine.fetch_history(symbol="ITC", ohlc="synthetic")
+        await empty_engine.fetch_history(symbol="ITC", ohlc="synthetic", auto_adjust=False)
     ).attrs["price_basis"] == PRICE_BASIS_SYNTHETIC
 
 
@@ -376,7 +384,9 @@ async def test_the_synthetic_basis_is_named_for_what_it_is_not_dressed_up(monkey
     )
     screener = _Screener(chart_df=chart)
     monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", lambda *a, **k: None)
-    df = await OHLCVEngine(screener).fetch_history(symbol="ITC", ohlc="synthetic", actions=False)
+    df = await OHLCVEngine(screener).fetch_history(
+        symbol="ITC", ohlc="synthetic", actions=False, auto_adjust=False
+    )
 
     assert screener.chart_calls, "the opt-in path must use the close-only feed"
     assert df.attrs["bfinance_synthetic_ohlc"] is True
@@ -396,8 +406,9 @@ async def test_the_adjusted_basis_is_not_claimed_to_be_yfinance_parity(bars):
     ``yfinance_adjusted`` would be a stronger and false claim.
     """
     bars(ITC_DEMERGER_BARS)
-    df = await _history(ITC_DEMERGER_BARS, ITC_PAYLOAD)
-
+    # auto_adjust=False keeps "Adj Close" in the frame: this test compares it to Close, and the
+    # default has been True (matching yfinance 1.7) since 2026-09-30, which drops the column.
+    df = await _history(ITC_DEMERGER_BARS, ITC_PAYLOAD, auto_adjust=False)
     assert df.attrs["price_basis"] == "as_traded_share_count_adjusted"
     assert "yfinance" not in df.attrs["price_basis"]
     # The dividend column is untouched by the share-count restatement, and neither reaches O/H/L/C.
@@ -509,8 +520,12 @@ async def test_volume_is_untouched_when_nothing_is_adjusted(bars):
     """
     bars(RELIANCE_BONUS_BARS)
     engine = OHLCVEngine(_Screener(), corporate_actions_client=_ActionsClient(RELIANCE_PAYLOAD))
+    # auto_adjust=False too: auto_adjust=True scales O/H/L/C by Adj Close / Close even on the
+    # as-traded path, so leaving the new default on here would restate the prices this test is
+    # pinning as UNTOUCHED. The default has been True (matching yfinance 1.7) since 2026-09-30.
     df = await engine.fetch_history(
-        symbol="RELIANCE", start="2024-10-24", end="2024-10-30", adjust_corporate_actions=False
+        symbol="RELIANCE", start="2024-10-24", end="2024-10-30",
+        adjust_corporate_actions=False, auto_adjust=False,
     )
 
     assert df["Close"].tolist() == pytest.approx([2640.90, 2655.70, 1334.35, 1340.00])

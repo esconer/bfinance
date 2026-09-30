@@ -297,7 +297,12 @@ async def test_a_recognised_period_reaches_the_window_it_names(stub_bhavcopy, pe
     clamp is applied identically on the way in and in this expectation, so the assertion above
     cannot be satisfied by simply refusing long windows.
     """
-    await _engine().fetch_history(symbol="RELIANCE", period=period, actions=False)
+    # auto_adjust=False is explicit and is the pre-2026-09-30 default: these tests are about the
+    # WINDOW the archive was asked for, and on the new default auto_adjust=True raises out of a
+    # call whose corporate-actions feed is not stubbed here, before the window can be inspected.
+    await _engine().fetch_history(
+        symbol="RELIANCE", period=period, actions=False, auto_adjust=False
+    )
 
     requested_start = stub_bhavcopy[-1][0]
     assert requested_start == _clamped(expected_days), (
@@ -317,7 +322,9 @@ async def test_a_long_but_recognised_period_still_clamps_with_a_warning(stub_bha
     "period we do not know" (raise) from "period the archive cannot fill" (clamp + warn).
     """
     with caplog.at_level(logging.WARNING, logger="bfinance"):
-        await _engine().fetch_history(symbol="RELIANCE", period="5y", actions=False)
+        await _engine().fetch_history(
+            symbol="RELIANCE", period="5y", actions=False, auto_adjust=False
+        )
 
     assert stub_bhavcopy[-1][0] == BHAVCOPY_FIRST_DATE, (
         f"a 5y request should clamp to the archive floor, not ask for {stub_bhavcopy[-1][0]}"
@@ -337,7 +344,9 @@ async def test_no_period_given_means_the_documented_default(stub_bhavcopy, perio
     as ``'5y'``. The distinction being pinned is *refused* vs *accepted*, so this goes red if the
     validation is ever widened to reject the empty case.
     """
-    await _engine().fetch_history(symbol="RELIANCE", period=period, actions=False)
+    await _engine().fetch_history(
+        symbol="RELIANCE", period=period, actions=False, auto_adjust=False
+    )
 
     assert OHLCVEngine.PERIOD_DAYS_MAP["5y"] == 1825, (
         "the documented no-period default is 1825 days; if that changes this test's expectation "

@@ -455,9 +455,21 @@ def _interval_mismatch_detail(requested: str, delivered: Optional[str]) -> Optio
 # ``utils.auto_adjust``). bfinance already carries that exact series -- O/H/L/Close on the
 # cumulative share-count factor and "Adj Close" on that plus the dividend factor, from NSE's
 # own ex-dated corporate-actions feed -- so accepting True is applying a real adjustment in
-# yfinance's shape, not inventing a number. bfinance's own default stays False (pinned by
-# tests/test_adjust_default_drift.py) precisely so that omitting the kwarg keeps the richer
-# frame; the refusal below is a gate on the PROVENANCE of the actions, not on the keyword.
+# yfinance's shape, not inventing a number, and bfinance now DEFAULTS to it (pinned by
+# tests/test_adjust_default_drift.py) so that a bfinance caller who says nothing gets
+# yfinance's column set rather than a superset of it.
+#
+# The refusal below is a gate on the PROVENANCE of the actions, not on the keyword, and
+# provenance is the only axis it draws. Measured live on 2026-09-30 over the default path:
+# NTPC, RELIANCE, WIPRO and CIPLA all carry ``bfinance_corporate_actions_applied = False``
+# (the feed recorded AGM notices / buy-backs in a class that is never converted into a
+# factor) and NONE of them refuses -- ``Adj Close`` came from the real ex-dated feed, so
+# scaling by it is sound and the residual gap is disclosed by
+# ``bfinance_adjustment_incomplete`` instead of thrown away. The refusal fires only where
+# there is nothing real to scale by: a derived-O/H/L frame, an empty frame, no ex-dated feed
+# at all, or the Screener.in fiscal-year-end approximation (which carries no share-count data
+# whatsoever). MAFANG is the measured case for the last of those: the NSE corporate-actions
+# feed does not index it, it degrades to the approximation, and the default path raises.
 # --------------------------------------------------------------------------------------
 
 
@@ -478,6 +490,19 @@ def _auto_adjust_refusal(
     ``Adj Close`` that is not an adjusted series would restate history with a number that
     never existed -- the one output this package exists to not produce.
 
+    ``actions=False`` is NOT one of the refusing cases any more. It used to be, and that was
+    wrong in the same way the old default was: yfinance's ``auto_adjust`` does not depend on
+    its own ``actions`` flag (there, ``actions`` decides only whether Dividends / Stock Splits
+    are published -- the Adjusted Close the scaling reads is fetched either way). Gating the
+    feed on ``actions`` alone made ``download()`` and ``Tickers.history()``, both of which
+    default ``actions=False``, answer their own new ``auto_adjust=True`` default with a
+    silently EMPTY frame: measured, ``bfinance.download(["NTPC", "RELIANCE"], period="5d")``
+    returned shape ``(0, 0)`` while the same call with ``actions=True`` returned 7 columns.
+    The caller now resolves the actions feed whenever EITHER flag asks for it -- see
+    ``fetch_actions`` in :meth:`OHLCVEngine.fetch_history` -- and ``actions`` alone decides
+    whether the two action columns are published. The branch is kept so the "no actions at
+    all" wording still names itself if this gate is ever reached without either flag.
+
     Every message names WHICH of the cases it is. "It did not work" is not actionable; "your
     actions series is the Screener.in fiscal-year-end approximation, whose ex-dates run 4-5
     months late and which carries no share-count data at all" is.
@@ -493,12 +518,11 @@ def _auto_adjust_refusal(
         )
     if not actions:
         return (
-            f"{symbol}: auto_adjust=True is refused with actions=False. With no "
-            f"corporate-actions series requested, bfinance derives no adjustment factor at "
-            f"all, so 'Adj Close' is a copy of 'Close', the ratio would be exactly 1.0, and "
-            f"the call would return the UNADJUSTED prices under an adjusted column list -- the "
-            f"precise defect this refusal exists to prevent. Pass actions=True (the default) "
-            f"to ask for the adjustment."
+            f"{symbol}: auto_adjust=True is refused because neither actions=True nor "
+            f"auto_adjust=True asked for a corporate-actions series, so 'Adj Close' is not an "
+            f"adjusted series and scaling Open/High/Low/Close by Adj Close / Close would fabricate "
+            f"history rather than restore it. Pass actions=True or auto_adjust=True to ask for "
+            f"the adjustment."
         )
     if actions_source in (None, ACTIONS_SOURCE_NONE):
         return (
@@ -783,15 +807,19 @@ class OHLCVEngine:
     produced the ``Dividends`` / ``Stock Splits`` columns, so a frame built on the legacy
     fiscal-year-end approximation can never be mistaken for one carrying real ex-dates.
 
-    The ``auto_adjust`` keyword, and why the default is not yfinance's
-    ------------------------------------------------------------------
+    The ``auto_adjust`` keyword, and why the default is now yfinance's
+    ----------------------------------------------------------------
     yfinance 1.7 **defaults** ``auto_adjust`` to ``True`` and answers it by scaling the four price
-    columns by ``Adj Close / Close`` and dropping ``Adj Close``. bfinance's default is ``False``,
-    and that divergence is deliberate, documented in ``docs/API_REFERENCE.md`` and pinned by
-    ``tests/test_adjust_default_drift.py``: ``False`` is the **strictly richer** answer, because it
-    carries ``Adj Close``, from which every adjusted price in the frame is recoverable. A caller who
-    says nothing therefore loses nothing, and the caller who wants yfinance's literal column set
-    is the one who has to ask for it.
+    columns by ``Adj Close / Close`` and dropping ``Adj Close``. bfinance now defaults to ``True``
+    too, and pins that in ``tests/test_adjust_default_drift.py`` across all five public layers.
+
+    The default used to be ``False``, on a defensible argument that was nonetheless overruled:
+    ``False`` is the **strictly richer** answer, because it carries ``Adj Close``, from which every
+    adjusted price in the frame is recoverable. What it is not is the answer yfinance gives. A
+    drop-in that hands back a column list its closest competitor never returns is not a drop-in,
+    and the adjustment that ``True`` asks for was already real and already applied on that path --
+    so ``True`` cost nothing but the extra column. ``False`` remains available, and is the way to
+    ask for ``Adj Close``.
 
     ``True`` is implemented, in yfinance's own shape, and it is not a second code path: it is the
     measured ratio between two columns of the frame this method has already built. On the adjusted
@@ -803,10 +831,17 @@ class OHLCVEngine:
     What is still refused is ``True`` where ``Adj Close`` is not an adjusted series, because
     scaling four price columns by a non-adjustment fabricates history. That is a gate on the
     provenance of the actions rather than on the keyword, and :func:`_auto_adjust_refusal` names
-    which of the four cases applies: the synthetic path, ``actions=False`` (no factor derived at
-    all, so the ratio would be exactly 1.0), no ex-dated feed, and the fiscal-year-end
-    approximation. The first two are refused before a request is spent; the other two can only be
-    decided after the feed has been asked.
+    which of the four cases applies: the synthetic path, an empty frame, no ex-dated feed, and the
+    fiscal-year-end approximation. The first is refused before a request is spent; the other three
+    can only be decided after the feed has been asked.
+
+    What is deliberately NOT refused is an incomplete-but-real adjustment.
+    ``bfinance_corporate_actions_applied`` reads ``False`` on a frame whose factor WAS applied and
+    is simply not the whole factor, and that state is disclosed rather than thrown away: the
+    prices are scaled by a real ``Adj Close`` and ``bfinance_adjustment_incomplete`` names the
+    residual gap. Measured live, NTPC, RELIANCE, WIPRO and CIPLA are all in that state on the
+    default path and all four return populated frames. Refusing there would trade a disclosed gap
+    for no data at all.
 
     Degradation
     -----------
@@ -982,7 +1017,7 @@ class OHLCVEngine:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = False,
+        auto_adjust: bool = True,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,
@@ -1075,31 +1110,50 @@ class OHLCVEngine:
                 unconverted. ``attrs["bfinance_adjustment_incomplete"]`` is then a dict naming why
                 (``None`` when the adjustment is complete), and ``attrs["price_basis"]`` names the
                 basis in a machine-readable form.
-            auto_adjust: ``False`` (default, and **deliberately not** yfinance's ``True``) returns
-                Open/High/Low/Close plus the ``Adj Close`` column. ``True`` performs yfinance's
-                own adjustment -- scale the four price columns by ``Adj Close / Close`` and drop
-                ``Adj Close`` -- and keeps Volume and the action columns untouched, so the columns
-                are exactly ``["Open", "High", "Low", "Close", "Volume"]`` (+ the action columns).
-                That is yfinance's shape, not a bfinance one: the factors are real (NSE ex-dated
-                dividends and bonus / sub-division ratios), so this restates history with the same
-                arithmetic yfinance uses rather than fabricating one.
+            auto_adjust: ``True`` (default, and **yfinance's own default** -- measured live against
+                yfinance 1.7.0, whose ``history()`` with no keyword returns
+                ``['Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits']``)
+                performs yfinance's own adjustment: scale the four price columns by
+                ``Adj Close / Close`` and drop ``Adj Close``, leaving Volume and the action
+                columns untouched. The columns are then exactly ``["Open", "High", "Low",
+                "Close", "Volume"]`` (+ the action columns). That is yfinance's shape, not a
+                bfinance one: the factors are real (NSE ex-dated dividends and bonus /
+                sub-division ratios), so this restates history with the same arithmetic
+                yfinance uses rather than fabricating one.
 
-                The default stays ``False`` on purpose, and the divergence is documented in
-                ``docs/API_REFERENCE.md``. ``False`` is the **strictly richer** answer -- it
-                carries ``Adj Close``, and every adjusted price in the frame can be recovered from
-                it -- so a caller who says nothing gets more, and a caller who wants yfinance's
-                literal column set says so.
+                The default used to be ``False``, which kept the strictly richer ``Adj Close``
+                column at the price of a column set yfinance never returns. Interchangeability
+                won: a drop-in that returns a different column list when the caller says
+                nothing is not a drop-in, and the adjustment itself was already real and
+                already applied on that path. ``False`` is still the way to ask for
+                ``Adj Close`` -- the full adjusted series, from which every adjusted price in
+                the frame is recoverable -- and ``docs/API_REFERENCE.md`` documents the
+                divergence that remains.
 
-                ``True`` still raises :class:`AdjustmentNotAvailableError` in the four cases where
-                ``Adj Close`` is not an adjusted series, because scaling four price columns by a
+                ``True`` still raises :class:`AdjustmentNotAvailableError` where ``Adj Close``
+                is NOT an adjusted series, because scaling four price columns by a
                 non-adjustment is exactly the fabrication this package exists to prevent:
-                ``ohlc="synthetic"`` (derived O/H/L, never back-adjusted), ``actions=False`` (no
-                factor derived at all, so the ratio would be exactly 1.0 and the call would return
-                unadjusted prices under an adjusted column list), an actions feed that answered with
-                no ex-dated rows, and the Screener.in fiscal-year-end approximation (ex-dates 4-5
-                months late and no share-count data whatsoever). Each message names which case it
-                is. The first two are decided before any request is spent; the other two can only
-                be decided after the feed has been asked.
+                ``ohlc="synthetic"`` (derived O/H/L, never back-adjusted), an empty frame, an
+                actions feed that answered with no ex-dated rows, and the Screener.in
+                fiscal-year-end approximation (ex-dates 4-5 months late and no share-count data
+                whatsoever). Each message names which case it is. The first is decided before
+                any request is spent; the other three can only be decided after the feed has
+                been asked.
+
+                ``bfinance_corporate_actions_applied is False`` is deliberately NOT one of
+                them. That flag reports a factor that was applied but is not the whole factor
+                -- the feed recorded AGM notices, buy-backs, rights or a demerger in a class
+                this engine declines to convert -- and ``Adj Close`` came from the real ex-dated
+                feed regardless, so scaling by it is sound. Measured live: NTPC, RELIANCE,
+                WIPRO and CIPLA all carry ``applied = False`` on the default path and all four
+                return a populated frame. Refusing there would trade a disclosed residual gap
+                for no data at all. MAFANG, whose NSE feed holds no rows and which degrades to
+                the approximation, does raise.
+
+                ``actions`` is independent of ``auto_adjust``, exactly as it is in yfinance:
+                the corporate-actions feed is resolved whenever either asks for it (it is what
+                the factor is derived from), and ``actions`` alone decides whether the
+                ``Dividends`` and ``Stock Splits`` columns are published.
             mirror: opt in to reading the local :mod:`bfinance.mirror` SQLite tape before the
                 network. ``None`` (the default) consults :data:`MIRROR_ENV_VAR` instead and, with
                 that unset, is **off**: no ``Mirror`` is constructed, no file is opened, no query
@@ -1117,13 +1171,15 @@ class OHLCVEngine:
 
         yfinance 1.7.0 parity notes (measured live, bhavcopy / yfinance over
         2024-09-01..2024-11-15):
-        - auto_adjust defaults to False, which is a documented divergence from yfinance (whose own
-          default is True) and the safer one: False is the strictly richer column set, carrying
-          "Adj Close", from which every adjusted price is recoverable. auto_adjust=True is
-          IMPLEMENTED, in yfinance's own shape -- scale O/H/L/C by "Adj Close" / "Close", drop
-          "Adj Close", leave Volume and the action columns alone -- because the factors it needs
-          are already computed and already real. It is still REFUSED in the four cases listed
-          under the argument above, where "Adj Close" is not an adjusted series.
+        - auto_adjust defaults to True, matching yfinance, so the default column list is
+          yfinance's: ['Open', 'High', 'Low', 'Close', 'Volume'] (+ the action columns), with
+          no 'Adj Close'. It used to default to False, which was a documented divergence kept on
+          the argument that False is the strictly richer column set -- a real argument, and it
+          lost, because a drop-in that returns columns its closest competitor never returns is
+          not a drop-in. auto_adjust=False keeps 'Adj Close'. auto_adjust=True is IMPLEMENTED in
+          yfinance's own shape -- scale O/H/L/C by "Adj Close" / "Close", drop "Adj Close", leave
+          Volume and the action columns alone -- because the factors it needs are already computed
+          and already real. It is still REFUSED where "Adj Close" is not an adjusted series.
         - The default path is back-adjusted and matches yfinance bar-for-bar: RELIANCE and
           HDFCBANK were 14/53 and 0/53 before the fix and 53/53 (all four of O/H/L/C, to within
           1e-4) after. With no dividend ex-date inside the window -- which is the case for both --
@@ -1159,9 +1215,11 @@ class OHLCVEngine:
 
         Raises:
             AdjustmentNotAvailableError: ``auto_adjust=True`` on a call where ``Adj Close`` is
-                not an adjusted series -- ``ohlc="synthetic"``, ``actions=False``, an empty
-                frame, no ex-dated actions feed, or the Screener.in fiscal-year-end
-                approximation. The message names which of the five it is.
+                not an adjusted series -- ``ohlc="synthetic"``, an empty frame, no ex-dated
+                actions feed, or the Screener.in fiscal-year-end approximation. The message
+                names which of the four it is. NOT raised when
+                ``bfinance_corporate_actions_applied`` is False: that flag reports an applied
+                factor that is not the whole one, and ``Adj Close`` is still real.
             RealOHLCUnavailableError: ``ohlc="bhavcopy"`` and the archive could not serve the
                 window. Never answered with fabricated bars.
             TickerNotFoundError: the archive answered but holds no rows for this symbol and
@@ -1199,18 +1257,31 @@ class OHLCVEngine:
                 f"feed, or keep ohlc='bhavcopy' (the default) and choose the vendor with "
                 f"source=/sources=."
             )
+        # auto_adjust=True needs the corporate-actions series to derive the factor, and it needs
+        # it WHETHER OR NOT the caller asked for the two action COLUMNS. yfinance's own
+        # auto_adjust does not depend on its own actions flag either: there, `actions` decides
+        # only whether Dividends / Stock Splits are published, and the Adjusted Close that the
+        # scaling reads is fetched either way. Gating the feed on `actions` alone made the two
+        # batch entry points that default actions=False -- download() and Tickers.history --
+        # answer their own new auto_adjust=True default with a SILENTLY EMPTY frame, measured:
+        # bfinance.download(["NTPC", "RELIANCE"], period="5d") returned shape (0, 0) where the
+        # same call with actions=True returned seven columns. So the feed is resolved whenever
+        # EITHER flag asks for it, and `actions` alone still decides the column set, which
+        # _history_columns owns. `fetch_actions` is passed to _auto_adjust_refusal and
+        # _resolve_adjustment as well, so both answer about the factor that will actually exist.
+        fetch_actions = actions or auto_adjust
         if auto_adjust:
-            # Two of the four refusals are decidable LOCALLY, before a request is spent: the pair
-            # (ohlc, actions) is a local vocabulary that fetching more cannot change. The other two
-            # depend on which actions feed actually answered, which is not knowable until it has
-            # been asked, and they are raised further down. Deciding them here would mean refusing
-            # every auto_adjust=True call, which is the defect this replaces: yfinance 1.7 DEFAULTS
+            # The only refusal decidable LOCALLY, before a request is spent: ohlc is a local
+            # vocabulary that fetching more cannot change. The other three depend on which
+            # actions feed actually answered, which is not knowable until it has been asked, and
+            # they are raised further down. Deciding those here would mean refusing every
+            # auto_adjust=True call, which is the defect this replaces: yfinance 1.7 DEFAULTS
             # auto_adjust to True, and a drop-in that dies on the value it defaults to is not a
             # drop-in.
-            if ohlc == "synthetic" or not actions:
+            if ohlc == "synthetic":
                 raise AdjustmentNotAvailableError(
                     _auto_adjust_refusal(
-                        symbol, synthetic=ohlc == "synthetic", actions=actions,
+                        symbol, synthetic=True, actions=fetch_actions,
                         actions_source=ACTIONS_SOURCE_NONE, actions_detail="",
                     )
                 )
@@ -1313,7 +1384,7 @@ class OHLCVEngine:
                 # the actions feed comes back empty.
                 raise AdjustmentNotAvailableError(
                     _auto_adjust_refusal(
-                        symbol, synthetic=synthetic, actions=actions,
+                        symbol, synthetic=synthetic, actions=fetch_actions,
                         actions_source=ACTIONS_SOURCE_NONE,
                         actions_detail=(
                             "No bars were returned for the requested window, so no corporate "
@@ -1373,7 +1444,7 @@ class OHLCVEngine:
         actions_extra: dict = {}
         splits_history = None
         dividends_history = None
-        if actions:
+        if fetch_actions:
             # Real dividends/splits with true ex-dates from NSE's own corporate-actions feed.
             #
             # The whole history is requested, not the bar window, and that is deliberate: the feed
@@ -1453,7 +1524,7 @@ class OHLCVEngine:
             # frame behind it, and before `scaled` so the share-count work below is not done for a
             # call that is about to raise.
             auto_refusal = _auto_adjust_refusal(
-                symbol, synthetic=synthetic, actions=actions,
+                symbol, synthetic=synthetic, actions=fetch_actions,
                 actions_source=actions_source, actions_detail=actions_detail,
             )
             if auto_refusal is not None:
@@ -1468,7 +1539,7 @@ class OHLCVEngine:
 
         factor_applied, applied_detail = self._resolve_adjustment(
             synthetic=synthetic,
-            actions=actions,
+            actions=fetch_actions,
             adjust_corporate_actions=adjust_corporate_actions,
             actions_source=actions_source,
             actions_detail=actions_detail,
@@ -1516,7 +1587,7 @@ class OHLCVEngine:
                 f"claim parity. The share-count factor WAS applied to O/H/L/C and Volume; it is "
                 f"just not the whole factor. {incomplete['detail']}"
             )
-        if adjust_corporate_actions and not synthetic and actions and not applied:
+        if adjust_corporate_actions and not synthetic and fetch_actions and not applied:
             # The one degradation that is not the caller's own choice. attrs carries the label for
             # whoever inspects the frame later; this is for whoever is watching the log now.
             # Once per frame, not per row, and non-fatal: a consumer that wants to fail hard reads

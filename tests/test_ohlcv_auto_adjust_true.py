@@ -47,6 +47,7 @@ import pandas as pd
 import pytest
 
 import bfinance.market.ohlcv as ohlcv_mod
+from bfinance.market.corporate import ACTIONS_SOURCE_NSE
 from bfinance.market.ohlcv import (
     AdjustmentNotAvailableError,
     OHLCVEngine,
@@ -295,23 +296,31 @@ async def test_the_as_traded_path_also_lands_on_the_adjusted_series(bars):
     )
 
 
-async def test_omitting_the_keyword_still_returns_the_richer_false_frame(bars):
+async def test_omitting_the_keyword_returns_yfinances_own_frame(bars):
     """
-    The divergence from yfinance, asserted rather than assumed: no kwarg means ``False``, and
-    ``False`` is the strictly richer answer.
+    The default, asserted rather than assumed: no kwarg means ``True``, exactly as in yfinance 1.7.
 
-    yfinance 1.7 defaults ``auto_adjust`` to ``True``, so a drop-in that silently copied that
-    default would hand every existing caller a shorter frame than it had before this package
-    existed. ``False`` keeps ``Adj Close``, and every adjusted price in the frame is recoverable
-    from it, so a caller who says nothing loses nothing.
+    It used to mean ``False``, on the argument that ``False`` is the strictly richer answer --
+    it keeps ``Adj Close``, and every adjusted price in the frame is recoverable from it. That
+    argument was real and it lost anyway: measured live against yfinance 1.7.0 in this venv, a
+    bare ``history()`` returns ``['Open', 'High', 'Low', 'Close', 'Volume', 'Dividends',
+    'Stock Splits']`` where bfinance returned eight columns including ``Adj Close``. A drop-in
+    that hands back columns its closest competitor never returns is not a drop-in, and the
+    adjustment ``True`` asks for was already real and already applied on that path. So ``False``
+    is still supported -- it is how you ask for ``Adj Close`` -- it is simply no longer what
+    saying nothing gets you.
     """
     bars()
     implicit = await _history()
-    explicit = await _history(auto_adjust=False)
+    explicit = await _history(auto_adjust=True)
 
     assert list(implicit.columns) == list(explicit.columns)
-    assert "Adj Close" in implicit.columns
+    assert "Adj Close" not in implicit.columns
     assert implicit["Close"].tolist() == explicit["Close"].tolist()
+    # The richer frame is still one keyword away, and it still carries the full adjusted series.
+    richer = await _history(auto_adjust=False)
+    assert "Adj Close" in richer.columns
+    assert implicit["Close"].tolist() == pytest.approx(richer["Adj Close"].tolist(), rel=1e-12)
     # Pinned by reflection across every public entry point too; see
     # tests/test_adjust_default_drift.py. This is the behavioural half of that guard.
     assert "Adj Close" not in (await _history(auto_adjust=True)).columns
@@ -335,8 +344,12 @@ async def test_auto_adjust_true_is_refused_when_no_ex_dated_feed_answered(bars):
 
     # First prove the fixture is in the state the test claims: the same call WITHOUT auto_adjust
     # returns a frame that says its actions source is "none". Without this, a stub that quietly
-    # started answering would make the refusal pass for the wrong reason.
-    plain = await engine.fetch_history(symbol="RELIANCE", actions=True, **WINDOW)
+    # started answering would make the refusal pass for the wrong reason. auto_adjust=False is
+    # spelled out because auto_adjust is now True by default and this line is about the SOURCE,
+    # not about the adjustment.
+    plain = await engine.fetch_history(
+        symbol="RELIANCE", actions=True, auto_adjust=False, **WINDOW
+    )
     assert plain.attrs["bfinance_actions_source"] == "none"
 
     with pytest.raises(AdjustmentNotAvailableError) as exc:
@@ -362,7 +375,9 @@ async def test_auto_adjust_true_is_refused_on_the_screener_fiscal_year_end_appro
         _Screener(profile=_screener_profile()), corporate_actions_client=_NoRowsActions()
     )
 
-    plain = await engine.fetch_history(symbol="RELIANCE", actions=True, **WINDOW)
+    plain = await engine.fetch_history(
+        symbol="RELIANCE", actions=True, auto_adjust=False, **WINDOW
+    )
     assert plain.attrs["bfinance_actions_source"] == "screener_fy_end_approximation"
     assert plain.attrs["bfinance_actions_share_count_observable"] is False
 
@@ -374,11 +389,27 @@ async def test_auto_adjust_true_is_refused_on_the_screener_fiscal_year_end_appro
     assert "no share-count data at all" in message, message
 
 
-async def test_auto_adjust_true_is_refused_with_actions_false(bars, monkeypatch):
+async def test_auto_adjust_true_is_not_refused_for_actions_false(bars, monkeypatch):
     """
-    No actions requested means no factor derived, so the ratio is exactly 1.0 and the call would
-    be a column drop pretending to be an adjustment. Refused -- and refused BEFORE a request is
-    spent, since (ohlc, actions) is a local pair that fetching more cannot change.
+    This test used to pin the opposite. It asserted that ``actions=False`` combined with
+    ``auto_adjust=True`` refused before a request was spent, on the reasoning that no actions
+    series means no factor derived means a ratio of exactly 1.0 and therefore a column drop
+    pretending to be an adjustment.
+
+    That reasoning was right about the arithmetic and wrong about the gate. yfinance's
+    ``auto_adjust`` does not depend on its own ``actions`` flag -- there, ``actions`` decides
+    only whether ``Dividends`` / ``Stock Splits`` are published, and the Adjusted Close the
+    scaling reads is fetched either way -- and bfinance used ``actions`` to gate the FEED as
+    well as the columns. So the two batch entry points that default ``actions=False``
+    (``download()`` and ``Tickers.history()``) answered their own new ``auto_adjust=True``
+    default with a silently EMPTY frame: measured, ``bfinance.download(["NTPC", "RELIANCE"],
+    period="5d")`` returned shape ``(0, 0)`` where the same call with ``actions=True`` returned
+    seven columns. The refusal was bought with a silent empty DataFrame, which is the one
+    outcome worse than an unadjusted price.
+
+    So the feed is now resolved whenever EITHER flag asks for it, and this test pins what
+    replaced the refusal: a real request, a real factor, yfinance's exact column set, and the
+    two action columns absent because the caller asked for them to be.
     """
     calls = []
     monkeypatch.setattr(
@@ -387,13 +418,23 @@ async def test_auto_adjust_true_is_refused_with_actions_false(bars, monkeypatch)
             RELIANCE_DIVIDEND_BARS
         ),
     )
-    with pytest.raises(AdjustmentNotAvailableError) as exc:
-        await _engine().fetch_history(
-            symbol="RELIANCE", actions=False, auto_adjust=True, **WINDOW
-        )
-    assert calls == [], "this refusal is decidable locally, so it must cost no request"
-    assert "actions=False" in str(exc.value)
-    assert "1.0" in str(exc.value)
+    frame = await _engine().fetch_history(
+        symbol="RELIANCE", actions=False, auto_adjust=True, **WINDOW
+    )
+
+    assert calls != [], "a real ex-dated feed answered, so a request was spent -- as it must be"
+    assert frame.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_NSE
+    # yfinance's columns for actions=False: no Adj Close (auto_adjust=True) and no action columns.
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    # And the prices are genuinely adjusted rather than merely relabelled: the same dividend
+    # factor the auto_adjust=True + actions=True call applies is on O/H/L/C here.
+    with_actions = await _engine().fetch_history(
+        symbol="RELIANCE", actions=True, auto_adjust=True, **WINDOW
+    )
+    for column in ("Open", "High", "Low", "Close"):
+        assert frame[column].tolist() == pytest.approx(
+            with_actions[column].tolist(), rel=1e-12
+        ), f"{column} differs from the actions=True answer"
 
 
 async def test_auto_adjust_true_is_refused_on_the_synthetic_path(bars):
@@ -440,9 +481,14 @@ async def test_auto_adjust_true_is_refused_on_an_empty_frame(bars):
 
 async def test_the_refusal_still_fires_when_a_request_would_have_been_wasted(bars, monkeypatch):
     """
-    The two locally-decidable refusals spend no request, which is a measurable property and not a
+    The locally-decidable refusal spends no request, which is a measurable property and not a
     stylistic one: ``download()`` runs the same call per symbol, so a refusal that fetched first
     would spend a request per name before saying no.
+
+    ``ohlc="synthetic"`` is now the ONLY such refusal. It used to be paired with
+    ``actions=False``, which moved to the resolved-feed path -- see
+    ``test_auto_adjust_true_is_not_refused_for_actions_false`` for why, and for the measured
+    ``(0, 0)`` frame that refusal was costing.
     """
     bars()
     calls = []
@@ -452,9 +498,10 @@ async def test_the_refusal_still_fires_when_a_request_would_have_been_wasted(bar
             RELIANCE_DIVIDEND_BARS
         ),
     )
-    for kwargs in ({"actions": False}, {"ohlc": "synthetic"}):
-        with pytest.raises(AdjustmentNotAvailableError):
-            await _engine().fetch_history(symbol="RELIANCE", auto_adjust=True, **WINDOW, **kwargs)
+    with pytest.raises(AdjustmentNotAvailableError):
+        await _engine().fetch_history(
+            symbol="RELIANCE", auto_adjust=True, ohlc="synthetic", **WINDOW
+        )
     assert calls == [], f"a local refusal must not reach the network: {calls}"
 
 

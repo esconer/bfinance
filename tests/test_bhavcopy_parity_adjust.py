@@ -188,6 +188,11 @@ def _engine(actions_client=None, screener=None):
 
 async def _history(actions_client=None, screener=None, **kwargs):
     kwargs.setdefault("actions", True)
+    # auto_adjust=False is the pre-2026-09-30 default, restored here rather than left implicit.
+    # auto_adjust has been True by default since, matching yfinance 1.7, and that path scales the
+    # price columns a second time and drops "Adj Close" -- so every assertion below, which reads
+    # the as-traded prints next to the factor applied to them, needs the pre-flip call back.
+    kwargs.setdefault("auto_adjust", False)
     return await _engine(actions_client, screener).fetch_history(
         symbol="RELIANCE.NS", period="5d", **kwargs
     )

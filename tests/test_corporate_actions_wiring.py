@@ -523,7 +523,11 @@ def test_history_signature_and_dispatch_are_untouched():
     params = inspect.signature(ohlcv_mod.OHLCVEngine.fetch_history).parameters
     assert params["ohlc"].default == "bhavcopy"
     assert params["actions"].default is True
-    assert params["auto_adjust"].default is False
+    # Flipped False -> True on 2026-09-30, to match yfinance 1.7, whose own default is True and
+    # which drops "Adj Close" on a bare history() call. The parameter's POSITION is asserted above
+    # and is unchanged: ~130 offline call sites feed these positionally, so moving it would be the
+    # contract break this test exists to catch, and changing only its value is not.
+    assert params["auto_adjust"].default is True
     assert params["source"].default is None, (
         "a default other than None would silently put every existing caller on the source cascade, "
         "which is a contract change and not a seam"

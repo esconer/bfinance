@@ -19,6 +19,21 @@ the caller thinks to pass ``raise_errors=True``, which nobody does. A default th
 between an inner function and its public wrapper is a structural hazard, not a one-off typo,
 so it is pinned by reflection here rather than by an incidental behavioural test that the
 offline suite (which stubs the Ticker) would not catch anyway.
+
+Which way it points now, and why
+--------------------------------
+``EXPECTED_DEFAULT`` was flipped to ``True`` on 2026-09-30. Commit 0910257 made
+``auto_adjust=True`` WORK on every path where ``Adj Close`` came from a real ex-dated
+corporate-actions feed, and yfinance 1.7.0 -- installed in this venv and measured -- returns
+``['Open','High','Low','Close','Volume','Dividends','Stock Splits']`` from a bare
+``history()``, because its own default is ``True`` and it drops ``Adj Close``. bfinance
+returned eight columns where yfinance returns seven, and that column divergence was the root
+cause of most of the 32-of-48 yfinance parity failures. Interchangeability won the argument
+that ``False`` had won by being the strictly richer column set.
+
+The guard is unchanged in kind: the five layers must still AGREE, because the failure mode it
+exists to catch is a disagreement, not the value. Two distinct failures are now guarded --
+the values drifting apart again, and a layer silently dropping the keyword.
 """
 
 import inspect
@@ -38,18 +53,23 @@ _ENTRY_POINTS = [
     ("OHLCVEngine.fetch_history", OHLCVEngine.fetch_history),
 ]
 
-EXPECTED_DEFAULT = False
+#: yfinance 1.7.0's own default, measured in this venv. bfinance matches it so that a caller
+#: who says nothing gets yfinance's column set rather than a superset of it.
+EXPECTED_DEFAULT = True
 
 
 @pytest.mark.parametrize("label,func", _ENTRY_POINTS, ids=[name for name, _ in _ENTRY_POINTS])
-def test_auto_adjust_default_is_false(label, func):
-    """Every layer must default ``auto_adjust`` to False, or True raises AdjustmentNotAvailableError."""
+def test_auto_adjust_default_is_true(label, func):
+    """Every layer must default ``auto_adjust`` to True, so omitting the kwarg is yfinance's call."""
     param = inspect.signature(func).parameters.get("auto_adjust")
     assert param is not None, f"{label} no longer accepts auto_adjust -- update this test"
     assert param.default is EXPECTED_DEFAULT, (
         f"{label} auto_adjust default is {param.default!r}, expected {EXPECTED_DEFAULT!r}. "
-        "A batch entry point that still defaults to True raises AdjustmentNotAvailableError, "
-        "which _download_single()'s broad `except Exception` swallows into an empty DataFrame: "
+        "yfinance 1.7.0 defaults it to True and drops 'Adj Close' on a bare history() call, so "
+        "a layer that still defaults to False returns eight columns where yfinance returns "
+        "seven. The reverse disagreement is just as fatal: a batch entry point defaulting to "
+        "True while the inner path refuses raises AdjustmentNotAvailableError, which "
+        "_download_single()'s broad `except Exception` swallows into an empty DataFrame: "
         "a silent empty result instead of data."
     )
 

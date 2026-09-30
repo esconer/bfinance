@@ -265,7 +265,7 @@ class Ticker:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = False,
+        auto_adjust: bool = True,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,
@@ -330,13 +330,22 @@ class Ticker:
                 the feed recorded that bfinance declines to convert -- e.g. a demerger), and
                 ``price_basis`` (a machine-readable basis string, e.g.
                 ``as_traded_share_count_adjusted``).
-            auto_adjust: must be False. bfinance's default path already returns yfinance's
-                adjusted basis, and yfinance's ``auto_adjust=True`` differs only in the column
-                set (no ``Adj Close``), so True raises rather than silently changing which
-                columns come back.
+            auto_adjust: yfinance's own default, and now bfinance's. ``True`` scales
+                Open/High/Low/Close by ``Adj Close / Close`` and drops ``Adj Close``, so the
+                columns are yfinance's: ``['Open', 'High', 'Low', 'Close', 'Volume']`` (+ the
+                action columns). Pass ``False`` for the strictly richer frame that also carries
+                ``Adj Close``, the full adjusted series.
+
+                ``True`` raises :class:`AdjustmentNotAvailableError` where ``Adj Close`` is not
+                an adjusted series -- a derived-O/H/L frame, an empty frame, no ex-dated actions
+                feed, or the Screener.in fiscal-year-end approximation -- because scaling four
+                price columns by a non-adjustment fabricates history. It does NOT raise when the
+                factor was applied but is incomplete: the prices are still scaled by a real
+                ``Adj Close`` and ``bfinance_adjustment_incomplete`` discloses the residual gap.
 
         Raises:
-            AdjustmentNotAvailableError: ``auto_adjust=True``.
+            AdjustmentNotAvailableError: ``auto_adjust=True`` where ``Adj Close`` is not an
+                adjusted series.
             RealOHLCUnavailableError: default source could not serve the window.
             ValueError: an unknown ``source``/``sources`` name, refused before any request.
             bfinance.sources.errors.SourceUnavailableError: the cascade ran and every named or
@@ -374,7 +383,7 @@ class Ticker:
         end: Optional[Union[str, datetime]] = None,
         prepost: bool = False,
         actions: bool = True,
-        auto_adjust: bool = False,
+        auto_adjust: bool = True,
         back_adjust: bool = False,
         repair: bool = False,
         keepna: bool = False,

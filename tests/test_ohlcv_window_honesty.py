@@ -201,7 +201,12 @@ async def test_the_two_keys_are_on_the_empty_frame_too(archive):
     archive({**PAST_FLOOR_BARS, **OTHER_SYMBOL})
     # The archive holds rows, but none for TCS, so the slice comes back empty through the ordinary
     # "this scrip has no rows here" path rather than the archive-wide outage refusal.
-    empty = await _engine().fetch_history(symbol="NOTLISTED", period="max", actions=False)
+    # auto_adjust=False restores the pre-2026-09-30 default: with auto_adjust now True by default
+    # an EMPTY frame raises AdjustmentNotAvailableError (there is nothing to scale by), which would
+    # make this a test of that refusal rather than of the truncation keys on an empty frame.
+    empty = await _engine().fetch_history(
+        symbol="NOTLISTED", period="max", actions=False, auto_adjust=False
+    )
 
     assert empty.empty
     assert empty.attrs["bfinance_window_truncated"] is True
@@ -216,9 +221,13 @@ async def test_the_empty_frame_carries_the_same_sentence_as_the_populated_one(ar
     they should not have to -- would otherwise get a differently-worded version of the same clamp.
     """
     populated_calls = archive()
-    populated = await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+    populated = await _engine().fetch_history(
+        symbol="RELIANCE", period="max", actions=False, auto_adjust=False
+    )
     archive({**PAST_FLOOR_BARS, **OTHER_SYMBOL})
-    empty = await _engine().fetch_history(symbol="NOTLISTED", period="max", actions=False)
+    empty = await _engine().fetch_history(
+        symbol="NOTLISTED", period="max", actions=False, auto_adjust=False
+    )
 
     assert populated_calls  # the stub really was consulted
     assert empty.attrs["bfinance_window_truncated_detail"] == (
@@ -263,7 +272,7 @@ async def test_the_synthetic_path_reports_no_truncation(archive):
         ),
     )
     df = await OHLCVEngine(_ChartScreener(chart)).fetch_history(
-        symbol="RELIANCE", ohlc="synthetic", period="max", actions=False
+        symbol="RELIANCE", ohlc="synthetic", period="max", actions=False, auto_adjust=False
     )
 
     assert df.attrs["bfinance_window_truncated"] is False
@@ -347,13 +356,17 @@ async def test_a_truncated_window_never_contains_a_bar_from_before_the_floor(arc
     the archive returned, unaltered.
     """
     archive()
-    df = await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+    df = await _engine().fetch_history(
+        symbol="RELIANCE", period="max", actions=False, auto_adjust=False
+    )
 
     floor = pd.Timestamp(ohlcv_mod.BHAVCOPY_FIRST_DATE, tz=df.index.tz)
     assert (df.index >= floor).all(), "no bar may predate the archive floor"
     # Exactly the archive's published prints, unscaled and unpadded. The 25-Oct -> 28-Oct step is
     # the real 1:1 bonus, halved on nothing: actions=False, so no share-count factor is applied and
-    # what the exchange printed is what comes back.
+    # what the exchange printed is what comes back. auto_adjust=False is spelled out for the same
+    # reason -- it was the default when these expectations were written, and on the new default
+    # auto_adjust=True resolves the actions feed and would halve these prices a second time.
     assert df["Close"].tolist() == pytest.approx([2640.90, 2655.70, 1334.35])
     assert len(df) == 3, "the frame is the archive's rows and not a padded approximation of them"
     # price * volume is still the traded value, i.e. the numbers were not rescaled to look fuller.

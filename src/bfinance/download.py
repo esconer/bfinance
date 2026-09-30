@@ -64,7 +64,7 @@ async def _download_batch_async(
     start: Optional[Union[str, datetime]],
     end: Optional[Union[str, datetime]],
     actions: bool = False,
-    auto_adjust: bool = False,
+    auto_adjust: bool = True,
     back_adjust: bool = False,
     keepna: bool = False,
     prepost: bool = False,
@@ -175,7 +175,7 @@ def download(
     threads: bool = True,
     ignore_tz: Optional[bool] = None,
     group_by: str = "column",
-    auto_adjust: bool = False,
+    auto_adjust: bool = True,
     back_adjust: bool = False,
     repair: bool = False,
     keepna: bool = False,
@@ -205,9 +205,13 @@ def download(
         actions: Download dividend + stock splits data (default False).
         threads: How many threads/connections to use for mass downloading (default True).
         group_by: Group by 'column' (default) or 'ticker'.
-        auto_adjust: Adjust all OHLC automatically. Defaults to False and must stay False:
-            the bhavcopy carries no corporate-actions series, so True raises
-            AdjustmentNotAvailableError rather than silently returning unadjusted prices.
+        auto_adjust: Adjust all OHLC automatically. Defaults to ``True``, matching
+            yfinance 1.7: the four price columns are scaled by ``Adj Close / Close`` and
+            ``Adj Close`` is dropped, so the default columns are yfinance's. Pass ``False``
+            for the strictly richer frame that also carries ``Adj Close``. Independent of
+            ``actions``, exactly as in yfinance: the corporate-actions feed is resolved either
+            way because the factor comes from it, and ``actions`` alone decides whether the
+            ``Dividends`` / ``Stock Splits`` columns are published.
         rounding: Round values to 2 decimal places (default False).
         multi_level_index: Always return a MultiIndex DataFrame (default True).
         proxy: Optional HTTP/HTTPS/SOCKS5 proxy URL string.
