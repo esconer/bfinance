@@ -17,7 +17,7 @@ This document provides a comprehensive, exhaustive reference for every class, me
    - [Document & Excel Exporters](#27-document--excel-exporters)
    - [AI & LLM Context Engine](#28-ai--llm-context-engine)
 3. [`bfinance.Tickers` Multi-Ticker Collection](#3-bfinancetickers-multi-ticker-collection)
-4. [`bfinance.Sector` & `bfinance.Industry` Classes](#4-bfinancesector--bfinanceindustry-classes)
+4. [`bfinance.Sector` & `bfinance.Industry` (removed in 0.2.0)](#4-bfinancesector--bfinanceindustry-removed-in-020)
 5. [`bfinance.screens` Institutional Screener Registry](#5-bfinancescreens-institutional-screener-registry)
 6. [`bfinance.ratios` Ratio Search Client](#6-bfinanceratios-ratio-search-client)
 7. [`bfinance.ai` Module & Agent Tools](#7-bfinanceai-module--agent-tools)
@@ -39,13 +39,16 @@ bfinance.download(
     period: str = "1mo",
     interval: str = "1d",
     group_by: Literal["column", "ticker"] = "column",
-    auto_adjust: bool = True,
+    auto_adjust: bool = False,
     actions: bool = False,
-    threads: Optional[int] = None,
+    threads: bool = True,
     proxy: Optional[str] = None,
-    timeout: int = 15,
+    timeout: int = 10,
 ) -> pd.DataFrame
 ```
+
+The listing above is the commonly-used subset, not the full signature; `inspect.signature`
+is authoritative for the rest.
 
 #### Parameters:
 * **`tickers`** (*str | List[str]*): Single symbol (e.g. `'RELIANCE'`), space-delimited string (e.g. `'RELIANCE TCS INFY'`), or list of symbols.
@@ -55,6 +58,13 @@ bfinance.download(
   - `'column'` (default): MultiIndex columns where level 0 is Price type (`'Close'`), level 1 is Ticker (`'RELIANCE'`).
   - `'ticker'`: MultiIndex columns where level 0 is Ticker (`'RELIANCE'`), level 1 is Price type (`'Close'`).
 * **`actions`** (*bool*): If `True`, includes `'Dividends'` and `'Stock Splits'` columns. Default `False`.
+* **`auto_adjust`** (*bool*): ~~Default `True`.~~ **Default `False`, and that default is pinned by
+  `tests/test_adjust_default_drift.py`** so it cannot drift away from the inner history path
+  unnoticed. `download()`, `Tickers.history`, `Ticker.history` and `OHLCVEngine.fetch_history`
+  all agree on it.
+* **`threads`** (*bool*): ~~`Optional[int]`, default `None`.~~ **It is a `bool`, default `True`**,
+  and it is read as a switch: `max_concurrency=10 if threads else 1`. It is **not** a thread count.
+* **`timeout`** (*int*): ~~`15`.~~ **`10`**, matching `Ticker.history`.
 * **`proxy`** (*str, optional*): HTTP/HTTPS/SOCKS5 proxy URL.
 
 ---
@@ -98,8 +108,20 @@ Container for quick scalar attributes matching `yfinance.Ticker.fast_info`:
 * `fast_info.exchange`: `'NSE'` or `'BSE'`.
 
 #### `ticker.info` -> `Dict[str, Any]`
-Comprehensive 180+ key dictionary matching `yfinance.Ticker.info` schema.
-* Key fields include: `shortName`, `symbol`, `currentPrice`, `marketCap`, `marketCapInCr`, `trailingPE`, `bookValue`, `dividendYield`, `returnOnCapitalEmployed`, `returnOnEquity`, `debtToEquity`, `pegRatio`, `52WeekChange`, `currency`, `sector`, `industry`.
+~~Comprehensive 180+ key dictionary matching `yfinance.Ticker.info` schema.~~ **Corrected: it
+is a 76-key dictionary, not 180+.** That count is measured, not estimated: the returned dict has
+exactly the keys of `bfinance.market.quotes.INFO_VALUE_UNITS`, which is a 76-entry mapping and
+is the authoritative list -- read the key set there rather than trusting a summary.
+
+* Key fields include: `shortName`, `symbol`, `currentPrice`, `marketCap`, `marketCapInCr`,
+  `trailingPE`, `bookValue`, `dividendYield`, `returnOnCapitalEmployed`, `returnOnEquity`,
+  `debtToEquity`, `pegRatio`, `currency`, `sector`, `industry`.
+* ~~`52WeekChange`~~ **is not a key and never was.** `info["52WeekChange"]` is a `KeyError`. The
+  52-week fields are `fiftyTwoWeekHigh` and `fiftyTwoWeekLow`.
+* **Units are not uniform.** Every key's unit is declared in `INFO_VALUE_UNITS`, and they are
+  deliberately mixed: `returnOnEquity` and `returnOnAssets` are decimal fractions, while
+  `returnOnCapitalEmployed` and `dividendYield` are raw percents. Check the map before you
+  format one of them.
 
 #### `ticker.history(...)` -> `pd.DataFrame`
 Historical OHLCV data matching `yfinance.Ticker.history()`:
@@ -110,11 +132,15 @@ ticker.history(
     start=None,
     end=None,
     actions=True,
-    auto_adjust=True,
+    auto_adjust=False,
     back_adjust=False,
     rounding=False,
 )
 ```
+* **`auto_adjust`** defaults to **`False`**, not `True`. The default is pinned by
+  `tests/test_adjust_default_drift.py`, which asserts the same value on `Ticker.history`,
+  `Tickers.history`, `download()` and `OHLCVEngine.fetch_history` so the batch wrappers cannot
+  drift away from the inner path.
 * **Columns**: `['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']` (+ `['Dividends', 'Stock Splits']` if `actions=True`).
 * **Index**: `pd.DatetimeIndex` (localized to Asia/Kolkata).
 
@@ -131,23 +157,71 @@ Pandas Series of historical corporate dividend distributions indexed by Date.
 Pandas Series of historical stock split ratios indexed by Date.
 
 #### `ticker.options` -> `Tuple[str, ...]`
-Tuple of available derivatives expiry dates (e.g. `('2026-09-24', '2026-10-29')`).
+~~Tuple of available derivatives expiry dates (e.g. `('2026-09-24', '2026-10-29')`).~~
+**This is `()` for every symbol, today.** Expiries are returned only for a symbol in a verified
+F&O membership list, and `Ticker` supplies no membership list, so the empty tuple is what every
+caller gets -- which is also what live `yfinance 1.7.0` returns for NSE underlyings. Branch on
+`if not ticker.options:` rather than indexing it.
 
 #### `ticker.option_chain(date: str)` -> `OptionChain`
-Object containing `calls` and `puts` DataFrames with columns `['contractSymbol', 'strike', 'lastPrice', 'openInterest', 'impliedVolatility']`.
+~~Object containing `calls` and `puts` DataFrames with columns
+`['contractSymbol', 'strike', 'lastPrice', 'openInterest', 'impliedVolatility']`.~~
+**Always an empty chain.** `calls` and `puts` are both **zero-row `(0, 13)` frames** carrying
+the full yfinance column set -- `bfinance.market.derivatives.YF_CHAIN_COLUMNS`:
+`contractSymbol`, `strike`, `lastPrice`, `bid`, `ask`, `change`, `percentChange`, `volume`,
+`openInterest`, `impliedVolatility`, `inTheMoney`, `contractSize`, `currency` -- so you can index
+a column without a `KeyError`. Every cell is null and `len(chain.calls) == 0`. The fabricator
+that used to synthesise strikes, Greeks, volume and open interest here has been **deleted**;
+those were random numbers shaped like an exchange quote. **Do not read a quote out of this.**
 
 ---
 
 ### 2.3 10-Year Financial Statements
 
-All financial statements return standard Pandas DataFrames where rows are financial line items and columns are fiscal period end dates (e.g. `'Mar 2022'`, `'Mar 2023'`, `'Mar 2024'`, `'Mar 2025'`, `'Mar 2026'`, `'TTM'`).
+~~All financial statements return standard Pandas DataFrames where rows are financial line items
+and columns are fiscal period end dates (e.g. `'Mar 2022'`, `'Mar 2023'`, `'Mar 2024'`,
+`'Mar 2025'`, `'Mar 2026'`, `'TTM'`).~~ **Both halves of that are now false for the `Ticker`
+accessors below.** They return `FinancialStatement.to_yfinance()` -- the yfinance shape:
+
+* **Columns are a `pd.DatetimeIndex` of month-end timestamps** (`Timestamp('2026-03-31')`), **not**
+  strings like `'Mar 2022'`. `df["Mar 2026"]` is a `KeyError`.
+* **Columns are ordered newest-first**, as yfinance orders them, so `df.columns[0]` is the latest
+  period rather than the oldest.
+* **There is no `'TTM'` column.** A trailing-twelve-months total is not a fiscal period and has no
+  month-end date, so it is dropped **by name**; the dropped headers are published on the frame as
+  `df.attrs['bfinance_dropped_period_columns']`. The TTM values are not lost, just not here.
+* **Values are absolute rupees, not Rs Crore -- but only on the monetary rows.** screener.in
+  states a row's unit in its label, so the `1e7` crore-to-rupee conversion is applied only to rows
+  that really are amounts. Percentages (`OPM %`, `Tax Rate`, `Dividend Payout %`, `ROCE %`),
+  per-share quantities (`Diluted EPS`) and ratio / days / count rows (`CFO/OP`, `Debtor Days`,
+  `No. of Shareholders`) pass through **unscaled**. So `income_stmt.loc["OPM %"]` is `35.0`, not
+  `350000000.0`.
+* **Row labels are yfinance's generic names**: `Sales` -> `Total Revenue`, `Net Profit` ->
+  `Net Income`, `Expenses` -> `Total Expenses`, `Operating Profit` -> `Operating Income`. Rows with
+  no mapping keep their Indian label.
+
+**The native shape was not removed.** `FinancialStatement.to_dataframe()` is unchanged and still
+returns the string headers, the Indian labels, Rs Crore and the `TTM` column. It is reached
+through the profile rather than through these accessors: `Ticker._ensure_profile()` returns a
+`CompanyProfile` whose `.profit_loss`, `.quarters`, `.balance_sheet` and `.cash_flow` are
+`FinancialStatement` models. `docs/RELEASE_0.2.0.md` section 6 is the release note for the break.
 
 * **`ticker.financials`** / **`ticker.income_stmt`**: 10 to 13+ Years Audited Annual Ind AS Income Statement.
-* **`ticker.quarterly_financials`** / **`ticker.quarterly_income_stmt`**: 12 to 16+ Historical Quarterly Results.
+* **`ticker.quarterly_financials`** / **`ticker.quarterly_income_stmt`**: 12 to 16+ Historical
+  Quarterly Results. Quarterly *income* is served, so these are the two quarterly accessors that
+  return a frame; they raise `NotImplementedError` only if the profile carries no quarters at all.
 * **`ticker.balance_sheet`**: 10 to 13+ Years Audited Annual Balance Sheet.
-* **`ticker.quarterly_balance_sheet`**: Historical Quarterly Balance Sheets.
+* **`ticker.quarterly_balance_sheet`**: ~~Historical Quarterly Balance Sheets.~~ **Raises
+  `NotImplementedError`.** There is no quarterly-balance-sheet source upstream, so this is annual
+  only. The property is a one-line delegate to `get_balance_sheet(freq="quarterly")` and **the
+  raise is inside that method, not in the property body** -- so calling
+  `ticker.get_balance_sheet(freq="quarterly")` directly raises the same exception.
+  **A caller gets an exception, not a frame**; `df["Total Assets"]` never gets the chance to fail.
 * **`ticker.cashflow`** / **`ticker.cash_flow`**: 10 to 13+ Years Annual Cash Flow Statement (CFO, CFI, CFF).
-* **`ticker.quarterly_cashflow`** / **`ticker.quarterly_cash_flow`**: Historical Quarterly Cash Flow.
+* **`ticker.quarterly_cashflow`** / **`ticker.quarterly_cash_flow`**: ~~Historical Quarterly Cash
+  Flow.~~ **Raises `NotImplementedError`**, annual only, for the same reason. The raise is in
+  `get_cash_flow(freq="quarterly")` rather than in either property body. **A caller gets an
+  exception, not a frame.**
 
 ---
 
@@ -310,15 +384,32 @@ group = bf.Tickers(["RELIANCE", "TCS", "INFY"])
 
 ---
 
-## 4. `bfinance.Sector` & `bfinance.Industry` Classes
+## 4. `bfinance.Sector` & `bfinance.Industry` (removed in 0.2.0)
 
-Compatible with `yfinance 1.4.0+`:
+~~Compatible with `yfinance 1.4.0+`:~~
 
 ```python
 sec = bf.Sector("technology")
 print("Top Constituents:\n", sec.top_companies)
 print("ETF Constituents:\n", sec.top_etfs)
 ```
+
+**The code above does not work. `bf.Sector` and `bf.Industry` do not exist, and were not
+renamed to anything.** Verified in this tree: `hasattr(bfinance, "Sector")` is `False`,
+`hasattr(bfinance, "Industry")` is `False`, and `from bfinance.sector import Sector` raises
+`ModuleNotFoundError`.
+
+They were removed on correctness grounds, not deprecation grounds: the old
+`bfinance/sector.py` was a **hardcoded 4-sector / 20-company table with hardcoded prices and
+P/Es and no HTTP call anywhere in the file**, so every number it returned was invented. A
+`AttributeError` on first call is the intended signal, not a bug to report, and there is no
+deprecation shim.
+
+For a real sector or industry membership use
+`ScreenerClient.get_industry_constituents`, which reads a leaf industry's own page -- and which
+is itself **partial by construction**, because screener.in's `robots.txt` disallows the
+`?page=` / `?limit=` a full list would need. `docs/YFINANCE_MIGRATION_GUIDE.md` section 3.D is
+the long form; `docs/RELEASE_0.2.0.md` section 1 is the release note.
 
 ---
 
@@ -363,7 +454,11 @@ Executes an agent tool call and returns the formatted response.
 All data models are defined using strict **Pydantic v2** models in `bfinance.models`:
 * `CompanyProfile`: Root container holding 100% of corporate data.
 * `TopRatios`: Valuation and quality ratios card.
-* `FinancialStatement`: Statement model supporting `.to_dataframe()` and `.empty`.
+* `FinancialStatement`: Statement model supporting `.empty`, `.to_dataframe()` and
+  `.to_yfinance()`. `.to_dataframe()` is the **native** shape (string headers, Indian labels,
+  Rs Crore, `TTM` column); `.to_yfinance()` is the **yfinance** shape (newest-first
+  `pd.DatetimeIndex` columns, generic labels, absolute rupees on the money rows, no `TTM`), and
+  it is the one the `Ticker` statement accessors return. See section 2.3.
 * `Concall`: Conference call audio, transcript, and PPT links.
 * `PeerStock`: Peer comparison item.
 * `OptionChain` / `OptionContract`: Derivatives chain data.

@@ -578,7 +578,14 @@ class TestShareholding:
 
 
 class TestYfinanceLabelMapping:
-    """Indian row labels must reach the generic yfinance names, scaled to absolute rupees."""
+    """Indian row labels must reach the generic yfinance names, with the money rows scaled to
+    absolute rupees.
+
+    "the money rows" is load-bearing, not a hedge: the Cr->Rs scale converts amounts, so a
+    percentage, a per-share quantity and a ratio/days/count row are not converted at all.
+    ``test_unmapped_labels_are_kept_as_they_are`` below says why no value is asserted there,
+    and ``tests/test_statement_row_units.py`` is where the per-row rule is pinned.
+    """
 
     def test_profit_loss_labels_are_remapped(self):
         yf = parse("itc").profit_loss.to_yfinance()
@@ -651,13 +658,24 @@ class TestYfinanceLabelMapping:
         yf = parse("itc").profit_loss.to_yfinance()
         assert "OPM %" in yf.index, "an unmapped row must survive rather than be dropped"
         assert yf.index.is_unique
-        # KNOWN ADJACENT DEFECT, deliberately not asserted here: ``OPM %`` is a percentage and
-        # is scaled x1e7 like every other row, so it reads 350000000.0 for a reported 35.0.
-        # The 0.2.0 work exempted *per-share* rows from the Cr->Rs scale
-        # (``models/statements.PER_SHARE_LABELS``); it did not exempt *percentage* rows, and
-        # widening the exemption is a separate decision with its own fixture evidence. No
-        # assertion is written on the current value, because writing one would state the
-        # defect as if it were the contract.
+        # This used to carry a ``KNOWN ADJACENT DEFECT`` note saying ``OPM %`` "is scaled
+        # x1e7 like every other row" and that widening the exemption was "a separate
+        # decision". Both halves were true when written and neither is now.
+        #
+        # **The defect it recorded was real, and it is fixed.** ``PER_SHARE_LABELS`` alone
+        # exempted ``Diluted EPS``, so every percentage row went through the Cr->Rs scale
+        # with the money: a recorded ``OPM %`` of 35.0 came back as 350000000.0 out of
+        # ``get_income_stmt()``. The scale is now decided per row from the label screener.in
+        # printed -- a trailing ``%``, a per-share row and a ratio/days/count row are not Rs
+        # Cr and are not converted -- so ``OPM %`` reads 35.0. See
+        # ``models/statements._rows_to_scale``.
+        #
+        # The two assertions above are unchanged and are still this test's subject: an
+        # unmapped row must survive the rename rather than be dropped, and the index must
+        # stay unique. The *value* is deliberately not asserted here, because the row's units
+        # are owned by ``tests/test_statement_row_units.py``, which pins every
+        # percentage/per-share/ratio row in both recordings plus the money rows in the same
+        # frame as the control. Two files asserting one number is how the two drift.
 
     def test_the_mapping_table_covers_every_label_the_recorded_page_emits(self):
         """A recorded screener row with no yfinance equivalent is fine; a *missing* mapping for a

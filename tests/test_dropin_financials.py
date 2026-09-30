@@ -277,8 +277,18 @@ def test_to_yfinance_bridge_third_anchor_net_income_inclusive():
 def test_to_yfinance_quarterly_bridge_datetime():
     from bfinance.ticker import Ticker
 
+    # The accessor call is the *precondition*, not the subject, so its result is
+    # deliberately discarded rather than bound to a name nothing reads (ruff F841). Two
+    # reasons the call itself must stay, and neither is the return value:
+    #   1. it is the only thing that raises ``NotImplementedError`` when the backend serves
+    #      no quarterly table, which skips this test instead of letting the assertions below
+    #      pass vacuously against an empty bridge;
+    #   2. it drives the ``freq="quarterly"`` branch of ``Ticker.get_income_stmt`` and the
+    #      parse behind it, so a broken accessor path fails here rather than in production.
+    # The frame it returns is built by the same ``profile.quarters.to_yfinance()`` the
+    # assertions below check, so restating it here would be a second copy of the contract.
     try:
-        qdf = Ticker(TICKER).get_income_stmt(freq="quarterly")
+        Ticker(TICKER).get_income_stmt(freq="quarterly")
     except NotImplementedError:
         pytest.skip("quarterly income not supported by backend")
     prof = Ticker(TICKER)._ensure_profile()

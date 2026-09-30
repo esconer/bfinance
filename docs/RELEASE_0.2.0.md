@@ -105,11 +105,23 @@ Two decisions inside the converter, both recorded rather than inferred:
   being invented for it. The drop is now made *by name* and published on the frame as
   `attrs["bfinance_dropped_period_columns"]`. The values are not lost: they stay on the
   native shape.
-- **Per-share rows are exempt from the crore scale.** yfinance's `Diluted EPS` is rupees per
-  share, so the `1e7` scale that every other row gets turned screener's reported `16.51`
-  into `165,100,000` -- a per-share number in absolute-rupee units. `models/statements.py`
-  now carries `PER_SHARE_LABELS` for this. Known adjacent defect, **not** fixed here: the
-  percentage rows (`OPM %`, `Tax Rate`, `Dividend Payout %`) are still scaled the same way.
+- **Only the money rows are scaled, and the per-share exemption was the first half of it.**
+  yfinance's `Diluted EPS` is rupees per share, so the `1e7` scale turned screener's reported
+  `16.51` into `165,100,000` -- a per-share number in absolute-rupee units. `models/statements.py`
+  carries `PER_SHARE_LABELS` for that.
+  ~~Known adjacent defect, **not** fixed here: the percentage rows (`OPM %`, `Tax Rate`,
+  `Dividend Payout %`) are still scaled the same way.~~ **That is now fixed too, and the
+  note above was false as soon as the accessor was wired.** The percentage rows were scaled
+  alongside the money ones, so a recorded `OPM %` of 35.0 came out of `get_income_stmt()` as
+  `350000000.0` -- fabricated magnitude on the primary return path, which the 0.1.3 -> 0.2.0
+  notes above describe as the point of the release. The scale is now decided per row from the
+  label screener.in printed, and **before** the rename, because `Tax %` becomes `Tax Rate` and
+  the output label no longer carries a `%`: a trailing `%` is a percentage, a per-share row is
+  already rupees, and a ratio / days / count row is dimensionless. `RATIO_LABELS` names the
+  latter, every entry a row the committed recordings actually emit. Pinned by
+  `tests/test_statement_row_units.py`, which asserts the corrected value for every such row in
+  both recordings *and* the money rows in the same frame as the control, so "delete the
+  scaling" cannot satisfy it.
 
 ## Data honesty changes worth stating plainly
 

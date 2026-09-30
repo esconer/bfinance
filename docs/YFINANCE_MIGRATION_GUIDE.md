@@ -234,6 +234,19 @@ libraries (`pytest -m live`). Measured on RELIANCE.NS:
   ₹Cr), and `to_dataframe()` remains the native metric-row/₹Cr frame
 * dividends amounts within 3% (FY-end vs ex-date conventions differ — see table)
 
+**The crore-to-rupee conversion applies to the money rows only.** screener.in states a row's
+unit in its label, so a row is converted only if it is actually an amount in crore: a
+trailing `%` (`OPM %`, `Tax Rate`, `Dividend Payout %`, `ROCE %`) is a percentage, a per-share
+row is already rupees (`Diluted EPS`), and a ratio / days / count row (`CFO/OP`,
+`Debtor Days`, `No. of Shareholders`) is dimensionless. All three pass through **unscaled**,
+so `income_stmt.loc["OPM %"]` is `35.0` and not `350000000.0`. This was a real defect on the
+accessor's primary return path and is pinned by `tests/test_statement_row_units.py`, which
+also asserts the money rows in the same frame are still converted. Two consequences for a
+migrating user: **there is no `TTM` column** (a trailing-twelve-months total has no month-end
+date, so it is dropped by name and the decision is published in
+`attrs["bfinance_dropped_period_columns"]`), and the native crore values are one call away at
+`FinancialStatement.to_dataframe()`.
+
 Deliberate extras (never silent): `freq="quarterly"` on income uses real quarterly
 P&L; the native ₹Cr statement is reached through `FinancialStatement.to_dataframe()`,
 not through the accessors; `Ticker("X", True)` bool

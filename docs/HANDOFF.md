@@ -36,8 +36,19 @@ HEAD baseline was 45 (24 F401 + 21 E402), so the delta is **−1**: nothing adde
 ~100 tests are marked live; the offline suite is provably network-free (instrumented at the
 httpx/socket/sqlite layer with a cold `HOME`).
 
-The **7 remaining xfails are intentional alarms** for issue 04 (the 0.2.0 statement-shape break).
-When issue 04 lands they will XPASS-fail under `strict=True`, which is the signal to remove the markers.
+~~The **7 remaining xfails are intentional alarms** for issue 04 (the 0.2.0 statement-shape break).
+When issue 04 lands they will XPASS-fail under `strict=True`, which is the signal to remove the markers.~~
+**FIXED -- the armed condition came to pass and the alarms fired as designed.** Issue 04 landed
+(`be218a7`), the seven `xfail(strict=True)` markers in `tests/test_stmt_accessor_contract.py`
+XPASSed and were *replaced*, not deleted, by an `ast` presence check plus one test that
+re-asserts all seven yfinance properties against a real `Ticker`. The accessors return the
+**yfinance** shape (metric-row, generic labels, newest-first `DatetimeIndex`, absolute rupees);
+the native Indian-label Rs-Cr frame is still reachable and unchanged through
+`FinancialStatement.to_dataframe()`. The one remaining xfail in the offline suite belongs to
+`tests/test_split_fabrication.py` and is unrelated. See `docs/RELEASE_0.2.0.md` section 6.
+
+The `637 passed ... 7 xfailed` line above is the **2026-09-27** run recorded by this session and
+is left as written; it is a dated measurement, not a live count. The suite has moved on since.
 
 ---
 
