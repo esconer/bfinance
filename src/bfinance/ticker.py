@@ -330,22 +330,52 @@ class Ticker:
                 the feed recorded that bfinance declines to convert -- e.g. a demerger), and
                 ``price_basis`` (a machine-readable basis string, e.g.
                 ``as_traded_share_count_adjusted``).
-            auto_adjust: yfinance's own default, and now bfinance's. ``True`` scales
-                Open/High/Low/Close by ``Adj Close / Close`` and drops ``Adj Close``, so the
-                columns are yfinance's: ``['Open', 'High', 'Low', 'Close', 'Volume']`` (+ the
-                action columns). Pass ``False`` for the strictly richer frame that also carries
+            auto_adjust: ``True`` by default -- yfinance's own default since 1.7, and this
+                method's default was flipped to match it on 2026-09-30. ``True`` performs
+                yfinance's adjustment: scale Open/High/Low/Close by ``Adj Close / Close`` and
+                drop ``Adj Close``, leaving Volume and the action columns alone. The columns are
+                then yfinance's own: ``['Open', 'High', 'Low', 'Close', 'Volume']`` (+ the action
+                columns). Pass ``False`` for the strictly richer frame that also carries
                 ``Adj Close``, the full adjusted series.
 
-                ``True`` raises :class:`AdjustmentNotAvailableError` where ``Adj Close`` is not
-                an adjusted series -- a derived-O/H/L frame, an empty frame, no ex-dated actions
-                feed, or the Screener.in fiscal-year-end approximation -- because scaling four
-                price columns by a non-adjustment fabricates history. It does NOT raise when the
-                factor was applied but is incomplete: the prices are still scaled by a real
-                ``Adj Close`` and ``bfinance_adjustment_incomplete`` discloses the residual gap.
+                ``True`` raises :class:`AdjustmentNotAvailableError` in exactly **three** cases,
+                all of them where there is no real frame to return instead: ``ohlc="synthetic"``
+                (O/H/L derived from Close, never back-adjusted, so there is no factor at all); an
+                empty frame (no bars in the window, so no feed was asked and nothing could have
+                been adjusted); and an actions feed that answered with no ex-dated rows -- the
+                ``attrs["bfinance_actions_source"]`` value is
+                ``"none"`` when the feed was empty or down. Each message names which case it is.
+                The ``ohlc="synthetic"`` one is decided before any request is spent.
+
+                **It does NOT raise for the Screener.in fiscal-year-end approximation.** That was
+                a fourth refusing case until 2026-10-01 and it was the wrong one to keep: NSE's
+                corporate-actions feed has no index for an ETF, so ``MAFANG``, ``HNGSNGBEES``
+                and ``NIFTYBEES`` all land on the approximation, and raising made every ETF in a
+                mixed equity + ETF portfolio fail while the same call returned 21 real bars for
+                NTPC, RELIANCE, WIPRO, CIPLA and INDGN. What is missing there is the
+                *adjustment*, not the prices. So the frame is now RETURNED, with O/H/L/C exactly
+                as the archive printed them, ``Adj Close`` dropped so the column set stays
+                yfinance's, the approximation's implied ratio deliberately NOT multiplied in, and
+                the gap published: ``attrs["bfinance_adjustment_applied"] is False`` with the
+                reason in ``attrs["bfinance_adjustment_applied_detail"]``, which also names
+                ``auto_adjust=False`` as the way to keep ``Adj Close``. Branch on that bool; it is
+                present on every frame, so a consumer never probes for its absence.
+
+                Nor does it raise when the factor was applied but is incomplete
+                (``bfinance_corporate_actions_applied is False``): ``Adj Close`` came from the
+                real ex-dated feed, so scaling by it is sound and
+                ``bfinance_adjustment_incomplete`` discloses the residual gap.
+
+                ``auto_adjust`` is independent of ``actions``, exactly as in yfinance: the
+                corporate-actions feed is resolved whenever either flag asks for it, because the
+                factor is derived from it, and ``actions`` alone decides whether the
+                ``Dividends`` / ``Stock Splits`` columns are published.
 
         Raises:
-            AdjustmentNotAvailableError: ``auto_adjust=True`` where ``Adj Close`` is not an
-                adjusted series.
+            AdjustmentNotAvailableError: ``auto_adjust=True`` on synthetic bars, an empty frame,
+                or no ex-dated actions feed -- the three cases with no real frame to return.
+                NOT for the fiscal-year-end approximation, which is answered unadjusted with
+                ``bfinance_adjustment_applied = False``.
             RealOHLCUnavailableError: default source could not serve the window.
             ValueError: an unknown ``source``/``sources`` name, refused before any request.
             bfinance.sources.errors.SourceUnavailableError: the cascade ran and every named or
@@ -541,7 +571,26 @@ class Ticker:
 
     @property
     def splits(self) -> pd.Series:
-        """Historical stock splits and bonus issues series (pd.Series)."""
+        """
+        Historical stock splits and bonus issues series -- **empty for every symbol, today.**
+
+        This property is not broken and is not unreachable; it is deliberately an honest absence.
+        :meth:`bfinance.market.corporate.CorporateActionsEngine.extract_splits` returns an empty
+        Series by construction because it used to INFER splits from growth in the balance sheet's
+        ``Equity Capital`` row, and that inference was deleted: ``Equity Capital`` is
+        ``shares issued x face value``, so a 1:1 bonus, a rights issue, a QIP and an ESOP
+        conversion are the same number in the same field, and no threshold separates them.
+        Measured, a capital raise at a company with no share-count event produced a fabricated
+        ``{2026-03-31: 5.26}`` split that rescaled every earlier bar by 1/5.26 while the frame's
+        provenance flags still claimed a complete adjustment.
+
+        Splits are a *declared* fact, not an inferred one, and the real source for price
+        adjustment is :func:`bfinance.nse.corporate_actions.split_ratio`, which reads the ratio out
+        of the NSE filing. That path already supplies the factor ``history()`` uses; this property
+        is the Screener.in-profile surface only. Downstream an empty series reads as ``0.0``, which
+        :meth:`bfinance.market.corporate.CorporateActionsEngine.merge_actions_into_history`
+        documents as "not known", not "none happened".
+        """
         profile = self._ensure_profile()
         return CorporateActionsEngine.extract_splits(profile)
 

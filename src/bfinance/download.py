@@ -275,10 +275,31 @@ def download(
         auto_adjust: Adjust all OHLC automatically. Defaults to ``True``, matching
             yfinance 1.7: the four price columns are scaled by ``Adj Close / Close`` and
             ``Adj Close`` is dropped, so the default columns are yfinance's. Pass ``False``
-            for the strictly richer frame that also carries ``Adj Close``. Independent of
-            ``actions``, exactly as in yfinance: the corporate-actions feed is resolved either
-            way because the factor comes from it, and ``actions`` alone decides whether the
-            ``Dividends`` / ``Stock Splits`` columns are published.
+            for the strictly richer frame that also carries ``Adj Close``.
+
+            **The old reason for the ``False`` default was overruled on 2026-09-30.** It read
+            "Defaults to False and must stay False: the bhavcopy carries no corporate-actions
+            series, so True raises AdjustmentNotAvailableError". Both halves were true and the
+            conclusion was still wrong. The feed is real -- it is a separate NSE corporate-actions
+            reader, not the price archive -- and the refusal fired for the wrong reason: this
+            function defaulted ``actions=False``, and under the old code ``actions=False`` was
+            ITSELF a refusal for ``auto_adjust=True``. The gate was decoupling the *fetch* from
+            the *publication* of the actions series, not refusing to adjust: in yfinance the
+            ``actions`` flag decides only whether ``Dividends`` / ``Stock Splits`` are published,
+            while the ``Adj Close`` the scaling reads is fetched either way. Gating the feed on
+            ``actions`` was our divergence from parity, not a safety property. Measured, with the
+            default flipped but the gate not: ``download(["NTPC","RELIANCE"], period="5d")``
+            returned shape ``(0, 0)`` -- the refusal raising inside ``history_async`` and being
+            swallowed by ``_download_single``'s bare ``except`` -- while the same call with
+            ``actions=True`` returned 7 columns. Fixed with ``fetch_actions = actions or
+            auto_adjust``, so the feed is resolved whenever either flag asks for it and ``actions``
+            alone decides publication. The now-unreachable refusal branch is kept, reworded, in
+            :func:`bfinance.market.ohlcv._auto_adjust_refusal`.
+
+            A symbol that genuinely cannot be adjusted -- synthetic bars, no bars, or no ex-dated
+            feed -- does not fail the batch. ``auto_adjust=True`` raises inside the per-symbol
+            worker, which swallows it, so that symbol appears as an all-``NaN`` column like any
+            other non-answer. Pass ``raise_errors=True`` to get the exception instead.
         rounding: Round values to 2 decimal places (default False).
         multi_level_index: Always return a MultiIndex DataFrame (default True).
         proxy: Optional HTTP/HTTPS/SOCKS5 proxy URL string.

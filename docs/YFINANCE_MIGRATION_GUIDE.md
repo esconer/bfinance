@@ -42,8 +42,8 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | :--- | :--- | :--- |
 | `yf.Ticker(symbol)` | `bf.Ticker(symbol)` | Supports `'RELIANCE'`, `'RELIANCE.NS'`, `'500325.BO'` |
 | `ticker.fast_info` | `ticker.fast_info` | Scalar properties (`last_price`, `market_cap`, `year_high`, `year_low`, `shares`, `currency='INR'`, `exchange='NSE'`) |
-| `ticker.info` | `ticker.info` | 180+ key dictionary matching standard Yahoo schema + Indian extras (`marketCapInCr`, `roce`) |
-| `ticker.history(...)` | `ticker.history(...)` | Identical DataFrame schema (`Open`, `High`, `Low`, `Close`, `Adj Close`, `Volume`, `Dividends`, `Stock Splits`) |
+| `ticker.info` | `ticker.info` | **76-key** dictionary matching the standard Yahoo schema + Indian extras (`marketCapInCr`, `roce`). Read `bfinance.market.quotes.INFO_VALUE_UNITS` for the unit of every key; the return/yield keys are deliberately mixed-unit |
+| `ticker.history(...)` | `ticker.history(...)` | `auto_adjust` defaults to `True` (yfinance 1.7), so the default columns are `Open`, `High`, `Low`, `Close`, `Volume` (+ `Dividends`, `Stock Splits`). Pass `auto_adjust=False` for the `Adj Close` column |
 | `ticker.get_history_metadata()` | `ticker.get_history_metadata()` | `yfinance 1.7.0` metadata dictionary |
 | `ticker.financials` / `income_stmt` | `ticker.financials` / `income_stmt` | **Upgraded**: 10–13 years Ind AS statements instead of Yahoo's 4-year limit |
 | `ticker.quarterly_income_stmt` | `ticker.quarterly_income_stmt` | **Upgraded**: 12–16 historical quarters instead of 4 quarters |
@@ -52,7 +52,7 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | `ticker.cash_flow` / `cashflow` | `ticker.cash_flow` / `cashflow` | **Upgraded**: 10–13 years cash flow statements (CFO, CFI, CFF) |
 | `ticker.quarterly_cash_flow` | raises `NotImplementedError` | No quarterly-CF source upstream; annual only |
 | `ticker.dividends` | `ticker.dividends` | Per-share amounts match yfinance (≤3%); dates are FY-end (Mar-31), yfinance uses ex-dates |
-| `ticker.splits` | `ticker.splits` | Same ratios; bonus issues represented as split factors on FY-end dates |
+| `ticker.splits` | `ticker.splits` | **Always empty, by design — this one diverges from yfinance, which does report splits.** bfinance used to infer a split from growth in the balance sheet's `Equity Capital` row and deleted it: that field is `shares x face value`, so a bonus, a rights issue, a QIP and an ESOP conversion are the same number in the same field. `history()` still gets real split factors, from the NSE filing via `bfinance.nse.corporate_actions.split_ratio` |
 | `ticker.actions` | `ticker.actions` | Dividends + splits merged frame, yfinance-shaped columns |
 | `ticker.capital_gains` | `ticker.capital_gains` | Empty like yfinance for Indian equities |
 | `ticker.major_holders` | `ticker.major_holders` | Numeric `Value` column (fraction), yfinance-shaped |
@@ -227,7 +227,8 @@ print(ticker.valuation_measures)
 libraries (`pytest -m live`). Measured on RELIANCE.NS:
 
 * history Close within 0.6% (1mo/1y), tz `Asia/Kolkata`, weekly intervals resampled,
-  `auto_adjust`/`actions` flags honored like yfinance 1.7 defaults
+  `auto_adjust`/`actions` flags honored like yfinance 1.7 defaults (`auto_adjust=True` was
+  adopted on 2026-09-30; it was `False` and column-incompatible with yfinance before that)
 * info values within 2.5% (price, mcap, EPS, float, 50d/200d averages, prev close exact)
 * statements self-consistent (Assets ≈ Liab+Equity ≤5%); the accessors return the yfinance
   shape (metric-row, generic labels, newest-first `DatetimeIndex`, absolute ₹ rather than

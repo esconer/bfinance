@@ -10,9 +10,16 @@ Removed in this working tree:
   to restore because there was never a fetch. For real sector/industry classification use
   ``Ticker.sector``, ``Ticker.industry`` and ``Ticker.sub_industry``, which read the genuine
   four-level taxonomy off the company profile.
-* ``DerivativesEngine.generate_option_chain`` — deleted. It priced options with a closed-form
-  heuristic and drew volume/open interest from a seeded RNG. ``Ticker.option_chain()`` now always
-  returns an empty chain.
+* ``DerivativesEngine.generate_option_chain`` — **present, and it raises
+  ``NotImplementedError``** rather than returning anything. It used to price options with a
+  closed-form heuristic and draw volume/open interest from a seeded RNG; that fabrication is
+  deleted and the SHA-256-seeded ``random.Random`` that served it went with it, along with the
+  ``hashlib`` and ``random`` imports. The method was kept, as a typed refusal, so a caller who
+  reaches it is told the truth instead of being handed invented open interest. The deleted
+  behaviour, and the measured reason, are recorded at
+  :meth:`bfinance.market.derivatives.DerivativesEngine.generate_option_chain` itself and pinned
+  by name in ``tests/test_no_lying_docs.py``. ``Ticker.option_chain()`` returns an empty chain,
+  which is truthful: an unlisted option has no contracts.
 
 Not imported here, on purpose
 -----------------------------

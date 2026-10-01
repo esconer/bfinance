@@ -6,7 +6,12 @@ for RELIANCE.NS (+ NIFTYBEES.NS for ETF dividend behavior only).
 Conventions recorded here (see src/bfinance/market/corporate.py):
 - yfinance dividends indexed by EX-DATE; bfinance by FISCAL YEAR-END
   (Mar-31 Asia/Kolkata). Amounts compared within 5% for last 4 payouts.
-- Bonus issues: BOTH sides represent 1:1 bonus as a 2.0 split ratio.
+- Splits: yfinance represents a 1:1 bonus as a 2.0 split ratio. bfinance's
+  `Ticker.splits` is EMPTY for every symbol, by construction, and this file asserts
+  that DIVERGENCE rather than parity. It used to assert parity -- reading
+  `b.index[-1]` off a series that is empty by construction, so it could only fail on
+  IndexError. The equity-capital inference that used to populate it was deleted; see
+  `test_splits_is_empty_by_design_and_yfinance_still_has_them`.
 - yfinance capital_gains is EMPTY for Indian equities; bfinance matches.
 - yfinance options == () for NSE underlyings (even RELIANCE.NS, an F&O
   stock); option_chain() empty, dated expiry raises ValueError.
@@ -26,6 +31,7 @@ from bfinance.market.corporate import (
     YF_MAJOR_HOLDERS_INDEX,
     CorporateActionsEngine,
 )
+from bfinance.models.company import CompanyProfile, FinancialStatement
 from bfinance.market.derivatives import DerivativesEngine, YF_CHAIN_COLUMNS
 from bfinance.ticker import Ticker
 
@@ -61,18 +67,100 @@ def test_dividends_last4_amounts_and_conventions():
         assert (ts.date() - b_date).days > 3, "expected convention gap (ex-date vs FY-end)"
 
 
-def test_splits_last_split_ratio_and_bonus_convention():
-    """Last split: same ratio; both sides render 1:1 bonus as 2.0."""
+def test_splits_is_empty_by_design_and_yfinance_still_has_them():
+    """
+    ``Ticker.splits`` is EMPTY for every symbol, and that is the deliberate current behaviour.
+
+    It used to be asserted the other way round: this test read ``b.index[-1]`` off the bfinance
+    series and compared the ratio to yfinance's, on the understanding that bfinance inferred a
+    split from growth in the balance sheet's ``Equity Capital`` row. That inference was deleted
+    from :meth:`CorporateActionsEngine.extract_splits`, whose own docstring is kept precisely so
+    it is not re-added -- so this test indexed an always-empty Series and could only ever fail on
+    ``IndexError``. It is rewritten to pin what the code now does, and WHY.
+
+    The reason, in one line: ``Equity Capital`` is ``shares issued x face value``, so a 1:1 bonus,
+    a rights issue, a QIP and an ESOP conversion are *the same number in the same field*, and no
+    threshold separates them. The signal is not noisy, it is ambiguous. The measured cost of
+    keeping it: equity capital 4505 -> 23700 Cr at a company that has never had a share-count event
+    produced ``{2026-03-31: 5.26}`` as a "split", which rescaled every earlier bar by 1/5.26
+    (10.0 -> 1.901141) while the frame's provenance flags reported real bars and a complete
+    adjustment. That is the historical "Vodafone Idea reports four fabricated splits, never having
+    had one" bug.
+
+    So the assertion is DIVERGENCE, deliberately: yfinance has real splits and bfinance does not.
+    Asserting equality here would be asserting the fabrication back into existence.
+    """
     y = yf.Ticker(RELIANCE).splits
     b = Ticker(RELIANCE).splits
+
+    # The shape contract is still bfinance's, and is unchanged by the deletion.
     assert isinstance(b, pd.Series) and b.name == "Stock Splits"
-    assert str(b.index.tz) == "Asia/Kolkata"
-    y_date, y_ratio = y.index[-1].date(), float(y.iloc[-1])
-    b_date, b_ratio = b.index[-1].date(), float(b.iloc[-1])
-    print(f"yfinance last split: {y_date} ratio={y_ratio} (2024 1:1 bonus -> 2.0)")
-    print(f"bfinance last split: {b_date} ratio={b_ratio} (equity-cap doubling -> 2.0)")
-    assert y_ratio == pytest.approx(b_ratio), "bonus convention must both be 2.0"
-    assert y_ratio == pytest.approx(2.0)
+    assert b.empty, (
+        "Ticker.splits is no longer empty. extract_splits returns an empty Series BY CONSTRUCTION, "
+        "so a populated one means the equity-capital inference has been re-added. Read "
+        "market/corporate.py:extract_splits before changing anything here."
+    )
+    # An empty Series carries a plain RangeIndex, so there is no tz to check -- and that is
+    # correct rather than a defect: `extract_splits` returns `pd.Series(dtype=float, name=...)`
+    # with no index to localise. Asserted as "not a DatetimeIndex" rather than as a specific
+    # empty index type, so it states the fact without pinning an incidental pandas default.
+    assert not isinstance(b.index, pd.DatetimeIndex), (
+        f"an empty split series has no dates to localise; got {type(b.index).__name__}"
+    )
+
+    # The other half of the divergence, stated so a future reader cannot mistake it for a gap:
+    # yfinance publishes the declared event and we do not, on this surface.
+    assert len(y) > 0, (
+        "yfinance now reports no splits for RELIANCE.NS; if it stopped, this test's divergence "
+        "claim needs re-measuring against the live feed."
+    )
+    print(f"yfinance splits: {len(y)} declared event(s); bfinance splits: {len(b)} by design")
+    print(
+        "bfinance takes split ratios from the NSE filing "
+        "(bfinance.nse.corporate_actions.split_ratio), not from an inferred balance-sheet ratio."
+    )
+
+
+def test_extract_splits_is_unconditional_so_no_balance_sheet_can_re_add_the_inference():
+    """
+    The negative control for the test above, and the non-vacuity proof for the split claim.
+
+    ``extract_splits(profile)`` takes a profile and returns an empty Series **without reading it**.
+    That is asserted structurally -- over a profile carrying the exact signal the deleted inference
+    keyed on -- rather than asserted as "it happened to be empty today", which would be equally true
+    of a property that is simply broken.
+
+    The signal is ``Equity Capital``, a row of the BALANCE SHEET, not a ``TopRatios`` field: the
+    deleted code divided consecutive periods of it and wrote a split at ``ratio >= 1.5``. So the
+    control builds a real :class:`FinancialStatement` carrying the measured capital raise,
+    4505 -> 23700 Cr -- a ratio of 5.2608, which cleared that cliff by more than three times --
+    and requires the answer to still be empty. Nothing is mutated and no network is spent, so the
+    control is deterministic. If the inference is ever pasted back, this goes red; if the property
+    is ever wired to a real source, the first test is the one that must change deliberately.
+    """
+    raise_cr = FinancialStatement(
+        headers=["Mar 2025", "Mar 2026"],
+        rows={"Equity Capital": [4505.0, 23700.0]},
+    )
+    profile = CompanyProfile(
+        symbol=RELIANCE, company_id=0, name="R", balance_sheet=raise_cr
+    )
+    split_series = CorporateActionsEngine.extract_splits(profile)
+
+    assert 23700.0 / 4505.0 == pytest.approx(5.2608, abs=1e-4), (
+        "the control's input must still be the measured 5.26x capital raise"
+    )
+    assert 23700.0 / 4505.0 > 1.5, "the control must clear the deleted ratio >= 1.5 cliff"
+    assert split_series.empty, (
+        "a 5.26x Equity Capital jump produced a split. That is the deleted equity-capital "
+        "inference, and it is indistinguishable from a rights issue, a QIP or an ESOP conversion."
+    )
+    assert list(split_series.index) == []
+    assert split_series.name == "Stock Splits"
+    print(
+        "Equity Capital 4505 -> 23700 Cr (ratio 5.2608, the deleted >= 1.5 cliff) still yields no "
+        "split: ambiguous input, no inferred output."
+    )
 
 
 def test_actions_shape_contract():

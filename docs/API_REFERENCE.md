@@ -65,10 +65,18 @@ is authoritative for the rest.
   `Adj Close`; pass `False` for the strictly richer frame that also carries `Adj Close`. It is
   independent of `actions`: the corporate-actions feed is resolved either way because the factor
   comes from it, and `actions` alone decides whether the two action columns are published.
-  `True` raises `AdjustmentNotAvailableError` where `Adj Close` is not a real adjusted series
-  (a derived-O/H/L frame, an empty frame, no ex-dated actions feed, or the Screener.in
-  fiscal-year-end approximation) -- measured live, `MAFANG` is in that state, because the NSE
-  corporate-actions feed does not index it.
+  `True` raises `AdjustmentNotAvailableError` in exactly **three** cases, all of them where there
+  is no real frame to return instead -- a derived-O/H/L frame (`ohlc="synthetic"`), an empty
+  frame, and no ex-dated actions feed. **It does not raise for the Screener.in fiscal-year-end
+  approximation**: that was a fourth refusing case until 2026-10-01 and is now answered instead,
+  with `O/H/L/C` exactly as the archive printed them, `Adj Close` dropped, the approximation's
+  implied ratio deliberately *not* applied, `attrs["bfinance_adjustment_applied"] = False`, and
+  the reason in `attrs["bfinance_adjustment_applied_detail"]`. Measured live, `MAFANG`,
+  `HNGSNGBEES` and `NIFTYBEES` are all in that state -- the NSE corporate-actions feed has no
+  index for an ETF -- and each returns 21 real bars, where before it raised. In `download()` a
+  symbol that genuinely cannot be adjusted becomes an all-`NaN` column rather than a batch
+  failure, because the refusal raises inside the per-symbol worker and is swallowed there; pass
+  `raise_errors=True` to see it.
 * **`threads`** (*bool*): ~~`Optional[int]`, default `None`.~~ **It is a `bool`, default `True`**,
   and it is read as a switch: `max_concurrency=10 if threads else 1`. It is **not** a thread count.
 * **`timeout`** (*int*): ~~`15`.~~ **`10`**, matching `Ticker.history`.
@@ -167,7 +175,15 @@ Valuation summary table matching `yfinance 1.3.0+` with columns `['Metric', 'Val
 Pandas Series of historical corporate dividend distributions indexed by Date.
 
 #### `ticker.splits` -> `pd.Series`
-Pandas Series of historical stock split ratios indexed by Date.
+**Empty for every symbol, by construction.** The property exists and is not broken;
+`CorporateActionsEngine.extract_splits` returns an empty Series because the equity-capital
+inference that used to populate it was deleted -- a 1:1 bonus, a rights issue, a QIP and an ESOP
+conversion are the same number in the same balance-sheet row, so a fabricated ratio could not be
+told from a real one. Measured: a capital raise produced `{2026-03-31: 5.26}` and rescaled every
+earlier bar by 1/5.26 while provenance flags claimed a complete adjustment. Splits that ARE declared
+come from the NSE filing via `bfinance.nse.corporate_actions.split_ratio`, which is what supplies
+the factor `history()` uses. Downstream an empty series reads as `0.0`, meaning "not known", not
+"none happened".
 
 #### `ticker.options` -> `Tuple[str, ...]`
 ~~Tuple of available derivatives expiry dates (e.g. `('2026-09-24', '2026-10-29')`).~~
