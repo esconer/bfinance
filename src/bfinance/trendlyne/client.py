@@ -88,21 +88,50 @@ therefore carries::
 ``High >= max(Open, Close)`` and ``Low <= min(Open, Close)`` held on **51,070 of 51,070** rows
 across 10 symbols, and on all 5,107 rows of this module's own recorded capture).
 
-Endpoints — 3 of them, all with a fetch method
-----------------------------------------------
+Endpoints — every template has a fetch method behind it
+------------------------------------------------------
 Base ``https://trendlyne.com``. No login, no API key, no cookie: a browser ``User-Agent`` is the
 whole requirement. :data:`ENDPOINTS` holds **only the routes this package can address today**,
 and :func:`build_path` is the supported way to build one, so the token rule is enforced locally.
 
-That is a deliberately small dict, and it used to be a dishonest one. It listed 17 templates, of
-which **14 no method ever built** — the section tables (deals, insider trades, share and
-mutual-fund holdings, financials, research reports, board meetings, buy-sell-zone), the four
-``latest-news`` routes, and ``rights``. None had a fetch method, and five of the 14 were never even
-confirmed to answer 200. A template with no method behind it is a promise about unwritten code, and
-``build_path`` would return a well-formed URL for a route nobody had ever requested. The 14 were
-deleted; ``docs/UPSTREAM_SOURCES.md`` keeps the full scraping study — row counts, depths, and the
-two pages the header-signature model cannot yet discriminate — so nothing measured is lost. **A
-test now fails if a template is added without a method behind it.**
+That dict used to be a dishonest one. It listed 17 templates, of which **14 no method ever
+built** — the section tables (deals, insider trades, share and mutual-fund holdings, financials,
+research reports, board meetings, buy-sell-zone), the four ``latest-news`` routes, and ``rights``.
+None had a fetch method, and five of the 14 were never even confirmed to answer 200. A template
+with no method behind it is a promise about unwritten code, and ``build_path`` would return a
+well-formed URL for a route nobody had ever requested. The 14 were deleted; ``docs/UPSTREAM_SOURCES.md``
+keeps the full scraping study, so nothing measured was lost.
+
+**They are wired now, measured rather than assumed.** A 2026-10-10 reconnaissance pass against
+trendlyne.com re-read ``robots.txt`` and fetched each candidate route for TCS (id 1372) and NTPC
+(id 959), and this dict grew by 14: eleven section pages and three JSON siblings. Every one of
+them is **robots-clean** — the verdict is recorded as a comment on the key itself in
+:data:`ENDPOINTS`, so the claim is auditable from the file rather than from prose. The one equity
+rule in the ``User-agent: *`` group is ``*/equity/technical-analysis-*``, and it does **not** match
+``/equity/api/stock/adv-technical-analysis/…``: the rule needs that literal substring, and this
+route has ``/api/stock/`` in the middle. The ``technical-analysis`` **page** stays unwired and
+off-limits; the JSON sibling is what :meth:`TrendlyneClient.adv_technical_analysis_async` reads.
+``/alerts/stock-alerts/`` is likewise allowed — only ``/alerts/addStockAlert/`` and
+``/alerts/modal/stockAlert/`` are disallowed, and neither is a route this package builds.
+
+**A test now fails if a template is added without a method behind it**
+(``tests/test_trendlyne_core.py::TestNoDeadScaffolding``), and one request per section call is
+part of the contract those tests pin. The symbol resolves through the sitemap index, which is
+cached, and the section route is fetched once — no stock-page fetch, no token fetch, because a
+section route needs only the id, the symbol and the slug the index already holds.
+
+Three guards belong to this layer rather than to the parsers, and all three are measurements:
+
+* **WAF** — HTTP 405, or an ``x-amzn-waf-action`` header, is
+  :class:`~bfinance.trendlyne.errors.TrendlyneWafChallengeError`, terminal and never retried. See
+  the "Pacing, retries and caching" section.
+* **Snapshot-only** — ``/equity/share-holding/`` answers **HTTP 500** for any period but
+  ``latest``, so :meth:`TrendlyneClient.share_holding_async` refuses a non-``latest`` period
+  locally and spends no request on a guaranteed error. The mutual-fund route is the measured
+  counter-example and deliberately does **not** carry that guard.
+* **Row cap** — ``/equity/insider-trading-sast/all/`` is capped at **exactly 500** rows
+  server-side, which is indistinguishable from a complete history unless it is said out loud.
+  :data:`INSIDER_ROW_CAP` and the note on that frame carry it.
 
 Symbol resolution is a sitemap, because there is no search API
 --------------------------------------------------------------
@@ -205,18 +234,18 @@ Two consequences, and they need different types:
 ``/mapp/v1/`` requests carry a ``Referer``; the HTML page routes do not need one (verified 200
 without). HTML pages work with a bare browser ``User-Agent``.
 
-A route that only serves a snapshot cannot address a period — measured, and kept as prose
--------------------------------------------------------------------------------------------------
-There is **no policy table for this any more**, and the note to read before wiring a holding route
-is this section. :class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` and
+A route that only serves a snapshot, and the route that looks like one but is not
+----------------------------------------------------------------------------------
+:class:`~bfinance.trendlyne.errors.TrendlyneSnapshotOnlyError` and
 :data:`SNAPSHOT_ONLY_ENDPOINTS` were removed as dead public API: the set had to be a subset of
 :data:`ENDPOINTS` to be enforceable, nothing fetched a snapshot-only route, so it was an empty
 ``frozenset()`` and the guard could never fire. A public exception that cannot be raised is the
 same category of problem as the 14 dead endpoint templates — it makes the package look bigger than
-the code that runs. The measured fact survives here, which is where whoever wires the route reads.
+the code that runs.
 
-``share-holding`` serves **only** the literal path segment ``latest``. Verified 2026-09-27:
-``.../Jun-2024/...`` and ``.../2024/...`` both return **HTTP 500**, not 404 and not an empty
+``share-holding`` serves **only** the literal path segment ``latest``. Verified 2026-09-27 on
+MOTHERSON and re-verified 2026-10-10 on TCS: ``.../Jun-2024/...``, ``.../2024/...`` and
+``/equity/share-holding/1372/TCS/Jun-2026/…`` all return **HTTP 500**, not 404 and not an empty
 table. So the share-holding route cannot address a period at all. The single ``latest`` page is
 still informative — it embeds a wide multi-period grid (44 distinct period labels on MOTHERSON,
 from Dec 2015 to Jun 2026) — but it is one request, not a series you can walk.
@@ -224,16 +253,19 @@ from Dec 2015 to Jun 2026) — but it is one request, not a series you can walk.
 ``monthly-mutual-fund-share-holding`` is **not** snapshot-only, contrary to what the same test
 suggests for share-holding. Verified on MOTHERSON: ``latest`` -> 200 (355 rows, top period
 Aug-2026), ``2024`` -> 200 (313 rows, top period Sep-2024), ``Jun-2024`` -> 200 (260 rows, top
-period Jun-2024), ``2023`` -> 200 (179 rows). The segment genuinely filters.
+period Jun-2024), ``2023`` -> 200 (179 rows). Re-verified on TCS 2026-10-10 for the two forms the
+share-holding route rejects: ``Jun-2026`` -> 200 (1,577,098 B) and ``2026`` -> 200 (1,402,262 B).
+The segment genuinely filters.
 
-**Wiring either route means adding its name to :data:`ENDPOINTS` in the same commit as its fetch
-method — and for ``share_holding`` also restoring a local period guard**, because ``build_path``
-no longer carries one: the 500 above is a fact, not an enforcement. The guard belongs in
-``build_path`` as an explicit check against the 500, not in a table that can be empty. Deals and
-insider trades are the opposite extreme when they are wired — 10-16 years in one page — so they
-must **not** be guarded. :data:`SNAPSHOT_PERIOD` survives as the only period segment the
-share-holding route accepts, and :func:`validate_period` already rejects anything else before a
-request is spent.
+**So the guard is on one route and not the other**, and the difference is the measurement rather
+than a preference. :meth:`TrendlyneClient.share_holding_async` and
+:meth:`TrendlyneClient.share_holding_holders_async` refuse a non-``latest`` period *before* the
+request, with a :class:`~bfinance.trendlyne.errors.TrendlyneServerError` naming the snapshot rule —
+a deterministic 500 is not worth two requests and a retry storm to rediscover.
+:meth:`TrendlyneClient.monthly_mf_holdings_async` validates the period with :func:`validate_period`
+and forwards it into the template, because on that route a period is a filter that works. A blanket
+snapshot guard would have broken the one route where the segment means something.
+:data:`SNAPSHOT_PERIOD` survives as the only period segment the share-holding route accepts.
 
 ``eodData`` is newest-first, and its start is not the instrument's listing date
 -------------------------------------------------------------------------------
@@ -314,6 +346,23 @@ used to ship was 1.33 requests per second, a 250 ms per-request violation of a p
 not apply to this client. Retry covers 429, 5xx and transport failures only, with exponential
 backoff that honours ``Retry-After`` (capped at 30 s); every 4xx is terminal.
 
+The WAF, and why 405 is not just another 4xx
+--------------------------------------------
+trendlyne is fronted by AWS WAF on CloudFront, and a challenged session is answered with **HTTP
+405** and an ``x-amzn-waf-action: captcha`` header rather than with 429. Both forms are terminal
+here: :class:`~bfinance.trendlyne.errors.TrendlyneWafChallengeError` is raised before the retry
+loop, because the budget is spent rather than momentarily exceeded — a retry would not be refused
+for a moment, it would be refused for the rest of the session.
+
+The ~130-150 requests per session that the message quotes is a **third-party measurement** of
+anonymous access, recorded on 2026-10-10 alongside 22 clean requests in the same session, and it
+is cited as that — an outside figure — rather than as a promise bfinance makes. ``robots.txt``
+publishes a crawl-delay and 28 disallow rules and says nothing about a per-session count, so the
+budget this package can actually vouch for is the one it enforces: one request per second, serially,
+through :meth:`TrendlyneClient._throttle_pacing`'s global lock. That is also why a section call
+costs exactly one request — with fourteen new routes, the cheapest thing this package can do for a
+caller who wants several of them is to make each one a single fetch.
+
 Caching is opt-in on disk. The sitemap index and the tokens live in memory with a TTL. Passing
 ``cache=SQLiteCache(...)`` additionally persists the index; the default is ``None``, so importing
 this package never creates a file in the user's home directory.
@@ -323,6 +372,7 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
+import json
 import logging
 import os
 import random
@@ -332,12 +382,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote_plus, unquote
 
 import httpx
 import numpy as np
 import pandas as pd
+from bs4 import BeautifulSoup
 
 from bfinance.utils.symbols import normalize_symbol
 
@@ -352,7 +403,9 @@ from .errors import (
     TrendlyneSchemaError,
     TrendlyneServerError,
     TrendlyneSymbolNotFoundError,
+    TrendlyneTableNotFoundError,
     TrendlyneTransportError,
+    TrendlyneWafChallengeError,
 )
 from .sectors import (
     TrendlyneGroup,
@@ -362,7 +415,16 @@ from .sectors import (
     parse_industry_aggregate,
     parse_taxonomy,
 )
-from .tables import PROVENANCE, extract_ohlc_token
+from .tables import (
+    PROVENANCE,
+    buy_sell_zone_tables,
+    extract_ohlc_token,
+    find_table,
+    find_tables,
+    monthly_mf_holding_table,
+    page_signatures,
+    share_holding_tables,
+)
 
 
 #: Public surface of this module. Without it, ``from bfinance.trendlyne.client import *`` binds
@@ -380,6 +442,7 @@ __all__ = [
     "ENDPOINTS",
     "FULL_SEARCH_FLAG",
     "GROUP_ENDPOINTS",
+    "INSIDER_ROW_CAP",
     "LISTING_DATE_ATTR",
     "MEMBER_SEARCH_FLAG",
     "METRICS",
@@ -393,6 +456,7 @@ __all__ = [
     "SNAPSHOT_ONLY_ATTR",
     "SNAPSHOT_PERIOD",
     "SOURCE_ATTR",
+    "STOCK_PAGE_SECTIONS",
     "SymbolCategory",
     "TrendlyneClient",
     "TrendlyneSymbol",
@@ -403,10 +467,24 @@ __all__ = [
     "build_path",
     "ohlc",
     "ohlc_async",
+    "parse_company_overview",
+    "parse_corporate_actions",
     "parse_envelope",
+    "parse_event_tables",
+    "parse_latest_news",
     "parse_ohlc",
+    "parse_returns_comparison",
     "parse_sitemap",
+    "parse_stock_alerts",
+    "parse_stock_page_checklists",
+    "parse_stock_page_consensus",
+    "parse_stock_page_metrics",
+    "parse_stock_page_performance",
+    "parse_stock_page_recommendations",
+    "parse_stock_page_valuation",
+    "parse_swot_tables",
     "parse_symbol_category",
+    "parse_technical_signals",
     "redact",
     "resolve",
     "symbol_index",
@@ -522,12 +600,23 @@ FULL_SEARCH_FLAG = "allow_full_search"
 #:
 #: This held 17 templates once and 14 of them were dead strings: no method built them, so
 #: ``build_path`` would mint a plausible URL for a route nobody had requested and five of them
-#: (``rights`` and the four ``latest-news`` routes) had never been seen to answer 200 at all. The
-#: 14 were deleted rather than wired — building a fetch method is separate work, and a
-#: header-signature model that cannot yet tell Buy Sell Zone's two tables apart, or that validated
-#: ``board_meeting`` on the wrong page, would return confident nonsense if wired today. The full
-#: scraping study survives in ``docs/UPSTREAM_SOURCES.md``. When a route *is* wired, add its name
-#: here and a fetch method in the same commit; a test enforces that pairing.
+#: (``rights`` and the four ``latest-news`` routes) had never been seen to answer 200 at all. The 14
+#: were deleted; when a route *is* wired, its name and its fetch method land in the same commit and
+#: a test enforces that pairing (``tests/test_trendlyne_core.py::TestNoDeadScaffolding``).
+#:
+#: The section block below is the 2026-10-10 rewiring of those 14. **Each key carries its own
+#: robots verdict, because "all clean" is not a thing a reader can check.** The file was read live
+#: that day: ``User-agent: *``, ``Crawl-delay: 1``, 28 ``Disallow`` rules. Of the equity rules,
+#: ``*/equity/technical-analysis-*`` is the only one, and it needs that literal substring -- so
+#: ``/equity/api/stock/adv-technical-analysis/`` is allowed (there is ``/api/stock/`` in the middle)
+#: while the ``technical-analysis`` page it shadows is not. ``/alerts/stock-alerts/`` is allowed;
+#: only ``*/alerts/addStockAlert/`` and ``*/alerts/modal/stockAlert/`` are disallowed, and neither is
+#: a route here. ``*/member/`` -- the one this package gates behind a flag -- matches none of them.
+#: Measurements and the raw captures are in ``.scratch/trendlyne-e2e-recon.md``.
+#:
+#: **Note the segment order.** It is not uniform and cannot be made uniform: the stock page puts the
+#: id first, while six of these routes put the symbol first. One ``.format`` template per shape is
+#: the only way a wrong route is refused by :func:`build_path` rather than by a 404.
 ENDPOINTS: Dict[str, str] = {
     "stock_page": "/equity/{stock_id}/{symbol}/{slug}/",
     "ohlc": "/mapp/v1/stock/web/ohlc/{stock_id}/{token}/",
@@ -537,6 +626,38 @@ ENDPOINTS: Dict[str, str] = {
     # as a stock without complaining, so the two shapes get two entries.
     "sector_page": "/equity/sector/{group_id}/{group_slug}/",
     "industry_page": "/equity/industry/{group_id}/{group_slug}/",
+    # ---------------------------------------------------------- section pages (robots-clean
+    # 2026-10-10: all eleven match none of the 28 `User-agent: *` Disallow rules).
+    "corporate_actions_page": "/equity/corporate-actions/{symbol}/{stock_id}/{slug}/",
+    "bulk_block_deals_page": "/equity/bulk-block-deals/{symbol}/{stock_id}/{slug}/",
+    # Snapshot-only: answers HTTP 500 for every period segment but `latest`. Re-verified 2026-10-10
+    # on TCS. The guard is in share_holding_async, not here -- see the module docstring.
+    "share_holding_page": "/equity/share-holding/{stock_id}/{symbol}/{period}/{slug}/",
+    "board_meeting_page": "/equity/board-meeting/{symbol}/{stock_id}/{slug}-board_meeting/",
+    "research_reports_page": "/research-reports/stock/{stock_id}/{symbol}/{slug}/",
+    "latest_news_page": "/latest-news/{stock_id}/{symbol}/{slug}/",
+    # Allowed: only `*/alerts/addStockAlert/` and `*/alerts/modal/stockAlert/` are disallowed, and
+    # those are the two write routes a logged-in member uses. Reading the list needs no member.
+    "stock_alerts_page": "/alerts/stock-alerts/{symbol}/{stock_id}/{slug}/",
+    "insider_trading_page": "/equity/insider-trading-sast/all/{symbol}/{stock_id}/{slug}/",
+    # NOT snapshot-only -- the measured counter-example to the route above. `Jun-2026` and `2026`
+    # both answer 200 here (verified 2026-10-10, TCS) and filter the grid.
+    "monthly_mf_holding_page": (
+        "/equity/monthly-mutual-fund-share-holding/{stock_id}/{symbol}/{period}/{slug}/"
+    ),
+    "buy_sell_zone_page": "/tools/buy-sell-zone/{stock_id}/{symbol}/{slug}/",
+    "swot_page": "/equity/swot-buy-or-sell/{stock_id}/{symbol}/{slug}/",
+    # ------------------------------------------------------------- JSON siblings (robots-clean
+    # 2026-10-10; all three carry `?format=json` in the template so the query cannot be forgotten).
+    # The first is the sibling of the robots-DISALLOWED `/equity/technical-analysis-*` page: the rule
+    # needs that literal substring and this path has `/equity/api/stock/` in front of it.
+    "adv_technical_analysis": (
+        "/equity/api/stock/adv-technical-analysis/{stock_id}/24/?format=json"
+    ),
+    "overview_second_part": "/equity/overview-second-part/{stock_id}/?format=json",
+    "price_performance_analysis": (
+        "/share-price/price-performance-analysis/{stock_id}/?format=json"
+    ),
 }
 
 #: Routes that take no symbol, so :func:`build_path` needs a group id and slug rather than a
@@ -549,6 +670,18 @@ GROUP_ENDPOINTS: frozenset = frozenset({"sector_page", "industry_page"})
 #: constant because that is a measured property of the route rather than a default. See the "A
 #: route that only serves a snapshot" section of the module docstring.
 SNAPSHOT_PERIOD = "latest"
+
+#: The insider-trading route's **server-side row cap**: 500. Recorded in the repo scraping study as
+#: exactly 500 rows on another symbol, and re-measured on TCS on 2026-10-10 at 175 rows — which is
+#: the point of keeping the number rather than the *conclusion*. A frame that comes back holding
+#: exactly this many rows may be truncated, and a truncated history is indistinguishable from a
+#: complete one unless it is said out loud; 175 rows may equally be the whole of what exists.
+#:
+#: So the guard is not "this is all of it" and not "this is partial" — it is the row count in
+#: ``attrs["bfinance_trendlyne_insider_rows"]`` plus, when the count equals this cap, a note saying
+#: the cap was hit and that the frame is therefore **not** the full history. Never the reverse: a
+#: frame below the cap is never described as complete, because nothing measured says it is.
+INSIDER_ROW_CAP = 500
 
 #: Metrics the ``chart-data`` route accepts. Any other value returns 200 with a failed envelope,
 #: so the set is enforced locally.
@@ -665,6 +798,11 @@ _GLOBAL_LAST_REQUEST_TIME = 0.0
 
 # Retry-After cap (seconds) so a hostile or accidental header cannot stall us.
 _MAX_RETRY_AFTER_SEC = 30.0
+
+#: The header AWS WAF attaches when it challenges a request. Checked on **every** response, whatever
+#: the status: the challenge and the code are separate, and a 200 carrying this header is a
+#: captcha page rather than data.
+_WAF_ACTION_HEADER = "x-amzn-waf-action"
 
 _SITEMAP_URL_RE = re.compile(r"/equity/(\d+)/([^/]+)/([^/?#]+)/?")
 # The month form is ``Mon-YYYY`` with the capitalisation trendlyne actually serves. Case matters
@@ -941,10 +1079,15 @@ def build_path(
 
     Args:
         name: A key of :data:`ENDPOINTS` — that is, a route this package has a fetch method for.
-        record: The resolved symbol. Required for the stock routes, ignored for the group routes
-            in :data:`GROUP_ENDPOINTS`, which have no symbol segment.
-        period: Period segment, for the routes that take one. See :func:`validate_period`. No
-            addressable route takes one today.
+        record: The resolved symbol. Required by every route **except** the group routes in
+            :data:`GROUP_ENDPOINTS`, which have no symbol segment — they are the only ones that can
+            be built without one, and asking for those with a record is an error in the other
+            direction.
+        period: Period segment, for the routes that take one. See :func:`validate_period`. Only
+            ``share_holding_page`` (which accepts ``latest`` alone, and is guarded by its fetch
+            method rather than here) and ``monthly_mf_holding_page`` carry it in the URL; the rest
+            ignore it, and :func:`validate_period` still runs so a malformed value is rejected
+            consistently rather than depending on which route was asked for.
         metric: Metric name, required by ``chart_metric``. See :data:`METRICS`.
         token: Per-symbol OHLC token, required by ``ohlc``.
         group: The sector or industry, required by ``sector_page`` and ``industry_page``. Its
@@ -958,7 +1101,8 @@ def build_path(
         ValueError: Unknown ``name`` — including a route that exists on trendlyne but is not
             implemented here, which is an explicit error rather than a minted URL — an
             unrecognised ``metric``, a missing ``token``, a group route with no ``group``, a
-            ``group`` whose kind does not match the route, or a non-group route given a ``group``.
+            ``group`` whose kind does not match the route, a non-group route given a ``group``, or a
+            stock route with no ``record``.
     """
     if name not in ENDPOINTS:
         raise ValueError(
@@ -989,7 +1133,10 @@ def build_path(
     if name == "chart_metric":
         if metric not in METRICS:
             raise ValueError(f"metric={metric!r} is not supported. Must be one of {', '.join(METRICS)}.")
-    if name in ("ohlc", "stock_page") and record is None:
+    if name not in GROUP_ENDPOINTS and record is None:
+        # Every remaining template formats at least one of stock_id/symbol/slug, so a missing
+        # record is a caller mistake -- and saying so beats a KeyError out of str.format, which
+        # would read as a bug in the template rather than in the call.
         raise ValueError(
             f"endpoint {name!r} takes a symbol; pass record=TrendlyneSymbol from resolve()."
         )
@@ -1460,6 +1607,1566 @@ def parse_ohlc(
     return frame[list(COLUMNS)]
 
 
+# --------------------------------------------------------- section-page parsing
+#
+# The pages below need two different kinds of parser, and the split is not stylistic.
+#
+# **Tables** are read by :mod:`bfinance.trendlyne.tables`, which owns the header-signature model and
+# the structural extractors, and this module does not re-implement it. ``find_table``,
+# ``share_holding_tables``, ``buy_sell_zone_tables`` and ``monthly_mf_holding_table`` are called
+# here and nothing is parsed twice.
+#
+# **Card lists** — news and alerts — are not tables at all, and there is no shared helper to reach
+# for. Two of these functions exist because the page has no table to classify.
+
+
+def _paged(path: str, page: int) -> str:
+    """Append ``?page=N`` to a section path, leaving page 1 as the page's own canonical URL.
+
+    The two paginated section routes answer ``?page=N`` — measured 200 on ``/latest-news/…`` on
+    2026-10-10 — and page 1 is the bare path the site links to, so a first page is not sent as
+    ``?page=1``: a request this package did not need to shape differently should not be.
+
+    Raises:
+        ValueError: ``page`` is not a positive integer. Locally, because the alternative is a URL
+            that silently asks for page zero or for something that is not a page.
+    """
+    try:
+        number = int(page)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"page must be a positive integer, got {page!r}") from exc
+    if number < 1:
+        raise ValueError(f"page={page!r} is not a positive page number")
+    return path if number == 1 else f"{path}?page={number}"
+
+
+def _stamped(frame: pd.DataFrame, symbol: str, source_url: Optional[str], note: str,
+             retrieved_at: Optional[datetime], *, snapshot_only: bool = False,
+             **extra: Any) -> pd.DataFrame:
+    """Put the package's standard attrs on a section frame.
+
+    One call site for every section frame, so ``bfinance_provenance`` / ``bfinance_symbol`` /
+    ``bfinance_trendlyne_snapshot_only`` cannot be present on one route and missing on the next,
+    and so no section frame inherits the OHLC-only keys — see :func:`build_attrs` on why a table
+    frame must not carry a price basis.
+
+    ``snapshot_only`` is a keyword-only flag rather than a positional one because it is the one
+    argument a caller must think about: every section route is a single page with no period axis,
+    so it reads ``True`` there, and the default is the conservative ``False`` for a caller that
+    has not said.
+    """
+    frame.attrs.update(
+        build_attrs(
+            symbol,
+            source=source_url,
+            snapshot_only=snapshot_only,
+            note=note,
+            retrieved_at=retrieved_at,
+            **extra,
+        )
+    )
+    return frame
+
+
+def parse_latest_news(html: str, *, symbol: str = "", source_url: Optional[str] = None,
+                      retrieved_at: Optional[datetime] = None) -> pd.DataFrame:
+    """The server-rendered news list of ``/latest-news/`` as a frame of items.
+
+    **This route has no ``<table>``.** Verified 2026-10-10: the list is a card column, one
+    ``div.panel-post`` per item, and the trimming that made it a 139 KB fixture kept all ten.
+
+    Args:
+        html: The page, or a verbatim excerpt of the news column.
+        symbol: Recorded in ``attrs`` only; the page is already one symbol's news.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``date``, ``kind``, ``title``, ``url``, ``source``, one row per card in page order.
+
+    Note:
+        Two columns are carried verbatim rather than normalised, and it is worth knowing why
+        before "fixing" them.
+
+        * ``date`` is the vendor's own rendered text, which is **not** one format. The recorded
+          page carries ``10 Oct, 2026 at 09:49 AM`` in a ``title`` attribute, ``09 Oct 2026,
+          06:35PM`` in the body, and ``Oct. 9, 2026, 11:09 a.m.`` on the alerts route. Reading one
+          of them as *the* timestamp and parsing the others through it would be a guess about
+          which element is authoritative; the string is published instead.
+        * ``url`` is whatever href the card carries, **including a login wall**. A research-report
+          card links to ``/visitor/loginmodal.html?next=…`` for anonymous readers. Rewriting that
+          to the page behind the wall would be inventing an address the response did not contain,
+          so the wall is what a caller sees.
+
+        ``kind`` is the card's ``<label>`` text (an empty string when the card carries none) and
+        ``source`` the ``div.rsssource`` publisher, which trendlyne-authored posts do not have.
+
+    Note:
+        An empty result is returned as an **empty frame with these columns**, not as an error and
+        not as rows of blanks: a page with no news is a real answer, and one shaped like a parse
+        failure is not.
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    rows: List[Dict[str, Any]] = []
+    for panel in soup.select("div.panel-post"):
+        body = panel.select_one("div.post-body")
+        scope = body if body is not None else panel
+
+        date_node = panel.select_one("div.post-head-subtext span[title]")
+        if date_node is None:
+            date_node = panel.select_one("div.post-head-subtext span")
+        date_text = date_node.get("title") if date_node is not None and date_node.get("title") \
+            else (date_node.get_text(" ", strip=True) if date_node is not None else "")
+
+        heading = scope.select_one("h2.card-title") or scope.select_one("div.card-title") \
+            or scope.select_one("h6")
+        newslink = scope.select_one("a.newslink")
+        if heading is not None:
+            title = heading.get_text(" ", strip=True)
+        elif newslink is not None:
+            title = newslink.get_text(" ", strip=True)
+        else:
+            title = ""
+
+        # The newslink first, because a card's other /posts/ links are chrome: an "Alert" button
+        # points at /posts/alert-modal/{id}/, and the stock-insight strip above the body repeats
+        # links to unrelated posts. Only a /posts/<digits>/ href is the item's own page.
+        url = newslink.get("href", "") if newslink is not None else ""
+        if not url:
+            own = scope.select_one('a[href*="/posts/"]')
+            href = own.get("href", "") if own is not None else ""
+            url = href if re.search(r"/posts/\d+/", href or "") else ""
+
+        source_node = panel.select_one("div.rsssource")
+        rows.append(
+            {
+                "date": date_text,
+                "kind": "; ".join(
+                    label.get_text(" ", strip=True) for label in panel.select("label")
+                ),
+                "title": title,
+                "url": url,
+                "source": source_node.get_text(" ", strip=True) if source_node is not None else "",
+            }
+        )
+
+    frame = pd.DataFrame(rows, columns=["date", "kind", "title", "url", "source"])
+    note = (
+        f"{len(rows)} server-rendered news item(s) from trendlyne.com's /latest-news/ page, in "
+        f"page order. This route publishes no table: the list is a card column. The date is the "
+        f"vendor's rendered text and is not normalised, because the page renders three formats for "
+        f"the same kind of value. A url that points at /visitor/loginmodal.html is the vendor's "
+        f"own paywall for anonymous readers and is reported as sent rather than rewritten. This "
+        f"frame is ONE page of a paginated list: ask for page=2 for the next, and note that an "
+        f"empty page means the page number is past the end, not that the symbol has no news."
+    )
+    return _stamped(
+        frame, symbol, source_url, note, retrieved_at, rows=len(rows),
+        row_selector="div.panel-post",
+    )
+
+
+def parse_stock_alerts(html: str, *, symbol: str = "", source_url: Optional[str] = None,
+                       retrieved_at: Optional[datetime] = None) -> pd.DataFrame:
+    """The server-rendered alert list of ``/alerts/stock-alerts/`` as a frame.
+
+    **Also no ``<table>``**: the alerts are cards too, one ``div.tr-alert-body`` per alert inside
+    ``aside#allposts``. The recorded page carries ten of them — a research-report alert, four SMA
+    crossovers and five price/volume threshold alerts.
+
+    Args:
+        html: The page, or a verbatim excerpt of the alert column.
+
+    Returns:
+        Columns ``date``, ``kind``, ``headline``, ``detail``, ``values``, one row per alert in page
+        order (newest first as the page serves them).
+
+    Note:
+        ``values`` is a dict, because the alert cards carry a different number of key/value tiles
+        each and their labels are the vendor's own ("Day Price", "SMA 30", "Crossover",
+        "Target Price"). A fixed column set would either invent columns or drop the tiles that did
+        not fit; the dict is what the card carried. If one card ever repeats a label, that key
+        holds a list of every value seen under it rather than the last one winning silently.
+
+        ``headline`` is the card's ``h5.card-title``, which on this page renders the **symbol**
+        rather than a sentence — the alert's own wording is in ``detail``, the first list-group
+        item ("Stock Price (2399.3) crossed above 30 Day SMA (2343.86) on 31 August, 2026").
+
+    Note:
+        Only the ``aside#allposts`` card list is parsed. The sidebar's research-report teaser block
+        is a **different** alert family with a different shape, and its content is served in full
+        by ``/equity/overview-second-part/{id}/?format=json`` and, on the wire, by
+        :meth:`TrendlyneClient.research_reports`. Merging the two here would produce rows with a
+        different set of columns, which is a frame whose missing values are a parsing decision
+        rather than a fact about the vendor.
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    rows: List[Dict[str, Any]] = []
+    for card in soup.select("div.tr-alert-body"):
+        date_node = card.select_one("div.gray555.fs09rem")
+        title_node = card.select_one("h5.card-title")
+        items = card.select("ul.list-group li.list-group-item")
+
+        values: Dict[str, Any] = {}
+        for item in items[1:]:
+            value_node = item.select_one("h3")
+            label_node = item.select_one("p")
+            if value_node is None or label_node is None:
+                continue
+            label = label_node.get_text(" ", strip=True)
+            if not label:
+                continue
+            value = value_node.get_text(" ", strip=True)
+            if label in values:
+                # Repeated label: keep every value rather than letting the last one win.
+                previous = values[label]
+                values[label] = list(previous) if isinstance(previous, list) else [previous, value]
+            else:
+                values[label] = value
+
+        rows.append(
+            {
+                "date": date_node.get_text(" ", strip=True) if date_node is not None else "",
+                "kind": " / ".join(
+                    item.get_text(" ", strip=True) for item in card.select("ul.nav-alert-full li")
+                ),
+                "headline": title_node.get_text(" ", strip=True) if title_node is not None else "",
+                "detail": items[0].get_text(" ", strip=True) if items else "",
+                "values": values,
+            }
+        )
+
+    frame = pd.DataFrame(rows, columns=["date", "kind", "headline", "detail", "values"])
+    note = (
+        f"{len(rows)} server-rendered alert(s) from trendlyne.com's /alerts/stock-alerts/ page, "
+        f"newest first as served. This route publishes no table: the alerts are cards. 'headline' "
+        f"is the card's own title element, which renders the symbol; the alert's wording is in "
+        f"'detail'. 'values' holds the card's labelled tiles (Day Price, SMA 30, Crossover, "
+        f"Target Price …) and its labels differ per alert family, which is why it is a dict rather "
+        f"than a fixed set of columns. Only the alert list is parsed; the sidebar research-report "
+        f"block is a different family with a different shape and is served in full by the "
+        f"overview-second-part JSON route. An alert list that comes back empty means the page "
+        f"carried no cards, which is a fact about the page and not a parse failure."
+    )
+    return _stamped(
+        frame, symbol, source_url, note, retrieved_at, rows=len(rows),
+        row_selector="div.tr-alert-body",
+    )
+
+
+def parse_swot_tables(html: str, *, symbol: str = "", source_url: Optional[str] = None,
+                      retrieved_at: Optional[datetime] = None) -> Dict[str, pd.DataFrame]:
+    """The SWOT page's fact tables, keyed by the ``div.tab-pane`` each one sits in.
+
+    Five outermost tables on the recorded page, each **single-column** and each with the fact
+    itself as its header cell ("Companies with no Debt", "Broker price or reco upgrades in last
+    month", …). Measured on TCS 2026-10-10: 19, 6, 3, 3 and 3 fact rows.
+
+    Args:
+        html: The page, or a verbatim excerpt of the widget.
+
+    Returns:
+        ``{"tag_strengths": frame, "tag_weakness": frame, ...}`` — the ``div.tab-pane`` ids in page
+        order.
+
+    Note:
+        The key is the pane id, not the heading, and the difference is the whole point: the
+        headings are free text that rewrites itself when the vendor rewords a screen ("Stocks -
+        DVM Select Long Term (subscription)" is one of them), while ``#tag_strengths`` is the
+        widget's own structure. Each frame publishes its heading in
+        ``attrs["bfinance_trendlyne_swot_heading"]`` so both are readable.
+
+        A table with no enclosing tab pane is keyed ``table_<index>`` rather than dropped, because
+        dropping it would report a shorter list than the page carries.
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    outermost = [tag for tag in soup.find_all("table") if tag.find_parent("table") is None]
+    frames = find_tables(html or "")
+
+    results: Dict[str, pd.DataFrame] = {}
+    for frame in frames:
+        index = frame.attrs.get("bfinance_trendlyne_table_index")
+        tag = outermost[index] if isinstance(index, int) and index < len(outermost) else None
+        pane = tag.find_parent("div", class_="tab-pane") if tag is not None else None
+        key = (pane.get("id") if pane is not None else "") or f"table_{index}"
+        if key in results:
+            key = f"{key}_{index}"
+        heading = str(frame.columns[0]) if len(frame.columns) else ""
+        frame.attrs["bfinance_trendlyne_table"] = key
+        frame.attrs["bfinance_trendlyne_swot_heading"] = heading
+        results[key] = _stamped(
+            frame,
+            symbol,
+            source_url,
+            f"One SWOT fact table, keyed by its div.tab-pane id ({key!r}) rather than by its "
+            f"heading, which is free text the vendor rewords. Each of these tables is a single "
+            f"column whose header cell IS the fact, so the column name is that fact: "
+            f"{heading!r}. {len(frame)} fact row(s).",
+            retrieved_at,
+            swot_table=key,
+        )
+    if not results:
+        raise TrendlyneTableNotFoundError(
+            "the SWOT page carried no outermost <table>. The five fact tables are the page's whole "
+            "content, so an empty sweep means the widget is gone or its markup changed -- not that "
+            "the stock has no strengths or threats."
+        )
+    return results
+
+
+#: Column carrying which page section a merged corporate-actions row came from. Named with the
+#: package prefix on purpose: it is this package's annotation, not a column trendlyne rendered, and
+#: a reader must be able to tell the two apart at a glance.
+_SECTION_COLUMN = "bfinance_trendlyne_section"
+
+
+def parse_corporate_actions(html: str, *, symbol: str = "", source_url: Optional[str] = None,
+                            retrieved_at: Optional[datetime] = None) -> Dict[str, pd.DataFrame]:
+    """The corporate-actions page's tables, bucketed into exactly three keys.
+
+    Args:
+        html: The page, or a verbatim excerpt of its tables.
+
+    Returns:
+        ``{"bonus": frame, "dividend": frame, "other": frame}`` — always all three keys, in that
+        order. Every frame carries ``bfinance_trendlyne_table`` set to its own key, and a
+        ``bfinance_trendlyne_section`` column naming the section each row came from.
+
+    Note:
+        **Why three fixed keys for a page whose section count is not fixed.** The contract this
+        method serves is three names, and TCS's page does have exactly three sections (Bonus,
+        Dividend, Other). MOTHERSON's, recorded the same day, has **five** — bonus, split,
+        dividend, a purpose/notes table, rights — so "keys exactly ``bonus``, ``dividend``,
+        ``other``" cannot mean "one key per section" without losing two tables on some symbols.
+
+        So ``other`` is the honest bucket: **every section that is neither a bonus nor a
+        dividend**, concatenated in page order, each row tagged in
+        ``bfinance_trendlyne_section`` with the signature that selected it. Nothing is dropped and
+        nothing is silently reclassified — a rights row is still a rights row, it is simply in the
+        bucket the three-key contract provides. The section names are the registry's, which means
+        ``board_meeting`` appears here for the page's catch-all Ex-Date/Purpose/Notes table,
+        because that header row is identical to the board-meeting one and the registry cannot tell
+        them apart. That is a known collision, published rather than papered over: the column says
+        which signature matched, not what the section means.
+
+        A section absent from the page is an **empty frame** with the same columns, not a missing
+        key: a caller iterating the three names must be able to tell "this symbol had no bonus" from
+        "the parser lost the bonus table", and a missing key answers neither.
+
+        The same holds for a section that is **present and empty** — a header row the vendor
+        renders above "no rows", which is the ordinary shape for a split or a rights issue on a
+        symbol that has never had one (TCS's own ``eventsData`` records ``splitTableHeader`` and
+        ``rightTableHeader`` with zero rows beneath them, 2026-10-10). Such a table still
+        classifies, so it still has a section name; the name comes from the registry signature
+        rather than from a row, because there is no row to read one off.
+    """
+    signatures = page_signatures(html or "")
+    frames = find_tables(html or "")
+
+    #: Each bucket holds ``(section name, frame)`` pairs rather than bare frames, so the section
+    #: list can be built for a frame with zero rows as well as one with rows. Reading the name back
+    #: off a row (``.iloc[0]``) is what raised :class:`IndexError` on a header-only table: an empty
+    #: frame has the column and no value in it.
+    buckets: Dict[str, List[Tuple[str, pd.DataFrame]]] = {"bonus": [], "dividend": [], "other": []}
+    for frame in frames:
+        index = frame.attrs.get("bfinance_trendlyne_table_index")
+        signature = signatures.get(index) if isinstance(index, int) else None
+        key = signature if signature in ("bonus", "dividend") else "other"
+        tagged = frame.copy()
+        tagged[_SECTION_COLUMN] = signature or "unclassified"
+        buckets[key].append((signature or "unclassified", tagged))
+
+    results: Dict[str, pd.DataFrame] = {}
+    for key, parts in buckets.items():
+        sections = [name for name, _ in parts]
+        if parts:
+            merged = pd.concat([frame for _, frame in parts], ignore_index=True, sort=False)
+            rows = len(merged)
+        else:
+            merged = pd.DataFrame(columns=[_SECTION_COLUMN])
+            rows = 0
+        merged.attrs["bfinance_trendlyne_table"] = key
+        results[key] = _stamped(
+            merged,
+            symbol,
+            source_url,
+            f"The {key!r} section(s) of trendlyne.com's corporate-actions page: {rows} row(s) "
+            f"from section(s) {sections or ['<none: this symbol has none>']}. Sections are "
+            f"identified by header signature and each row carries the one that matched in its "
+            f"{_SECTION_COLUMN!r} column, because the page's section count varies by symbol and "
+            f"every section that is neither a bonus nor a dividend shares the 'other' bucket.",
+            retrieved_at,
+            rows=rows,
+            sections=sections,
+        )
+    return results
+
+
+def _wire_table_frame(headers: Any, rows: Any, *, label: str) -> pd.DataFrame:
+    """Build a frame from a JSON table's ``tableHeaders`` + ``tableData`` pair.
+
+    trendlyne serves these two ways and both are measured: the ``overview-second-part`` events
+    blocks carry **mappings** keyed by ``unique_name``, while ``price-performance-analysis`` carries
+    **positional arrays** with the names only in the header list. Either way the column name is the
+    header's own ``unique_name`` (falling back to ``name``, which is all some of these blocks
+    publish) and never an index — mapping by position is how a vendor reordering a table turns into
+    a frame full of confidently wrong numbers.
+
+    Args:
+        headers: The header list, or ``None``.
+        rows: The data list, or ``None``.
+        label: Human name of the block, used in the error messages.
+
+    Raises:
+        TrendlyneSchemaError: The block is not a header list plus a data list, a header entry has
+            no usable name, or a positional row is not ``len(headers)`` values wide. Never repaired.
+    """
+    if not isinstance(headers, list) or not headers:
+        raise TrendlyneSchemaError(
+            f"{label}: no usable header list (got {type(headers).__name__}). Column names come "
+            f"from the header's own unique_name/name, so without it the frame would have to be "
+            f"built by index. Upstream schema may have changed."
+        )
+    if not isinstance(rows, list):
+        raise TrendlyneSchemaError(
+            f"{label}: table data is {type(rows).__name__}, expected a list. Upstream schema may "
+            f"have changed."
+        )
+
+    names: List[str] = []
+    for header in headers:
+        if not isinstance(header, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: header entry {header!r} is not an object. Upstream schema may have "
+                f"changed."
+            )
+        name = str(header.get("unique_name") or header.get("name") or "").strip()
+        if not name:
+            raise TrendlyneSchemaError(
+                f"{label}: a header entry has neither 'unique_name' nor 'name': {header!r}. "
+                f"Upstream schema may have changed."
+            )
+        names.append(name)
+
+    out: List[Dict[str, Any]] = []
+    for position, row in enumerate(rows):
+        if isinstance(row, dict):
+            out.append({name: row.get(name) for name in names})
+            continue
+        if not isinstance(row, (list, tuple)) or len(row) != len(names):
+            width = len(row) if isinstance(row, (list, tuple)) else type(row).__name__
+            raise TrendlyneSchemaError(
+                f"{label}: data row {position} has {width} value(s), expected {len(names)}. "
+                f"Upstream schema may have changed."
+            )
+        out.append(dict(zip(names, row)))
+    return pd.DataFrame(out, columns=names)
+
+
+#: Wire key -> published name for the five event tables inside ``eventsData``. Explicit rather than
+#: derived from camelCase, because ``rightTableData`` is the rights table and no rule that turns
+#: "right" into "rights" is worth having. A sixth block, if the vendor adds one, is **skipped and
+#: published in attrs** rather than guessed at.
+_EVENT_TABLES: Dict[str, str] = {
+    "boardMeeting": "board_meeting",
+    "dividend": "dividend",
+    "bonus": "bonus",
+    "split": "split",
+    "right": "rights",
+}
+
+
+def parse_event_tables(events_data: Any, *, symbol: str = "", source_url: Optional[str] = None,
+                       retrieved_at: Optional[datetime] = None) -> Dict[str, pd.DataFrame]:
+    """The corporate-event tables inside ``overview-second-part``'s ``eventsData``.
+
+    Args:
+        events_data: The ``body["eventsData"]`` mapping, verbatim.
+
+    Returns:
+        ``{"board_meeting": frame, "dividend": frame, "bonus": frame, "split": frame,
+        "rights": frame}`` — every key of :data:`_EVENT_TABLES` that the block carries, in that
+        order.
+
+    Note:
+        **An empty event type is an empty frame, not a missing key.** TCS has no split and no
+        rights issue, so both blocks are ``[]`` and both frames come back with their columns and
+        no rows. Dropping them would make "this symbol had no rights issue" indistinguishable from
+        "the parser found no rights table", and only the caller knows which of those they asked
+        about.
+
+        Columns come from each block's own ``unique_name`` (``boardMeetDate``, ``exDate``,
+        ``dividendAmount``, …), never from position: these blocks carry different keys from each
+        other and a positional mapping would put a bonus ratio under a dividend column.
+
+        Each frame carries ``bfinance_trendlyne_event`` — its own name — and the dict's frames
+        together record which blocks were present in ``bfinance_trendlyne_events_absent``.
+    """
+    if not isinstance(events_data, dict):
+        raise TrendlyneSchemaError(
+            f"eventsData is {type(events_data).__name__}, expected an object. Upstream schema may "
+            f"have changed."
+        )
+
+    results: Dict[str, pd.DataFrame] = {}
+    absent: List[str] = []
+    pending: List[Tuple[str, pd.DataFrame]] = []
+    for wire_key, name in _EVENT_TABLES.items():
+        header_key, data_key = f"{wire_key}TableHeader", f"{wire_key}TableData"
+        headers = events_data.get(header_key)
+        rows = events_data.get(data_key)
+        if headers is None and rows is None:
+            absent.append(name)
+            continue
+        frame = _wire_table_frame(headers, rows, label=f"eventsData.{data_key}")
+        frame.attrs["bfinance_trendlyne_event"] = name
+        pending.append((name, frame))
+
+    # Stamped after the sweep so every frame publishes the SAME absent-list. Filling it in as the
+    # loop went would make the first frame's attrs a shorter prefix of the last one's, and a caller
+    # reading two frames would see two different answers to "what was missing".
+    for name, frame in pending:
+        results[name] = _stamped(
+            frame,
+            symbol,
+            source_url,
+            f"The {name!r} corporate-event table from trendlyne.com's overview-second-part JSON: "
+            f"{len(frame)} row(s). Columns are the block's own unique_name keys. An empty frame "
+            f"means this symbol has no such event on the page, which is an answer rather than a "
+            f"missing value.",
+            retrieved_at,
+            event=name,
+            rows=len(frame),
+            events_absent=absent,
+        )
+    return results
+
+
+def parse_company_overview(
+    company_profile: Any, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """Directors and top executives, plus the business description, as one frame.
+
+    The JSON behind ``/equity/about/`` — a page that renders client-side and carries **zero** SSR
+    tables. ``companyProfileData`` holds both people tables, the description and the website.
+
+    Args:
+        company_profile: The ``body["companyProfileData"]`` mapping, verbatim.
+
+    Returns:
+        One row per person, ``role`` first, then the union of both blocks' ``unique_name`` columns.
+        A person listed as both (TCS's CEO is, on the recorded capture, a director and an
+        executive) appears **twice**, once per role, because collapsing them would assert that the
+        vendor lists them once — and it does not.
+
+        The description and the website are **attrs**, not columns:
+        ``bfinance_trendlyne_company_description`` and ``bfinance_trendlyne_website``. They are
+        prose about the company rather than rows about people, and widening the frame to carry them
+        would put a paragraph in every cell.
+
+    Note:
+        The two blocks publish different keys — executives carry ``year_end``, directors carry
+        ``date_str`` — so a person missing a key gets ``None``/``NaN`` in that column. That is the
+        honest reading: the vendor did not publish it for that role, and filling it from the other
+        block would be this package's inference. A key that appears in the records but in neither
+        block's header list has no column to go under, so it is listed in
+        ``attrs["bfinance_trendlyne_unheaded_keys"]`` rather than dropped unnoticed. On the
+        recorded capture that list is empty.
+    """
+    if not isinstance(company_profile, dict):
+        raise TrendlyneSchemaError(
+            f"companyProfileData is {type(company_profile).__name__}, expected an object. Upstream "
+            f"schema may have changed."
+        )
+
+    blocks = (
+        ("director", company_profile.get("directorsTableHeader"),
+         company_profile.get("directorsTableData")),
+        ("executive", company_profile.get("topExecutivesTableHeader"),
+         company_profile.get("topExecutivesTableData")),
+    )
+    names: List[str] = ["role"]
+    for _, headers, _ in blocks:
+        for header in headers or []:
+            entry = header or {}
+            name = str(entry.get("unique_name") or entry.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+
+    rows: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {}
+    unheaded: List[str] = []
+    for role, _, data in blocks:
+        if data is None:
+            counts[role] = 0
+            continue
+        if not isinstance(data, list):
+            raise TrendlyneSchemaError(
+                f"companyProfileData {role} table is {type(data).__name__}, expected a list. "
+                f"Upstream schema may have changed."
+            )
+        counts[role] = len(data)
+        for person in data:
+            row = {"role": role}
+            row.update({name: person.get(name) for name in names if name != "role"})
+            for key in person:
+                if key not in names:
+                    unheaded.append(str(key))
+            rows.append(row)
+
+    frame = pd.DataFrame(rows, columns=names)
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"Directors ({counts.get('director', 0)}) and top executives "
+        f"({counts.get('executive', 0)}) from trendlyne.com's overview-second-part JSON — "
+        f"the data behind the /equity/about/ page, "
+        f"which renders client-side and carries no server-rendered table. A person who holds both "
+        f"roles appears once per role. The business description and the company website are attrs, "
+        f"not columns. A person missing a key the other role publishes reads missing here; it is "
+        f"not filled from the other block.",
+        retrieved_at,
+        company_description=company_profile.get("companyDescription"),
+        website=company_profile.get("websiteUrl"),
+        directors=counts.get("director", 0),
+        top_executives=counts.get("executive", 0),
+        rows=len(frame),
+        unheaded_keys=sorted(set(unheaded)),
+    )
+
+
+def parse_technical_signals(parameters: Any, *, symbol: str = "",
+                            source_url: Optional[str] = None,
+                            retrieved_at: Optional[datetime] = None) -> pd.DataFrame:
+    """``body.parameters`` of the advanced-technical-analysis route as a tidy frame.
+
+    The JSON is a **nested** object: 56 top-level keys on the recorded TCS capture, of which some
+    values are a single ``{name, value, insight, color}`` record (``rsi``, ``macd``, ``atr``,
+    ``adx``, ``momentum``, …), some are a **list** of them (``sma_parameters``, ``ema_parameters``,
+    ``oscillator_parameter``), some are a dict of them (``pivot_level``, whose values are ``pivot``,
+    ``R1``..``S3``), and some are plain data with no signal in them at all (``current_price``,
+    ``day_low``, ``available_frequency``, ``spot_data``).
+
+    Args:
+        parameters: ``body["parameters"]``, verbatim.
+
+    Returns:
+        Columns ``name``, ``value``, ``insight``, ``color``, ``parameter`` — one row per signal
+        record, in the order the JSON presents them. ``parameter`` is the JSON key the record came
+        from, so two records called "5 Day" (one SMA, one EMA) stay distinguishable.
+
+    Note:
+        ``insight`` is the insight's ``shorttext``; ``longtext`` stays in the raw mapping that
+        :meth:`TrendlyneClient.adv_technical_analysis_async` returns, because a prose paragraph per
+        row is not what "tidy" should mean. ``value`` is verbatim — a float, a bool or a string as
+        the vendor sent it, never coerced.
+
+        **A non-dict ``insight`` is carried, not discarded.** On the recorded capture every
+        ``insight`` is either a ``{shorttext, longtext}`` object or ``None``, so the dict branch is
+        the one that runs — and a branch that is never exercised by the fixture is a branch that
+        fails silently. A plain string insight is one of the shapes this vendor family uses, and
+        turning it into ``None`` would put a real signal in the frame with no value in its own
+        column. So a string is carried verbatim, which is also what "``value`` is verbatim" means
+        applied to this column.
+
+        Keys that carry no signal record are **published, not hidden**:
+        ``attrs["bfinance_trendlyne_unread_parameters"]`` lists them. That is the difference
+        between "this frame has 60 rows" and "this frame has 60 of the 56 top-level keys, and here
+        are the ones it does not speak for".
+    """
+    if not isinstance(parameters, dict):
+        raise TrendlyneSchemaError(
+            f"technical-analysis parameters is {type(parameters).__name__}, expected an object. "
+            f"Upstream schema may have changed."
+        )
+
+    def _record(value: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, dict) or "name" not in value or "value" not in value:
+            return None
+        insight = value.get("insight")
+        if isinstance(insight, dict):
+            short = insight.get("shorttext")
+        elif isinstance(insight, str):
+            # Carried verbatim. See the Note above.
+            short = insight
+        else:
+            short = None
+        return {
+            "name": value.get("name"),
+            "value": value.get("value"),
+            "insight": short,
+            "color": value.get("color"),
+        }
+
+    rows: List[Dict[str, Any]] = []
+    unread: List[str] = []
+    for key, value in parameters.items():
+        found: List[Dict[str, Any]] = []
+        single = _record(value)
+        if single is not None:
+            found.append(single)
+        elif isinstance(value, list):
+            found = [record for record in (_record(item) for item in value) if record is not None]
+        elif isinstance(value, dict):
+            found = [
+                record
+                for record in (_record(item) for item in value.values())
+                if record is not None
+            ]
+        if not found:
+            unread.append(str(key))
+        for record in found:
+            record["parameter"] = key
+            rows.append(record)
+
+    frame = pd.DataFrame(
+        rows, columns=["name", "value", "insight", "color", "parameter"]
+    )
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(rows)} technical signal record(s) from trendlyne.com's adv-technical-analysis JSON, "
+        f"which is the robots-clean sibling of the /equity/technical-analysis-* page that "
+        f"robots.txt disallows. 'insight' is the vendor's own shorttext (or the string it sent "
+        f"instead of one) and its longtext remains in the raw mapping. 'value' is verbatim and "
+        f"never coerced. Parameter keys that carry no "
+        f"name/value record ({len(unread)}) are listed in attrs rather than dropped silently.",
+        retrieved_at,
+        rows=len(frame),
+        parameter_keys=len(parameters),
+        unread_parameters=unread,
+    )
+
+
+def parse_returns_comparison(block: Any, *, symbol: str = "",
+                             source_url: Optional[str] = None,
+                             retrieved_at: Optional[datetime] = None) -> pd.DataFrame:
+    """The ``returnsComparison`` block of ``price-performance-analysis`` as a frame.
+
+    The block is ``{"tableHeaders": [...], "tableData": [[...], ...]}`` — positional rows, with the
+    column names only in the header list. Measured on TCS 2026-10-10: seven periods (``1 Day`` …
+    ``3 Yrs``) against five comparators (the stock itself, ``Nifty50``, ``Sensex``, the industry
+    and the sector), as **strings**, and the header entries carry no ``unique_name``.
+
+    Returns:
+        One row per period, columns named by the header list's own ``name``.
+
+    Note:
+        Values are **not** coerced. The vendor mixes ``-2.36`` and ``"-3.89"`` in one column and a
+        rule that typed a column would have to pick which of those it was correcting; both are kept
+        exactly as sent, and a caller that wants numbers parses the column itself.
+    """
+    if not isinstance(block, dict):
+        raise TrendlyneSchemaError(
+            f"returnsComparison is {type(block).__name__}, expected an object. Upstream schema may "
+            f"have changed."
+        )
+    frame = _wire_table_frame(
+        block.get("tableHeaders"),
+        block.get("tableData"),
+        label="price-performance returnsComparison",
+    )
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"Period-over-period returns from trendlyne.com's price-performance-analysis JSON: "
+        f"{len(frame)} period(s) against the vendor's comparators (the stock, Nifty 50, Sensex, "
+        f"industry and sector). Values are the vendor's own and are not coerced — the block mixes "
+        f"floats and strings in one column. This is a snapshot: one request, no period axis.",
+        retrieved_at,
+        rows=len(frame),
+    )
+
+
+# ------------------------------------------------- the symbol page's own sections
+#
+# Six blocks of data live in the HTML this package already downloads for every symbol: the OHLC
+# token sits in the page's ``data-eodurl`` attribute, so the first :meth:`TrendlyneClient.ohlc`
+# per symbol pays for the document and every later call reads the cached token. Reading these
+# six blocks therefore costs **no request of its own** -- they are parsed out of the same bytes
+# the token comes from and cached beside it (see
+# :meth:`TrendlyneClient.stock_page_snapshot_async`).
+#
+# Every block is addressed by the ``id`` of the element that carries it, never by a CSS class or
+# a heading: the surrounding markup is Bootstrap-era div soup whose classes change with the
+# theme, while the six ids are the handles the page's own JavaScript binds to.
+#
+# Three things on that page are deliberately **not** read here, and the reasons are measurements:
+#
+# * ``data-companyinsights`` is a Python ``repr`` containing ``Decimal('...')`` calls, not JSON --
+#   ``ast.literal_eval`` refuses it on the live page. Reading it needs a bespoke evaluator, and
+#   every number it carries is already published by the key-metrics block above and by
+#   :mod:`bfinance.statements`.
+# * the DVM ``data-score`` attributes hold the durability and valuation scores while the page
+#   renders ``-`` for a non-subscriber. That is a paywalled number and this package does not
+#   launder one.
+# * the schema.org ``AggregateRating`` is a reader poll, not a market fact.
+
+#: Columns of each symbol-page section. Held here rather than in the parsers because a section
+#: that cannot be read is returned as an **empty frame with the right shape** plus a status attr,
+#: never as a missing key: a dict with a hole in it reads as "the vendor had nothing", which is a
+#: different claim from "this package could not read what the vendor sent".
+_SECTION_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "key_metrics": ("metric", "value", "unit", "param", "industry_rank", "insight", "color",
+                    "chartable"),
+    "price_performance": ("period", "low", "high", "change_pct", "last_price", "label", "color"),
+    "consensus": ("statement", "period_type", "period", "period_end", "actual", "average",
+                  "high", "low", "median", "analysts", "surprise_pct", "growth_pct",
+                  "is_past", "is_current", "forecast"),
+    "recommendations": ("as_of", "strong_buy", "buy", "hold", "sell", "strong_sell",
+                        "no_opinion", "analysts", "reco_value", "reco_text", "average_reco_text",
+                        "insight"),
+    "valuation": ("basis", "heading", "title", "fair_price", "fair_price_basis", "upside_pct",
+                  "upside_basis", "state"),
+    "checklists": ("checklist", "title", "passed", "failed", "total", "pass_pct", "rank",
+                   "insight"),
+}
+
+
+def _section_element(html: Union[str, BeautifulSoup], element_id: str, *, label: str) -> Any:
+    """The element carrying a section, or a typed error naming what is missing.
+
+    ``html`` may already be a parsed document. Parsing the 294 KB MOTHERSON page measured 57 ms,
+    and :func:`_stock_page_snapshot` reads six sections out of that one page, so it hands each
+    parser the soup it built instead of paying 57 ms six times for identical bytes. Public parsers
+    still take text; this is the seam that lets the batch caller share the parse, not a second
+    public input type.
+    """
+    soup = html if isinstance(html, BeautifulSoup) else BeautifulSoup(html or "", "lxml")
+    node = soup.find(id=element_id)
+    if node is None:
+        raise TrendlyneSchemaError(
+            f"{label}: the page carries no element with id={element_id!r}. That id is the only "
+            f"handle on this block -- there is no heading or class to fall back on -- so a "
+            f"missing one is a markup change, not an empty section."
+        )
+    return node
+
+
+def _section_json(node: Any, attribute: str, *, label: str) -> Any:
+    """Parse one ``data-*`` attribute as JSON, or raise a schema error naming it."""
+    raw = node.get(attribute)
+    if raw is None:
+        raise TrendlyneSchemaError(
+            f"{label}: element id={node.get('id')!r} carries no {attribute!r} attribute. "
+            f"Upstream schema may have changed."
+        )
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise TrendlyneSchemaError(
+            f"{label}: {attribute!r} is not JSON ({exc}). Upstream schema may have changed."
+        ) from exc
+
+
+def _bool_attr(value: Any) -> Optional[bool]:
+    """``"true"``/``"false"`` as the page spells them, or ``None`` when it does not say.
+
+    ``None`` is not ``False`` here: an absent basis flag means *not measured*, and a consumer
+    reading it as standalone would be asserting something the page never claimed.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return None
+
+
+def parse_stock_page_metrics(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The ``Key Metrics`` grid of a symbol page: the vendor's own ``info`` block.
+
+    Fifteen records on the recorded MOTHERSON page, each ``{title, value, unit, param_name,
+    shorttext, longtext, color, allowed_param_chart}``, in a ``data-metrics`` attribute on
+    ``div#stock_key_metrics``. These are the fields a yfinance consumer reaches for first --
+    market capitalisation, P/E, PEG, price-to-book, institutional holding, revenue and profit
+    growth, operating margin, Piotroski score and ROE -- and because they are in the page the
+    OHLC token comes from, reading them costs no request.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only; the page is already one symbol's.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``metric``, ``value``, ``unit``, ``param``, ``industry_rank``, ``insight``,
+        ``color``, ``chartable`` -- one row per record, in page order.
+
+    Note:
+        ``value`` is the vendor's number in the vendor's unit and is **never converted**.
+        ``unit`` reads ``"Cr."`` on market capitalisation and is empty on the ratios, and
+        ``attrs["bfinance_trendlyne_units"]`` carries the page's own sentence (*"All financials
+        are in INR Cr and price data in INR"*) rather than a conversion this package invented.
+
+        The page also states the accounting basis, carried as
+        ``bfinance_trendlyne_consolidated`` and ``bfinance_trendlyne_bonus_adjusted``. A consumer
+        comparing these numbers with a standalone statement is comparing two different things,
+        and the flags are the difference.
+
+        ``industry_rank`` and ``insight`` are the vendor's short and long comparison text
+        (``"Above industry Median"`` / ``"PE TTM is above industry Median"``). The two ``relp_*``
+        relative-performance records publish neither, and read ``None`` here rather than being
+        filled with a comparison the vendor did not make.
+
+    Raises:
+        TrendlyneSchemaError: The element or its ``data-metrics`` attribute is missing, the
+            attribute is not JSON, a record is not an object, or the list is empty. All four are
+            a markup change rather than an empty grid.
+    """
+    label = "stock page key metrics"
+    node = _section_element(html, "stock_key_metrics", label=label)
+    records = _section_json(node, "data-metrics", label=label)
+    if not isinstance(records, list) or not records:
+        raise TrendlyneSchemaError(
+            f"{label}: data-metrics is {type(records).__name__} with "
+            f"{len(records) if isinstance(records, list) else 0} record(s), expected a non-empty "
+            f"list. A stock page always publishes this grid, so an empty one is a markup change."
+        )
+    rows: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: record {record!r} is not an object. Upstream schema may have changed."
+            )
+        rows.append(
+            {
+                "metric": record.get("title"),
+                "value": record.get("value"),
+                "unit": record.get("unit") or "",
+                "param": record.get("param_name"),
+                "industry_rank": record.get("shorttext"),
+                "insight": record.get("longtext"),
+                "color": record.get("color"),
+                "chartable": record.get("allowed_param_chart"),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["key_metrics"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(frame)} key metric(s) from the symbol page's own data-metrics grid. Values are the "
+        f"vendor's, in the vendor's unit, and are not converted: attrs carries the page's units "
+        f"sentence and its accounting basis. Two relative-performance records publish no industry "
+        f"comparison and read missing here rather than filled.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="key_metrics",
+        section_status="parsed",
+        rows=len(frame),
+        units=node.get("data-metrics-text"),
+        consolidated=_bool_attr(node.get("data-consolidated")),
+        bonus_adjusted=_bool_attr(node.get("data-bonus-adjusted")),
+        stock_name=node.get("data-stock-name"),
+        stock_short_name=node.get("data-stock-short-name"),
+    )
+
+
+def parse_stock_page_performance(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The four price ranges of a symbol page, with the vendor's own period returns.
+
+    ``div#stock_performance_parameters`` carries a ``data-metrics`` list of four records --
+    ``Day``, ``Week``, ``Month`` and ``52 Week`` -- each with that period's ``high`` and ``low``,
+    the change over the period in percent, and the last traded price the range was measured
+    against.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``period``, ``low``, ``high``, ``change_pct``, ``last_price``, ``label``,
+        ``color``.
+
+    Note:
+        This is the zero-request version of the ``52 Week Price Range`` half of
+        :meth:`TrendlyneClient.price_performance`, which is a second route and a second request.
+        The ``52 Week`` row is ``fiftyTwoWeekHigh`` / ``fiftyTwoWeekLow`` and its ``change_pct``
+        is the one-year return.
+
+        **``last_price`` is the vendor's rounded print, not the quote.** On the recorded page all
+        four rows read ``157.3`` while the same page's ``data-currentprice`` -- and its
+        ``<meta name="description">`` -- read ``157.27``. It is carried verbatim because that is
+        what the block says; a caller that needs the quote takes it from the price series.
+
+    Raises:
+        TrendlyneSchemaError: The element or its ``data-metrics`` attribute is missing, the
+            attribute is not JSON, a record is not an object, or the list is empty.
+    """
+    label = "stock page price performance"
+    node = _section_element(html, "stock_performance_parameters", label=label)
+    records = _section_json(node, "data-metrics", label=label)
+    if not isinstance(records, list) or not records:
+        raise TrendlyneSchemaError(
+            f"{label}: data-metrics is {type(records).__name__} with "
+            f"{len(records) if isinstance(records, list) else 0} record(s), expected a non-empty "
+            f"list. Every symbol page publishes these ranges, so an empty one is a markup change."
+        )
+    rows: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: record {record!r} is not an object. Upstream schema may have changed."
+            )
+        rows.append(
+            {
+                "period": record.get("title"),
+                "low": record.get("low"),
+                "high": record.get("high"),
+                "change_pct": record.get("change_val"),
+                "last_price": record.get("ltp"),
+                "label": record.get("shorttext"),
+                "color": record.get("color"),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["price_performance"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(frame)} price range(s) from the symbol page's own data-metrics block: day, week, "
+        f"month and 52 week high/low with the vendor's change over each period. 'last_price' is "
+        f"the vendor's rounded print and differs from the same page's quote -- read the series "
+        f"for a price.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="price_performance",
+        section_status="parsed",
+        rows=len(frame),
+        stock_name=node.get("data-stock-name"),
+        stock_short_name=node.get("data-stock-short-name"),
+    )
+
+
+def parse_stock_page_consensus(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The analyst estimate series embedded in a symbol page, as one long frame.
+
+    ``section#consensus-results`` carries ``data-consensusjson``: a 66 KB object of **fifteen**
+    statements -- ``EPS``, ``CASH_EPS``, ``REVENUE``, ``EBIT``, ``EBITDA``, ``NET_INCOME``,
+    ``TARGET_PRICE`` and the rest -- each holding a ``QUARTER`` and/or ``ANNUAL`` list of
+    ``{ACTUAL, AVG, HIGH, LOW, MEDIAN, NUMBER_OF_ANALYSTS, SURPRISES, GROWTH, periodtype,
+    qtr_end_date, is_past, is_current, ...}``.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``statement``, ``period_type``, ``period``, ``period_end``, ``actual``,
+        ``average``, ``high``, ``low``, ``median``, ``analysts``, ``surprise_pct``,
+        ``growth_pct``, ``is_past``, ``is_current``, ``forecast``.
+
+    Note:
+        ``statement`` is the vendor's own key and is **not** renamed: ``EPS`` and ``CASH_EPS``
+        are two different series on this page, and collapsing them would pick one. ``period`` is
+        the vendor's label (``FY26``, ``Q2FY27``) and ``period_end`` its ``qtr_end_date``.
+
+        ``is_past`` is carried rather than used to split the frame. A row with ``is_past`` false
+        and an ``average`` is a forecast; a row with ``is_past`` true and an ``actual`` is a
+        print; a row that is neither reads ``None`` in both columns. Nothing is inferred from a
+        date, and the vendor's ``resulttype`` is not surfaced because ``period_type`` already
+        says which list the row came from.
+
+        ``TARGET_PRICE`` additionally carries ``TARGET_PRICE_FORECAST`` -- the forward target
+        block, one annual and one quarterly record -- and those two rows are appended with
+        ``forecast = True``. No other statement publishes that key on the recorded page.
+
+        ``RECOMMENDATION`` is a **list** on this page rather than a series object, so it has no
+        rows here; it is :func:`parse_stock_page_recommendations`, and it is named in
+        ``attrs["bfinance_trendlyne_unread_statements"]`` so the omission is visible rather than
+        silent.
+
+        The vendor's per-statement prose (``INSIGHT``, e.g. *"EPS was higher than average
+        estimate 2 times in past 3 years"*) is carried as short text in
+        ``attrs["bfinance_trendlyne_insights"]``, keyed by statement and period type, rather than
+        repeated on every row.
+
+    Raises:
+        TrendlyneSchemaError: The element or its ``data-consensusjson`` attribute is missing, the
+            attribute is not JSON, or it yields no series row at all.
+    """
+    label = "stock page consensus estimates"
+    node = _section_element(html, "consensus-results", label=label)
+    payload = _section_json(node, "data-consensusjson", label=label)
+    if not isinstance(payload, dict):
+        raise TrendlyneSchemaError(
+            f"{label}: data-consensusjson is {type(payload).__name__}, expected an object keyed "
+            f"by statement. Upstream schema may have changed."
+        )
+
+    rows: List[Dict[str, Any]] = []
+    unread: List[str] = []
+    insights: Dict[str, Dict[str, str]] = {}
+    for statement, block in payload.items():
+        if not isinstance(block, dict):
+            unread.append(str(statement))
+            continue
+        found = False
+        for period_type in ("QUARTER", "ANNUAL"):
+            series = block.get(period_type)
+            if not isinstance(series, list):
+                continue
+            for record in series:
+                if not isinstance(record, dict):
+                    raise TrendlyneSchemaError(
+                        f"{label}: {statement}.{period_type} holds {record!r}, expected an "
+                        f"object. Upstream schema may have changed."
+                    )
+                found = True
+                rows.append(_consensus_row(statement, period_type, record, forecast=False))
+        if statement == "TARGET_PRICE":
+            # The one statement that publishes a forward block beside its history. Measured on
+            # the recorded page: no other key carries a ``*_FORECAST`` sibling.
+            for period_type in ("ANNUAL", "QUARTER"):
+                record = (block.get("TARGET_PRICE_FORECAST") or {}).get(period_type)
+                if isinstance(record, dict):
+                    found = True
+                    rows.append(_consensus_row(statement, period_type, record, forecast=True))
+        if not found:
+            unread.append(str(statement))
+        for period_type, text in _consensus_insights(block.get("INSIGHT")).items():
+            insights.setdefault(str(statement), {}).update({period_type: text})
+
+    if not rows:
+        raise TrendlyneSchemaError(
+            f"{label}: data-consensusjson yielded no series row. The page publishes fifteen "
+            f"statements with quarter and annual estimates, so an empty parse is a schema change."
+        )
+
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["consensus"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(frame)} analyst estimate row(s) from the symbol page's own data-consensusjson, "
+        f"which is the estimate grid the /equity/consensus-estimates/ page renders client-side. "
+        f"One row per statement and period, with the vendor's own is_past/is_current flags; "
+        f"'actual' is a print and 'average' a forecast, and neither is inferred from a date. "
+        f"RECOMMENDATION is a list rather than a series and is not in this frame.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="consensus",
+        section_status="parsed",
+        rows=len(frame),
+        statements=len({row["statement"] for row in rows}),
+        unread_statements=sorted(set(unread)),
+        insights=insights,
+        current_price=_consensus_current_price(node),
+    )
+
+
+def _consensus_row(statement: Any, period_type: str, record: Mapping[str, Any], *,
+                   forecast: bool) -> Dict[str, Any]:
+    """One wire record of ``data-consensusjson`` as a flat row, with the vendor's names mapped."""
+    return {
+        "statement": statement,
+        "period_type": period_type,
+        "period": record.get("periodtype"),
+        "period_end": record.get("qtr_end_date"),
+        "actual": record.get("ACTUAL"),
+        "average": record.get("AVG"),
+        "high": record.get("HIGH"),
+        "low": record.get("LOW"),
+        "median": record.get("MEDIAN"),
+        "analysts": record.get("NUMBER_OF_ANALYSTS"),
+        "surprise_pct": record.get("SURPRISES"),
+        "growth_pct": record.get("GROWTH"),
+        "is_past": record.get("is_past"),
+        "is_current": record.get("is_current"),
+        "forecast": forecast,
+    }
+
+
+def _consensus_insights(block: Any) -> Dict[str, str]:
+    """The short insight sentence per period type, or ``{}`` when the statement has none.
+
+    Only the ``st`` text is kept. ``lt`` is the same sentence on every measured record and
+    ``value`` is null on every one, so a frame column would be a constant and a dict entry would
+    be a paragraph per row.
+    """
+    if not isinstance(block, dict):
+        return {}
+    texts: Dict[str, str] = {}
+    for period_type, record in block.items():
+        if not isinstance(record, dict):
+            continue
+        parts = [
+            str(record[key].get("st"))
+            for key in ("performanceInsight", "forwardInsight")
+            if isinstance(record.get(key), dict) and record[key].get("st")
+        ]
+        if parts:
+            texts[str(period_type)] = " ".join(parts)
+    return texts
+
+
+def _consensus_current_price(node: Any) -> Optional[float]:
+    """The page's own ``data-currentprice``, or ``None`` when it is absent or unreadable.
+
+    Kept separate from the estimate rows because it is the *quote* the upside in
+    ``TARGET_PRICE_FORECAST`` is measured against, not an estimate. ``None`` rather than ``0.0``:
+    a missing quote is not a free share.
+    """
+    raw = node.get("data-currentprice")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _recommendation_count(value: Any) -> Any:
+    """A recommendation count, unwrapped from the ``{"value": n, "class": "buy"}`` box.
+
+    ``RECOMMENDATION``'s five count fields are boxes where ``ANALYST_RECOMMENDATION``'s same five
+    are plain numbers: the page puts a colour class beside each count for its own bar chart, and
+    the count is the ``value``. Returning the box would put a dict in a column whose name says
+    "count", so the box is opened here and the colour is dropped -- presentation, not data.
+    """
+    if isinstance(value, dict):
+        return value.get("value")
+    return value
+
+
+def parse_stock_page_recommendations(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The analyst recommendation history embedded in a symbol page.
+
+    ``data-consensusjson``'s ``RECOMMENDATION`` key is a **list**, not a series object like its
+    fifteen siblings: six monthly snapshots on the recorded page, each with the buy/hold/sell
+    counts, the number of analysts, the vendor's ``RECO_VALUE`` and its ``RECO_TEXT``.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``as_of``, ``strong_buy``, ``buy``, ``hold``, ``sell``, ``strong_sell``,
+        ``no_opinion``, ``analysts``, ``reco_value``, ``reco_text``, ``average_reco_text``,
+        ``insight``.
+
+    Note:
+        The five buy/sell count fields arrive **boxed** on this block --
+        ``{"value": 12.0, "class": "d_buy"}`` -- where the same five on ``ANALYST_RECOMMENDATION``
+        are plain numbers. The box is opened and its ``value`` published, because a column named
+        ``strong_buy`` holding a dict is not a count; the ``class`` is the vendor's bar-chart
+        colour and is dropped.
+
+        ``reco_value`` is the vendor's own scale and is carried without a legend: the recorded
+        page reads ``1.82`` with ``reco_text`` ``"BUY"``, and this package does not publish a
+        mapping from one to the other that trendlyne never stated. ``as_of`` is the vendor's
+        ``asofdate`` (``YYYY-MM-DD``), which is a snapshot date rather than a period end. The
+        counts do **not** sum to ``analysts`` on the recorded page (18 buy-side + 3 hold/sell + 1
+        no-opinion = 22 against 21 analysts), so no total is derived from them.
+
+    Raises:
+        TrendlyneSchemaError: The element or its ``data-consensusjson`` attribute is missing, the
+            attribute is not JSON, ``RECOMMENDATION`` is absent, or it is empty.
+    """
+    label = "stock page analyst recommendations"
+    node = _section_element(html, "consensus-results", label=label)
+    payload = _section_json(node, "data-consensusjson", label=label)
+    records = payload.get("RECOMMENDATION") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not records:
+        raise TrendlyneSchemaError(
+            f"{label}: data-consensusjson carries no non-empty RECOMMENDATION list (got "
+            f"{type(records).__name__}). Upstream schema may have changed."
+        )
+    rows: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: record {record!r} is not an object. Upstream schema may have changed."
+            )
+        reco_text = record.get("RECO_TEXT")
+        insight = record.get("INSIGHT")
+        rows.append(
+            {
+                "as_of": record.get("asofdate"),
+                "strong_buy": _recommendation_count(record.get("STRONG_BUY")),
+                "buy": _recommendation_count(record.get("BUY")),
+                "hold": _recommendation_count(record.get("HOLD")),
+                "sell": _recommendation_count(record.get("SELL")),
+                "strong_sell": _recommendation_count(record.get("STRONG_SELL")),
+                "no_opinion": record.get("NO_OPINION"),
+                "analysts": record.get("NUMBER_OF_ANALYSTS"),
+                "reco_value": record.get("RECO_VALUE"),
+                "reco_text": reco_text.get("value") if isinstance(reco_text, dict) else reco_text,
+                "average_reco_text": record.get("AVG_RECO_TEXT"),
+                "insight": insight.get("st") if isinstance(insight, dict) else insight,
+            }
+        )
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["recommendations"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(frame)} monthly analyst-recommendation snapshot(s) from the symbol page's own "
+        f"data-consensusjson. Counts and the vendor's RECO_VALUE are carried verbatim; this "
+        f"package does not publish a scale the vendor never stated. 'insight' is the vendor's "
+        f"short sentence, repeated on every row because it describes the whole series.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="recommendations",
+        section_status="parsed",
+        rows=len(frame),
+    )
+
+
+def parse_stock_page_valuation(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The PE-based fair-price block of a symbol page.
+
+    ``div#stock_pe_valuation_check`` carries two JSON attributes -- ``data-pe-current-value`` and
+    ``data-pe-future-value`` -- each holding ``{heading, title, attr1_heading, attr1_title,
+    attr1_val, attr2_heading, attr2_title, attr2_val, st}``: a fair price on a stated basis, the
+    upside to it, and the vendor's one-word verdict.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``basis``, ``heading``, ``title``, ``fair_price``, ``fair_price_basis``,
+        ``upside_pct``, ``upside_basis``, ``state`` -- two rows, ``current`` and ``future``.
+
+    Note:
+        ``fair_price`` is **the vendor's derivation, not a price this package computed**, and the
+        basis is in the same row: ``"Based on 5Yr Average PE"`` for the current row and
+        ``"Based on 1Yr Forward EPS"`` for the forward one. The recorded page reads 184.3 and
+        236.3 against a quote of 157.27, which is the vendor's ``Undervalued`` verdict and is
+        carried as ``state``.
+
+        ``attrs["bfinance_trendlyne_insight"]`` is the vendor's sentence about the pair
+        (*"… is undervalued at both current PE and future earnings estimates."*), with its own
+        ``insight_color``. ``attrs["bfinance_trendlyne_buy_sell_zone_url"]`` is the Tier-2 route
+        the same element points at, recorded so a caller knows where the fuller page lives
+        without this function fetching it.
+
+    Raises:
+        TrendlyneSchemaError: The element, either JSON attribute, or a required field is missing,
+            or an attribute is not JSON.
+    """
+    label = "stock page PE valuation"
+    node = _section_element(html, "stock_pe_valuation_check", label=label)
+    rows: List[Dict[str, Any]] = []
+    for basis, attribute in (("current", "data-pe-current-value"),
+                             ("future", "data-pe-future-value")):
+        record = _section_json(node, attribute, label=label)
+        if not isinstance(record, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: {attribute} is {type(record).__name__}, expected an object. Upstream "
+                f"schema may have changed."
+            )
+        rows.append(
+            {
+                "basis": basis,
+                "heading": record.get("heading"),
+                "title": record.get("title"),
+                "fair_price": record.get("attr1_val"),
+                "fair_price_basis": record.get("attr1_title"),
+                "upside_pct": record.get("attr2_val"),
+                "upside_basis": record.get("attr2_title"),
+                "state": record.get("st"),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["valuation"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        "PE-based fair price and upside on two bases, from the symbol page's own "
+        "data-pe-current-value / data-pe-future-value attributes. The fair price is the "
+        "vendor's derivation and its basis is in the same row; nothing here is computed by "
+        "bfinance. 'state' is the vendor's verdict verbatim.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="valuation",
+        section_status="parsed",
+        rows=len(frame),
+        insight=node.get("data-pe-insight"),
+        insight_color=node.get("data-pe-insight-color"),
+        buy_sell_zone_url=node.get("data-buy-sell-url"),
+    )
+
+
+def parse_stock_page_checklists(
+    html: str, *, symbol: str = "", source_url: Optional[str] = None,
+    retrieved_at: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """The two pass/fail checklists of a symbol page, as counts.
+
+    ``div#trendlyne_checklist`` carries ``data-checklistdict``: a JSON object keyed by checklist
+    (``trendlyne``, ``graham``), each with ``pos``, ``neg``, ``total``, a title, an insight
+    sentence and, for one of the two, a numeric ``checklistP``.
+
+    Args:
+        html: A trendlyne symbol page, or a document carrying the same element.
+        symbol: Recorded in ``attrs`` only.
+        source_url: The URL fetched, recorded in ``attrs``.
+        retrieved_at: When the response arrived.
+
+    Returns:
+        Columns ``checklist``, ``title``, ``passed``, ``failed``, ``total``, ``pass_pct``,
+        ``rank``, ``insight``.
+
+    Note:
+        **``pass_pct`` is missing for the Graham checklist on the recorded page while its
+        ``rank`` sentence still reads "High rank - 60.0% pass in checklist".** The number is only
+        published as prose for that checklist, and it is left missing rather than parsed out of
+        the sentence: ``6 / 10`` is the same fact and needs no regex, while a regex over a
+        sentence is a parser that breaks when the wording changes. ``None`` here means *the
+        vendor did not publish it in this field*, not *zero*.
+
+    Raises:
+        TrendlyneSchemaError: The element or its ``data-checklistdict`` attribute is missing, the
+            attribute is not JSON, or it carries no checklist.
+    """
+    label = "stock page checklists"
+    node = _section_element(html, "trendlyne_checklist", label=label)
+    payload = _section_json(node, "data-checklistdict", label=label)
+    if not isinstance(payload, dict) or not payload:
+        raise TrendlyneSchemaError(
+            f"{label}: data-checklistdict is {type(payload).__name__} with "
+            f"{len(payload) if isinstance(payload, dict) else 0} checklist(s), expected a "
+            f"non-empty object. Upstream schema may have changed."
+        )
+    rows: List[Dict[str, Any]] = []
+    for key, record in payload.items():
+        if not isinstance(record, dict):
+            raise TrendlyneSchemaError(
+                f"{label}: checklist {key!r} is {type(record).__name__}, expected an object. "
+                f"Upstream schema may have changed."
+            )
+        rows.append(
+            {
+                "checklist": key,
+                "title": record.get("title"),
+                "passed": record.get("pos"),
+                "failed": record.get("neg"),
+                "total": record.get("total"),
+                "pass_pct": record.get("checklistP"),
+                "rank": record.get("insightp"),
+                "insight": record.get("insight"),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=list(_SECTION_COLUMNS["checklists"]))
+    return _stamped(
+        frame,
+        symbol,
+        source_url,
+        f"{len(frame)} pass/fail checklist(s) from the symbol page's own data-checklistdict. "
+        f"'passed'/'failed' are the vendor's pos/neg counts. 'pass_pct' is published numerically "
+        f"for only one checklist on the recorded page and reads missing for the other, whose "
+        f"percentage exists only inside its 'rank' sentence -- missing here means not published "
+        f"in that field, never zero.",
+        retrieved_at,
+        snapshot_only=True,
+        page_section="checklists",
+        section_status="parsed",
+        rows=len(frame),
+    )
+
+
+#: Fixed keys of :meth:`TrendlyneClient.stock_page_snapshot`, in page order. Declared as a tuple
+#: so a caller can iterate the contract and a test can assert it, and so a missing key is a
+#: contract change rather than a surprise.
+STOCK_PAGE_SECTIONS: Tuple[str, ...] = tuple(_SECTION_COLUMNS)
+
+#: The six parsers, in the same order. A dict rather than six sequential calls so the failure of
+#: one section can be caught, recorded and returned as an unreadable frame instead of taking the
+#: other five with it.
+_STOCK_PAGE_PARSERS = {
+    "key_metrics": parse_stock_page_metrics,
+    "price_performance": parse_stock_page_performance,
+    "consensus": parse_stock_page_consensus,
+    "recommendations": parse_stock_page_recommendations,
+    "valuation": parse_stock_page_valuation,
+    "checklists": parse_stock_page_checklists,
+}
+
+
+def _stock_page_snapshot(
+    html: str, *, symbol: str, source_url: Optional[str], retrieved_at: Optional[datetime],
+) -> Dict[str, pd.DataFrame]:
+    """Parse every symbol-page section, turning a failure into a stated one.
+
+    The six sections come from one document, so one of them changing shape must not cost a
+    caller the other five. A section that raises is returned as an **empty frame with its
+    columns** whose ``bfinance_trendlyne_section_status`` reads ``"unreadable"`` and whose
+    ``bfinance_trendlyne_section_error`` names the exception; every frame in the dict also
+    carries ``bfinance_trendlyne_sections_failed``, so the failure travels with the data rather
+    than being swallowed here.
+
+    Only :class:`~bfinance.trendlyne.errors.TrendlyneError` and ``ValueError`` are caught: those
+    are what the parsers raise, and anything else is a bug in this module rather than a vendor
+    change, so it must not be relabelled as one.
+
+    The document is parsed **once** here and the resulting soup handed to all six parsers. Six
+    independent ``BeautifulSoup`` builds of the recorded 294 KB page measured 340 ms against 57 ms
+    for one, and this function runs on the cold path of every :meth:`TrendlyneClient.ohlc`.
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    frames: Dict[str, pd.DataFrame] = {}
+    failures: Dict[str, str] = {}
+    for key, parser in _STOCK_PAGE_PARSERS.items():
+        try:
+            frames[key] = parser(
+                soup, symbol=symbol, source_url=source_url, retrieved_at=retrieved_at
+            )
+        except (TrendlyneError, ValueError) as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            failures[key] = reason
+            empty = pd.DataFrame(columns=list(_SECTION_COLUMNS[key]))
+            frames[key] = _stamped(
+                empty,
+                symbol,
+                source_url,
+                f"This section could not be read from the symbol page ({reason}). It is returned "
+                f"as an empty frame **with its columns** so the shape is stable; "
+                f"attrs['bfinance_trendlyne_section_status'] reads 'unreadable'. An empty frame "
+                f"here does not mean the vendor published no rows.",
+                retrieved_at,
+                snapshot_only=True,
+                page_section=key,
+                section_status="unreadable",
+                section_error=reason,
+                rows=0,
+            )
+    for frame in frames.values():
+        frame.attrs["bfinance_trendlyne_sections_failed"] = dict(failures)
+    return frames
+
+
 def _parse_retry_after(response: httpx.Response) -> Optional[float]:
     """Parse a delta-seconds ``Retry-After`` header, capped. ``None`` if absent or unusable."""
     raw = response.headers.get("Retry-After") if response is not None else None
@@ -1589,11 +3296,35 @@ class TrendlyneClient:
         # same page fetch, so they are cached together: caching the token alone would mean a warm
         # token could not report a classification without spending a second request.
         self._tokens: Dict[int, Tuple[float, str, Dict[str, TrendlyneGroup]]] = {}
+        # (fetched_at, {section key: frame}). The six symbol-page sections are parsed out of the
+        # same page the token comes from, so they are cached beside it and cost no request of their
+        # own -- see :meth:`stock_page_snapshot_async`. Kept in its own dict rather than in the
+        # tuple above because ``_tokens``' three-element contract is what five other methods
+        # unpack, and a fourth element would break them for a reader that never wants sections.
+        self._page_snapshots: Dict[int, Tuple[float, Dict[str, pd.DataFrame]]] = {}
         #: How the most recent :meth:`resolve_any` resolved its symbol — ``"sitemap"``,
         #: ``"member_search"`` or ``"skipped_robots_disallowed"``. Written on every call so the
         #: degradation is recorded rather than inferred from a missing result. Read it; do not set
         #: it.
         self.symbol_resolution: Optional[str] = None
+        #: Every HTTP request this client has actually attempted, including retries and including
+        #: the ones a section method spends resolving a symbol. It exists because a section frame's
+        #: note used to claim "fetched in one request" as a constant, which is only true for a warm
+        #: sitemap: a cold index on a symbol the sitemap omits costs three, two of them on the
+        #: robots-gated ``/member/`` route. A caller counting their WAF budget needs the number, not
+        #: the claim.
+        self._request_count: int = 0
+
+    @property
+    def request_count(self) -> int:
+        """How many HTTP requests this client has attempted since it was built.
+
+        Counts **attempts**, not responses: a retried 429 costs two, because that is what the
+        vendor was asked for. Section frames publish the delta across their own call as
+        ``attrs["bfinance_trendlyne_requests"]``, so the cost of one call is checkable without
+        holding a client.
+        """
+        return self._request_count
 
     def _require_member_search(
         self,
@@ -1713,8 +3444,10 @@ class TrendlyneClient:
         """GET with pacing and retry. Returns the 200 response or raises a typed error.
 
         Retry policy: 429 and 5xx and transport failures are retried with exponential backoff.
-        Every 4xx — **including 444** — is terminal, because retrying an unchanged request cannot
-        change its outcome and does cost the vendor a request.
+        Every 4xx — **including 444 and the WAF's 405** — is terminal, because retrying an
+        unchanged request cannot change its outcome and does cost the vendor a request. The WAF
+        header form is checked on every response whatever its status, because WAF attaches it
+        independently of the code it returns.
         """
         url = self._absolute(path)
         last_error: Optional[Exception] = None
@@ -1722,6 +3455,7 @@ class TrendlyneClient:
 
         for attempt in range(self.max_retries):
             await self._throttle_pacing()
+            self._request_count += 1
             client_kwargs: Dict[str, Any] = {
                 "timeout": self.timeout,
                 "follow_redirects": True,
@@ -1740,6 +3474,33 @@ class TrendlyneClient:
                 continue
 
             status = response.status_code
+
+            # The WAF is checked before every other status, 200 included: WAF attaches the header
+            # independently of the code it returns, and a challenge served as a 200 is a captcha
+            # page, not data. A challenged session is also not "slow down" but "this session is
+            # over", so backing off inside it would spend three attempts proving that.
+            waf_action = response.headers.get(_WAF_ACTION_HEADER)
+            if status == 405 or waf_action:
+                seen = (
+                    f"{_WAF_ACTION_HEADER}={waf_action}"
+                    if waf_action
+                    else f"no {_WAF_ACTION_HEADER} header"
+                )
+                raise TrendlyneWafChallengeError(
+                    f"trendlyne's edge (AWS WAF on CloudFront) challenged this request: HTTP "
+                    f"{status} with {seen} for {redact(url)}. This is terminal and was not "
+                    f"retried, because the budget is spent rather than momentarily exceeded -- "
+                    f"the same request would be refused for the rest of the session, and retrying "
+                    f"only spends more of it. The allowance usually quoted for anonymous access "
+                    f"is roughly 130-150 requests per session; that is a third-party measurement "
+                    f"recorded on 2026-10-10, not a limit bfinance publishes or can promise. What "
+                    f"this package enforces is its own: one request per second, serially, through "
+                    f"a global pacing lock. Expect a cooldown of roughly ten minutes before the "
+                    f"session is usable again.",
+                    status_code=status,
+                    url=redact(url),
+                )
+
             if status == 200:
                 return response
 
@@ -1906,12 +3667,13 @@ class TrendlyneClient:
         return len(index)
 
     def clear_caches(self) -> None:
-        """Forget the sitemap index and every cached token. The next call re-fetches."""
+        """Forget the sitemap index, every cached token and every cached page section."""
         with self._state_lock:
             self._index = None
             self._index_at = 0.0
             self._index_source_bytes = 0
             self._tokens.clear()
+            self._page_snapshots.clear()
 
     def _cached_index(self) -> Optional[Dict[str, TrendlyneSymbol]]:
         with self._state_lock:
@@ -2415,6 +4177,11 @@ class TrendlyneClient:
         reason: caching the token alone would mean a warm token could not report a classification
         without a second request.
 
+        **The six symbol-page sections ride along the same way**, in their own cache entry — see
+        :meth:`stock_page_snapshot_async`. They are parsed out of this page too, so they also cost
+        no request; the measured price is one shared soup build plus the 66 KB estimate JSON, about
+        70 ms once per cold symbol, against the ~1.3 s the fetch itself takes.
+
         Args:
             symbol: Anything :meth:`resolve_async` accepts.
             force_refresh: Re-scrape even if a cached token is still fresh.
@@ -2441,8 +4208,20 @@ class TrendlyneClient:
         html = await self._get_text(record.page_path)
         token = extract_ohlc_token(html)
         classification = parse_classification(html)
+        # The sections come out of these very bytes, so they are parsed now and cached beside the
+        # token: a later :meth:`stock_page_snapshot_async` then costs no request at all. Measured
+        # cost of the batch parse on the recorded 294 KB page is ~100 ms once per cold symbol
+        # (one soup build shared by six parsers, plus the 66 KB consensus JSON), against ~1.3 s
+        # for the fetch itself.
+        snapshot = _stock_page_snapshot(
+            html,
+            symbol=record.symbol,
+            source_url=self._absolute(record.page_path),
+            retrieved_at=datetime.now(timezone.utc),
+        )
         with self._state_lock:
             self._tokens[record.stock_id] = (time.monotonic(), token, classification)
+            self._page_snapshots[record.stock_id] = (time.monotonic(), snapshot)
         return token, classification
 
     def ohlc_token(self, symbol: str, *, force_refresh: bool = False) -> str:
@@ -2735,6 +4514,856 @@ class TrendlyneClient:
     def industry_aggregate(self, sector: TrendlyneGroup) -> pd.DataFrame:
         """Sync variant of :meth:`industry_aggregate_async`."""
         return _run_async(self.industry_aggregate_async(sector))
+
+    # ------------------------------------------------------- section pages
+    #
+    # One request each, on purpose. The symbol resolves through the cached sitemap index and the
+    # section route needs nothing else — no stock page, no OHLC token — so the cold cost of a
+    # section call is one request over the sitemap and one over the section, and one after that.
+    # With fourteen routes now reachable, a caller wanting three of them pays three requests, and
+    # the WAF budget above is the reason that number is worth pinning (tests assert it per method).
+
+    def _section_note(self, page: str, what: str, requests: int = 1) -> str:
+        """The provenance note every section frame carries. One sentence of what it is, one of what
+        it is not, because a frame that only says where it came from invites a caller to read the
+        absence of something as an absence in the data.
+
+        Args:
+            page: The route, as the vendor spells it.
+            what: What the frame is.
+            requests: How many requests the call actually cost, **measured** rather than assumed.
+                The old wording hard-coded "fetched in one request", which is true for a warm
+                sitemap and false three times over for a cold index on a symbol the sitemap omits:
+                the sitemap fetch, the member-search fetch, and the section itself. Those extra
+                requests go to ``/member/api/ac_snames/`` — the robots-gated route — so a caller
+                who is counting their budget needs the real number. See
+                :attr:`TrendlyneClient.request_count`.
+        """
+        detail = (
+            "one request"
+            if requests == 1
+            else f"{requests} requests ({requests - 1} of them resolving the symbol)"
+        )
+        return (
+            f"{what} from trendlyne.com's {page} page, fetched in {detail}. This is a snapshot: "
+            f"one page, one snapshot, and no period axis to walk backwards over. A frame that "
+            f"comes back empty means the page carried no such rows for this symbol, not that "
+            f"this package failed to look."
+        )
+
+    async def corporate_actions_async(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Bonus, dividend and every other corporate action, in one page fetch.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+
+        Returns:
+            ``{"bonus": frame, "dividend": frame, "other": frame}`` — always all three keys. See
+            :func:`parse_corporate_actions` for why the third key is a bucket rather than a fourth
+            section, and for what the ``bfinance_trendlyne_section`` column is for.
+
+        Raises:
+            TrendlyneSymbolNotFoundError: The symbol resolves by neither route.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("corporate_actions_page", record)
+        html = await self._get_text(path)
+        return parse_corporate_actions(
+            html,
+            symbol=record.symbol,
+            source_url=self._absolute(path),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def corporate_actions(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Sync variant of :meth:`corporate_actions_async`."""
+        return _run_async(self.corporate_actions_async(symbol))
+
+    async def bulk_block_deals_async(self, symbol: str) -> pd.DataFrame:
+        """Bulk and block deals, as the ``deals`` table.
+
+        One request. The live page carries a decade or more in a single response — 82 rows on
+        MOTHERSON (the recorded fixture keeps the first 40) and 182 on TCS — which is why this
+        route is **not** snapshot-guarded: there is no period to ask for, the page is the history.
+
+        Returns:
+            A frame whose ``attrs["bfinance_trendlyne_table"]`` is ``"deals"``.
+        """
+        # Counted from *before* the resolve: a cold index on a symbol the sitemap omits costs three
+        # requests here, two of them on the robots-gated /member/ route, and the note has to say so
+        # rather than claim one.
+        before = self._request_count
+        record = await self.resolve_any_async(symbol)
+        path = build_path("bulk_block_deals_page", record)
+        html = await self._get_text(path)
+        spent = self._request_count - before
+        frame = find_table(html, "deals", symbol=record.symbol)
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=False,
+                note=self._section_note(
+                    "/equity/bulk-block-deals/", "Bulk and block deals", spent
+                ),
+                retrieved_at=datetime.now(timezone.utc),
+                rows=len(frame),
+                requests=spent,
+            )
+        )
+        return frame
+
+    def bulk_block_deals(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`bulk_block_deals_async`."""
+        return _run_async(self.bulk_block_deals_async(symbol))
+
+    async def _share_holding_html_async(
+        self, record: TrendlyneSymbol, period: str
+    ) -> Tuple[str, str]:
+        """The one share-holding fetch, behind the snapshot-only guard.
+
+        The guard lives here rather than in :func:`build_path` because it is a property of the
+        route and not of the path string: measured 2026-09-27 on MOTHERSON and 2026-10-10 on TCS,
+        ``/equity/share-holding/…`` answers **HTTP 500** for every period segment but ``latest``.
+        Spending a request (or three, with the retry) to be told that is the thing this package
+        exists not to do, so the refusal is local, costs zero requests, and says why.
+
+        The mutual-fund route is the measured counter-example and deliberately has none of this:
+        there the period segment is a filter that works.
+
+        Returns:
+            ``(html, path)``. The path comes back with the body because the callers stamp it into
+            ``attrs`` and the page's own URL is the provenance — not the stock page this method
+            never fetched.
+        """
+        checked = validate_period(period)
+        if checked != SNAPSHOT_PERIOD:
+            raise TrendlyneServerError(
+                f"the trendlyne share-holding route serves only the period "
+                f"{SNAPSHOT_PERIOD!r}, not {checked!r}. Measured: /equity/share-holding/1372/TCS/"
+                f"Jun-2026/... returns HTTP 500 (re-verified 2026-10-10; the same period on "
+                f"monthly-mutual-fund-share-holding returns 200 and filters), as do /2024/ and "
+                f"/2023/. This was refused locally, so no request was spent. Use "
+                f"monthly_mf_holdings_async() for a period-filtered holding table, or read the "
+                f"multi-period grid the single 'latest' page already embeds via share_holding()",
+                status_code=500,
+            )
+        path = build_path("share_holding_page", record, period=SNAPSHOT_PERIOD)
+        return await self._get_text(path), path
+
+    async def share_holding_async(self, symbol: str, period: str = SNAPSHOT_PERIOD) -> pd.DataFrame:
+        """The share-holding **summary grid**: holder categories down, quarters across.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            period: Must be ``latest``. Any other value is refused **before** the request — see
+                :meth:`_share_holding_html_async` for the measurement. Note the contrast with
+                :meth:`monthly_mf_holdings_async`, where a period really does filter.
+
+        Returns:
+            One frame, carrying the ``latest`` page's summary grid. On the recorded TCS capture
+            that is 13 columns — a ``Row Type`` marker plus twelve quarters, Jun 2026 to Sep 2023 —
+            against **12 rows**: the five top-level categories (Promoter, FII, DII, Public, Others)
+            and the seven sub-rows the page renders collapsed beneath them (Promoter's Holding /
+            Pledged / Locked and DII's Mutual Funds / Banks / Insurance / Others). The frame is
+            indexed by the vendor's own row label, so ``frame.loc["Pledged", "Jun 2026"]`` reads a
+            cell directly. On MOTHERSON the same page carries 44 distinct quarter labels. That grid
+            is why one ``latest`` request is worth having even though the route cannot be walked.
+
+        Note:
+            **The page hides its sub-category rows with ``style="display:none"``, and this frame
+            carries them anyway.** They used not to: ``pandas.read_html`` honours the CSS
+            ``display`` property by default, so 8 of the grid's 13 rows — including ``Pledged``,
+            which is a distinct holding figure and not a restatement of the promoter's own — were
+            silently dropped. The extractor now reads this one table with
+            ``displayed_only=False``; every other table this package reads is unaffected. Because
+            the rows are now visible, the frame says which is which: ``frame["Row Type"]`` reads
+            ``"category"`` for the five top-level rows and ``"subgroup"`` for the seven beneath
+            them. Filter on it — the index is deliberately not unique, since ``"Others"`` is both a
+            DII sub-row and a top-level category, and this package does not invent a label to make
+            it so.
+
+        Note:
+            ``attrs["bfinance_trendlyne_snapshot_only"]`` is **True** here, and it is the only
+            section frame that carries it: this is the one route whose answer is a single
+            unaddressable point in time.
+        """
+        record = await self.resolve_any_async(symbol)
+        html, path = await self._share_holding_html_async(record, period)
+        tables = share_holding_tables(html)
+        frame = tables.summary
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=True,
+                note="Share-holding summary grid (holder categories down, quarters across) from "
+                     "trendlyne's /equity/share-holding/ page. This route serves ONLY the period "
+                     "'latest' -- every other segment answers HTTP 500 -- so this frame is one "
+                     "unaddressable snapshot and is flagged snapshot_only. It is still worth one "
+                     "request: the page embeds every quarter it holds. The page's own sub-category "
+                     "rows are style='display:none' and pandas.read_html skips what the page hides "
+                     "by default, so this table is read with displayed_only=False and the frame "
+                     "carries them too -- including 'Pledged', a distinct holding figure. The "
+                     "index is the vendor's own row label and the 'Row Type' column reads "
+                     "'category' or 'subgroup'; the index is not unique ('Others' is both a DII "
+                     "sub-row and a top-level category) and no label was invented to make it so. "
+                     "Use share_holding_holders_async() for the per-category holder tables and "
+                     "monthly_mf_holdings_async() for a period that actually filters.",
+                retrieved_at=datetime.now(timezone.utc),
+                rows=len(frame),
+                holder_categories=list(tables.categories),
+            )
+        )
+        return frame
+
+    def share_holding(self, symbol: str, period: str = SNAPSHOT_PERIOD) -> pd.DataFrame:
+        """Sync variant of :meth:`share_holding_async`."""
+        return _run_async(self.share_holding_async(symbol, period=period))
+
+    async def share_holding_holders_async(self, symbol: str) -> List[pd.DataFrame]:
+        """The per-category holder tables from the same ``latest`` page.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts. No ``period`` argument, deliberately:
+                the route does not have one (see :meth:`share_holding_async`), and a parameter that
+                can only take a single value is a way of inviting a caller to pass another.
+
+        Returns:
+            One frame per category in page order — three on the recorded page (promoter,
+            institutional, public non-institutional) — each carrying
+            ``attrs["bfinance_trendlyne_holder_category"]``. An unnamed section gets ``None`` there
+            rather than a guessed category.
+
+        Note:
+            This is a **separate request** from :meth:`share_holding_async`, not a shared one: two
+            callers asking for the summary and the holders pay two requests rather than one method
+            guessing which of the two they wanted. Each frame is stamped ``snapshot_only`` for the
+            same reason the summary grid is.
+        """
+        record = await self.resolve_any_async(symbol)
+        html, path = await self._share_holding_html_async(record, SNAPSHOT_PERIOD)
+        tables = share_holding_tables(html)
+        retrieved_at = datetime.now(timezone.utc)
+        holders: List[pd.DataFrame] = []
+        for frame, category in zip(tables.holders, tables.categories):
+            frame.attrs.update(
+                build_attrs(
+                    record.symbol,
+                    source=self._absolute(path),
+                    snapshot_only=True,
+                    note=f"The {category or '<unnamed section>'} holder table from trendlyne's "
+                         f"share-holding page: {len(frame)} holder(s). The route serves only the "
+                         f"period 'latest', so this is one unaddressable snapshot. The category "
+                         f"comes from the tab label of the section wrapper, because all three "
+                         f"tables repeat one header row verbatim; an unnamed section reads None "
+                         f"here rather than a guess.",
+                    retrieved_at=retrieved_at,
+                    rows=len(frame),
+                    holder_category=category,
+                )
+            )
+            holders.append(frame)
+        return holders
+
+    def share_holding_holders(self, symbol: str) -> List[pd.DataFrame]:
+        """Sync variant of :meth:`share_holding_holders_async`."""
+        return _run_async(self.share_holding_holders_async(symbol))
+
+    async def board_meetings_async(self, symbol: str) -> pd.DataFrame:
+        """Scheduled and completed board meetings, as the page's own table.
+
+        Returns:
+            One frame with the vendor's ``Ex-date`` / ``Purpose`` / ``Notes`` columns, in the order
+            the page serves them — which is **not** chronological: the recorded TCS capture leads
+            with a forward-dated 08 Oct 2026 quarterly result and runs back years. Sorting is left
+            to the caller because the page's order is the vendor's only claim about what it
+            considers current, and re-sorting it here would assert a preference nobody measured.
+        """
+        before = self._request_count
+        record = await self.resolve_any_async(symbol)
+        path = build_path("board_meeting_page", record)
+        html = await self._get_text(path)
+        spent = self._request_count - before
+        frame = find_table(html, "board_meeting", symbol=record.symbol)
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=False,
+                note=self._section_note(
+                    "/equity/board-meeting/", "Board meetings (ex-date, purpose, notes)", spent
+                ) + " Rows are in the page's own order, which leads with forward-dated meetings "
+                  "and is not chronological; nothing is re-sorted.",
+                retrieved_at=datetime.now(timezone.utc),
+                rows=len(frame),
+                requests=spent,
+            )
+        )
+        return frame
+
+    def board_meetings(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`board_meetings_async`."""
+        return _run_async(self.board_meetings_async(symbol))
+
+    async def research_reports_async(self, symbol: str, page: int = 1) -> pd.DataFrame:
+        """Broker research reports, as the page's one table.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            page: Page number. ``1`` is the page's own first page and carries no query string;
+                anything higher is sent as ``?page=N``.
+
+        Returns:
+            One frame carrying the vendor's own columns — ``Summary``, ``Date``, ``Stock``,
+            ``Author``, ``LTP``, ``Target``, ``Price at reco (Change since reco%)``, ``Upside(%)``,
+            ``Type``, ``Report``, ``Discuss``. The recorded TCS capture holds 21 data rows, the
+            first of which is the vendor's **aggregate** "Consensus Share Price Target" row, so a
+            consumer deriving a consensus must not average the column and also read that row.
+
+        Note:
+            The aggregate row is called out rather than filtered: removing it would be this package
+            deciding what the caller wanted, and it is the row that carries the consensus.
+        """
+        before = self._request_count
+        record = await self.resolve_any_async(symbol)
+        path = build_path("research_reports_page", record)
+        path = _paged(path, page)
+        html = await self._get_text(path)
+        spent = self._request_count - before
+        frame = find_table(html, "research_report", symbol=record.symbol)
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=False,
+                note=self._section_note(
+                    "/research-reports/stock/", "Broker research reports", spent
+                ) + f" This frame is page {page} only. The vendor's aggregate 'Consensus Share "
+                  f"Price Target' row is kept, not filtered: it is the consensus, and a consumer "
+                  f"that also averages the Target column must exclude it deliberately.",
+                retrieved_at=datetime.now(timezone.utc),
+                rows=len(frame),
+                page=page,
+                requests=spent,
+            )
+        )
+        return frame
+
+    def research_reports(self, symbol: str, page: int = 1) -> pd.DataFrame:
+        """Sync variant of :meth:`research_reports_async`."""
+        return _run_async(self.research_reports_async(symbol, page=page))
+
+    async def latest_news_async(self, symbol: str, page: int = 1) -> pd.DataFrame:
+        """The symbol's news list, as the page renders it.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            page: Page number; ``1`` is the bare page and anything higher is sent as ``?page=N``.
+                ``?page=2`` was measured answering 200 on 2026-10-10.
+
+        Returns:
+            Columns ``date``, ``kind``, ``title``, ``url``, ``source``. See
+            :func:`parse_latest_news` for what is carried verbatim and why — the short version is
+            that the date string is the vendor's own (three formats on one page) and a
+            login-modal ``url`` is the vendor's own paywall, reported rather than rewritten.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("latest_news_page", record)
+        path = _paged(path, page)
+        html = await self._get_text(path)
+        frame = parse_latest_news(
+            html,
+            symbol=record.symbol,
+            source_url=self._absolute(path),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+        frame.attrs["bfinance_trendlyne_page"] = page
+        return frame
+
+    def latest_news(self, symbol: str, page: int = 1) -> pd.DataFrame:
+        """Sync variant of :meth:`latest_news_async`."""
+        return _run_async(self.latest_news_async(symbol, page=page))
+
+    async def stock_alerts_async(self, symbol: str) -> pd.DataFrame:
+        """The symbol's alert history — research-report alerts, SMA crossovers, price thresholds.
+
+        Returns:
+            Columns ``date``, ``kind``, ``headline``, ``detail``, ``values``; see
+            :func:`parse_stock_alerts` for what each is, including why ``values`` is a dict.
+
+        Note:
+            Reading this list needs no member account. Creating an alert does, and the two write
+            routes that do (``/alerts/addStockAlert/``, ``/alerts/modal/stockAlert/``) are the two
+            this site's robots.txt disallows in this namespace — neither is a route this package
+            builds.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("stock_alerts_page", record)
+        html = await self._get_text(path)
+        return parse_stock_alerts(
+            html,
+            symbol=record.symbol,
+            source_url=self._absolute(path),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def stock_alerts(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`stock_alerts_async`."""
+        return _run_async(self.stock_alerts_async(symbol))
+
+    async def insider_trading_async(self, symbol: str) -> pd.DataFrame:
+        """Insider and SAST trades, as the page's own table.
+
+        The route's ``all`` list is long and **capped server-side at exactly
+        :data:`INSIDER_ROW_CAP` rows**, so this method publishes the row count and, when the count
+        equals the cap, a note saying the cap was hit and the frame is therefore not the full
+        history. A frame below the cap is never described as complete: the recorded TCS capture
+        holds 174 data rows and nothing measured says that is all of them.
+
+        Returns:
+            One frame with the vendor's ``Client Name`` / ``Client Category`` / ``Action*`` /
+            ``Reported To/By Exchange`` / ``Quantity`` / ``Post Transaction Holding`` / ``Traded %``
+            / ``Avg. Price`` / ``Value`` / ``Period`` columns. It is **not** the ``deals`` table and
+            is not read by that signature — there is no ``Deal Type`` column here, and borrowing the
+            deals header would classify an insider frame as a bulk-deal frame with no error.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("insider_trading_page", record)
+        html = await self._get_text(path)
+        frame = find_table(html, "insider_trade", symbol=record.symbol)
+        rows = len(frame)
+        capped = rows >= INSIDER_ROW_CAP
+        note = (
+            f"Insider / SAST trades from trendlyne.com's insider-trading-sast page: {rows} row(s), "
+            f"served in a single page with no period axis. The observed server-side cap on this "
+            f"route is exactly {INSIDER_ROW_CAP} rows."
+        )
+        if capped:
+            note += (
+                " This frame holds exactly that many, so it is TRUNCATED and is NOT the full "
+                "history; attrs['bfinance_trendlyne_insider_rows'] is the number to read before "
+                "treating it as one."
+            )
+        else:
+            note += (
+                " This frame is below the cap, which does NOT mean it is complete -- only that it "
+                "was not cut at the cap. Nothing measured says what the vendor holds beyond "
+                "these rows."
+            )
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=False,
+                note=note,
+                retrieved_at=datetime.now(timezone.utc),
+                insider_rows=rows,
+                insider_row_cap=INSIDER_ROW_CAP,
+                insider_rows_capped=capped,
+            )
+        )
+        return frame
+
+    def insider_trading(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`insider_trading_async`."""
+        return _run_async(self.insider_trading_async(symbol))
+
+    async def monthly_mf_holdings_async(self, symbol: str,
+                                        period: str = SNAPSHOT_PERIOD) -> pd.DataFrame:
+        """Mutual funds' monthly holding of one stock, on a three-month ragged grid.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            period: ``latest``, a year (``2024``) or a month (``Jun-2024``) — validated by
+                :func:`validate_period`, so a malformed segment costs zero requests. **This route
+                genuinely filters by period**: measured on TCS 2026-10-10, ``Jun-2026`` answers 200
+                with 1,577,098 bytes and ``2026`` answers 200 with 1,402,262. It is therefore the
+                deliberate counter-example to :meth:`share_holding_async`, which must not carry this
+                guard.
+
+        Returns:
+            One row per fund. The grid is **ragged** — 26 of the 30 rows on the recorded capture
+            carry ``-`` for a month in which that fund held nothing — so no month column may be
+            coerced to numeric, and the extractor's all-or-nothing rule keeps every one verbatim.
+        """
+        record = await self.resolve_any_async(symbol)
+        checked = validate_period(period)
+        path = build_path("monthly_mf_holding_page", record, period=checked)
+        html = await self._get_text(path)
+        frame = monthly_mf_holding_table(html)
+        frame.attrs.update(
+            build_attrs(
+                record.symbol,
+                source=self._absolute(path),
+                snapshot_only=False,
+                note=f"Mutual-fund holdings of {record.symbol} for period {checked!r}, from "
+                     f"trendlyne's /equity/monthly-mutual-fund-share-holding/ page. The period "
+                     f"segment on THIS route filters (verified 2026-10-10: 'Jun-2026' and '2026' "
+                     f"both answer 200 with real data), which is why it carries no snapshot guard "
+                     f"while share_holding_async does. The grid is ragged -- a '-' is a month in "
+                     f"which that fund held nothing, not a missing measurement -- so no month "
+                     f"column is coerced to numeric.",
+                retrieved_at=datetime.now(timezone.utc),
+                rows=len(frame),
+                period=checked,
+            )
+        )
+        return frame
+
+    def monthly_mf_holdings(self, symbol: str, period: str = SNAPSHOT_PERIOD) -> pd.DataFrame:
+        """Sync variant of :meth:`monthly_mf_holdings_async`."""
+        return _run_async(self.monthly_mf_holdings_async(symbol, period=period))
+
+    async def buy_sell_zone_async(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """The PE-band grid on both bases: standalone and consolidated.
+
+        Returns:
+            ``{"standalone": frame, "consolidated": frame}``. The two grids carry **byte-identical
+            header rows** on the live page, so nothing but the enclosing ``div.tab-pane`` tells them
+            apart — and their numbers differ (recorded TCS: current PE 14.9 vs 15.1, Strong Buy
+            Zone 1.0% vs 1.8%). A swap would be invisible, which is why the key is the pane id.
+
+            Each frame carries the page's summary statistics in ``attrs`` — the strong-buy-zone
+            share, current / average / median PE and the raw tile text for the forward trio, all
+            read off the tile beside each grid. They are ``None`` when the page shows no such tile,
+            which on the recorded capture is the measured answer for one of them.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("buy_sell_zone_page", record)
+        html = await self._get_text(path)
+        retrieved_at = datetime.now(timezone.utc)
+        results: Dict[str, pd.DataFrame] = {}
+        for basis, table in buy_sell_zone_tables(html).items():
+            frame = table.frame
+            frame.attrs.update(
+                build_attrs(
+                    record.symbol,
+                    source=self._absolute(path),
+                    snapshot_only=False,
+                    note=f"Buy-sell-zone PE-band grid on the {basis} basis, from trendlyne's "
+                         f"/tools/buy-sell-zone/ page: {len(frame)} band row(s). The standalone "
+                         f"and consolidated grids carry byte-identical header rows, so this frame "
+                         f"is keyed by its div.tab-pane id ({basis!r}) and not by its headers. "
+                         f"The page's summary statistics (strong buy zone, current / average / "
+                         f"median PE and the raw tile text) are in attrs; an attr reads None when "
+                         f"the page shows no such tile.",
+                    retrieved_at=retrieved_at,
+                    basis=basis,
+                    rows=len(frame),
+                )
+            )
+            results[basis] = frame
+        return results
+
+    def buy_sell_zone(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Sync variant of :meth:`buy_sell_zone_async`."""
+        return _run_async(self.buy_sell_zone_async(symbol))
+
+    async def swot_async(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """The SWOT widget's fact tables, keyed by their tab pane.
+
+        Returns:
+            ``{"tag_strengths": frame, "tag_weakness": frame, "tag_opportunity": frame,
+            "tag_threats": frame, "tag_others": frame}`` on the recorded page — five single-column
+            tables whose header cell *is* the fact. Each frame publishes that heading in
+            ``attrs["bfinance_trendlyne_swot_heading"]``.
+
+        Note:
+            The ``tag_others`` pane is not a fourth quadrant. It is trendlyne's own extra tab
+            (on the recorded capture, a subscription-gated screen) and it is published under its own
+            name rather than folded into "threats" or dropped.
+        """
+        record = await self.resolve_any_async(symbol)
+        path = build_path("swot_page", record)
+        html = await self._get_text(path)
+        return parse_swot_tables(
+            html,
+            symbol=record.symbol,
+            source_url=self._absolute(path),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def swot(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Sync variant of :meth:`swot_async`."""
+        return _run_async(self.swot_async(symbol))
+
+    # ------------------------------------------------- JSON sibling routes
+    #
+    # Three routes that end in `?format=json`, all of which answer the standard trendlyne envelope.
+    # `parse_envelope` is what decides success here: head.status == "0", never the HTTP status,
+    # because a failed request on these routes arrives as a 200 with an empty body.
+
+    async def adv_technical_analysis_async(
+        self, symbol: str, *, _record: Optional[TrendlyneSymbol] = None
+    ) -> Dict[str, Any]:
+        """The advanced technical analysis, as the vendor's own parameter mapping.
+
+        This is the robots-clean sibling of the ``/equity/technical-analysis-*`` **page**, which
+        ``robots.txt`` disallows: the rule needs that literal substring and this path has
+        ``/equity/api/stock/`` in front of it. The page route stays unwired.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            _record: An **already-resolved** record, passed down by :meth:`technical_signals_async`
+                rather than resolved again. ``None`` (the default, and the only thing a caller
+                ever passes) resolves here as before. See
+                :meth:`technical_signals_async` for why the second resolve was not free.
+
+        Returns:
+            ``body["parameters"]`` **as sent** — 56 top-level keys on the recorded TCS capture,
+            nested differently by key (a record, a list of records, a dict of records). Nothing is
+            flattened or renamed here; :meth:`technical_signals_async` is the tidy view of the
+            same request and :func:`parse_technical_signals` says exactly what it leaves out.
+
+        Raises:
+            TrendlyneNotAuthorizedError: ``head.status != "0"`` — which arrives as HTTP 200.
+            TrendlyneSchemaError: The envelope carried no ``parameters``.
+            TrendlyneWafChallengeError: The edge challenged the session. Terminal.
+        """
+        record = _record if _record is not None else await self.resolve_any_async(symbol)
+        path = build_path("adv_technical_analysis", record)
+        payload = await self._get_json(path, referer=record.page_url)
+        body = parse_envelope(
+            payload, context=f"the technical-analysis payload for {record.symbol}"
+        )
+        if "parameters" not in body:
+            raise TrendlyneSchemaError(
+                f"the technical-analysis payload for {record.symbol} has no 'parameters'. Body "
+                f"keys: {sorted(body)[:12]}. Upstream schema may have changed."
+            )
+        return body["parameters"]
+
+    def adv_technical_analysis(self, symbol: str) -> Dict[str, Any]:
+        """Sync variant of :meth:`adv_technical_analysis_async`."""
+        return _run_async(self.adv_technical_analysis_async(symbol))
+
+    async def technical_signals_async(self, symbol: str) -> pd.DataFrame:
+        """The same request as :meth:`adv_technical_analysis_async`, as a tidy frame.
+
+        One request, columns ``name``, ``value``, ``insight``, ``color``, ``parameter``. Use this
+        to read indicators and the raw method to read everything else the payload carries.
+
+        Note:
+            **The symbol is resolved once, here.** This used to resolve it and then call
+            :meth:`adv_technical_analysis_async`, which resolved it *again*. For a symbol the
+            sitemap carries the second resolve is a cache hit and costs nothing — which is why the
+            request-count tests never saw it. For a symbol the sitemap **omits**, which is every
+            ETF, the second resolve re-requests ``/member/api/ac_snames/``: the one route this
+            package's robots gate exists for. Measured: ``NIFTYBEES`` cost two member requests
+            where one would do. So the resolved record is handed down instead of re-derived.
+        """
+        record = await self.resolve_any_async(symbol)
+        parameters = await self.adv_technical_analysis_async(record.symbol, _record=record)
+        return parse_technical_signals(
+            parameters,
+            symbol=record.symbol,
+            source_url=self._absolute(build_path("adv_technical_analysis", record)),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def technical_signals(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`technical_signals_async`."""
+        return _run_async(self.technical_signals_async(symbol))
+
+    async def overview_second_part_async(
+        self, symbol: str, *, _record: Optional[TrendlyneSymbol] = None
+    ) -> Dict[str, Any]:
+        """The company and corporate-events JSON behind ``/equity/about/``.
+
+        The about page itself renders client-side and carries **zero** server-rendered tables;
+        this route is where its content lives. Measured on TCS 2026-10-10: nine body keys —
+        ``eventsData``, ``researchReports``, ``corporateFiling`` and four document lists,
+        ``companyProfileData`` and ``faq``.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            _record: An already-resolved record, handed down by :meth:`events_async` and
+                :meth:`company_overview_async` so the symbol is resolved once per call rather than
+                twice. ``None`` (the default) resolves here. See :meth:`technical_signals_async`
+                for what the second resolve costs on a symbol the sitemap omits.
+
+        Returns:
+            The envelope's **body** mapping, verbatim, with ``head.status == "0"`` already checked
+            by :func:`parse_envelope`. Not the whole envelope, and not a subset: the raw mapping is
+            what a caller who wants ``faq`` or the document lists needs, and
+            :meth:`events_async` / :meth:`company_overview_async` are shaped views of two of its
+            keys.
+        """
+        record = _record if _record is not None else await self.resolve_any_async(symbol)
+        path = build_path("overview_second_part", record)
+        payload = await self._get_json(path, referer=record.page_url)
+        return parse_envelope(
+            payload, context=f"the overview-second-part payload for {record.symbol}"
+        )
+
+    def overview_second_part(self, symbol: str) -> Dict[str, Any]:
+        """Sync variant of :meth:`overview_second_part_async`."""
+        return _run_async(self.overview_second_part_async(symbol))
+
+    async def events_async(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Board meetings, dividends, bonuses, splits and rights, as five frames.
+
+        One request. Each frame's columns are its block's own ``unique_name`` keys, and a block the
+        symbol has none of (TCS has neither a split nor a rights issue on the recorded capture)
+        comes back as an **empty frame with its columns**, not as a missing key.
+        """
+        record = await self.resolve_any_async(symbol)
+        body = await self.overview_second_part_async(record.symbol, _record=record)
+        return parse_event_tables(
+            body.get("eventsData"),
+            symbol=record.symbol,
+            source_url=self._absolute(build_path("overview_second_part", record)),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def events(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """Sync variant of :meth:`events_async`."""
+        return _run_async(self.events_async(symbol))
+
+    async def company_overview_async(self, symbol: str) -> pd.DataFrame:
+        """Directors and top executives, with the business description in ``attrs``.
+
+        One request. See :func:`parse_company_overview` for why the description is not a column and
+        why a person holding both roles appears twice.
+        """
+        record = await self.resolve_any_async(symbol)
+        body = await self.overview_second_part_async(record.symbol, _record=record)
+        return parse_company_overview(
+            body.get("companyProfileData"),
+            symbol=record.symbol,
+            source_url=self._absolute(build_path("overview_second_part", record)),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def company_overview(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`company_overview_async`."""
+        return _run_async(self.company_overview_async(symbol))
+
+    async def price_performance_async(
+        self, symbol: str, *, _record: Optional[TrendlyneSymbol] = None
+    ) -> Dict[str, Any]:
+        """Returns comparison, seasonality and daily bars, as the vendor's own body mapping.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            _record: An already-resolved record, handed down by :meth:`returns_comparison_async` so
+                the symbol is resolved once per call rather than twice. ``None`` (the default)
+                resolves here. See :meth:`technical_signals_async` for what the second resolve
+                costs on a symbol the sitemap omits.
+
+        Returns:
+            The envelope's **body**: ``lastModified``, ``returnsComparison``, ``returnsDeepDive``,
+            ``returnsPatternData`` and ``dailyData`` on the recorded capture.
+            :meth:`returns_comparison_async` is the shaped view of one of those five keys.
+
+        Note:
+            This route's ``head.statusDescription`` reads ``"success"`` in lower case where every
+            other trendlyne route sends ``"Success"``. That is the concrete reason success is
+            decided on ``head.status == "0"`` and never on the description string.
+        """
+        record = _record if _record is not None else await self.resolve_any_async(symbol)
+        path = build_path("price_performance_analysis", record)
+        payload = await self._get_json(path, referer=record.page_url)
+        return parse_envelope(
+            payload, context=f"the price-performance payload for {record.symbol}"
+        )
+
+    def price_performance(self, symbol: str) -> Dict[str, Any]:
+        """Sync variant of :meth:`price_performance_async`."""
+        return _run_async(self.price_performance_async(symbol))
+
+    async def returns_comparison_async(self, symbol: str) -> pd.DataFrame:
+        """Period-over-period returns against the vendor's comparators, as a frame.
+
+        One request. Seven periods against five comparators on the recorded capture, with values
+        left exactly as sent — the block mixes floats and strings in one column.
+        """
+        record = await self.resolve_any_async(symbol)
+        body = await self.price_performance_async(record.symbol, _record=record)
+        return parse_returns_comparison(
+            body.get("returnsComparison"),
+            symbol=record.symbol,
+            source_url=self._absolute(build_path("price_performance_analysis", record)),
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    def returns_comparison(self, symbol: str) -> pd.DataFrame:
+        """Sync variant of :meth:`returns_comparison_async`."""
+        return _run_async(self.returns_comparison_async(symbol))
+
+    async def stock_page_snapshot_async(
+        self, symbol: str, *, force_refresh: bool = False
+    ) -> Dict[str, pd.DataFrame]:
+        """Six sections of the symbol page, for **no request of their own**.
+
+        The OHLC token lives in the symbol page, so :meth:`ohlc` already downloads that page and
+        :meth:`ohlc_token_async` parses these six sections out of the same bytes and caches them.
+        This method reads that cache: after any OHLC or token call for the symbol it costs
+        **zero** requests, and on a cold client it costs the one page fetch the token needs anyway.
+
+        Args:
+            symbol: Anything :meth:`resolve_async` accepts.
+            force_refresh: Re-fetch the page and re-parse, even if a cached snapshot is fresh.
+
+        Returns:
+            ``{section: frame}``, always all six keys in :data:`STOCK_PAGE_SECTIONS` order:
+            ``key_metrics``, ``price_performance``, ``consensus``, ``recommendations``,
+            ``valuation``, ``checklists``. Copies, so mutating one does not poison the cache. Each
+            carries its parser's ``attrs`` plus ``bfinance_trendlyne_requests``, the **measured**
+            delta across this call.
+
+        Raises:
+            TrendlyneSchemaError: The cache is empty after a fetch that reported success, which
+                would mean the page parsed but stored nothing -- a bug here rather than a vendor
+                change, and never reported as six empty sections.
+
+        Note:
+            A section whose markup changed is **not** an error here: it comes back as an empty frame
+            with its columns, ``bfinance_trendlyne_section_status="unreadable"``, the exception in
+            ``bfinance_trendlyne_section_error``, and its name in
+            ``bfinance_trendlyne_sections_failed`` on every frame. One section changing shape must
+            not cost a caller the other five, and an empty frame must never be read as "the vendor
+            published nothing".
+        """
+        before = self._request_count
+        record = await self.resolve_any_async(symbol)
+        with self._state_lock:
+            cached = self._page_snapshots.get(record.stock_id)
+        if (
+            not force_refresh
+            and cached is not None
+            and self.token_ttl_seconds > 0.0
+            and (time.monotonic() - cached[0]) <= self.token_ttl_seconds
+        ):
+            frames = cached[1]
+        else:
+            await self.ohlc_token_async(record.symbol, force_refresh=force_refresh)
+            with self._state_lock:
+                entry = self._page_snapshots.get(record.stock_id)
+            if entry is None:
+                raise TrendlyneSchemaError(
+                    f"the page fetched for {record.symbol!r} produced no symbol-page sections. "
+                    f"The token and the sections come out of one document, so a token with no "
+                    f"sections beside it is a bug in this package, not a vendor change."
+                )
+            frames = entry[1]
+        spent = self._request_count - before
+        out: Dict[str, pd.DataFrame] = {}
+        for key, frame in frames.items():
+            copy = frame.copy()
+            copy.attrs = dict(frame.attrs)
+            copy.attrs["bfinance_trendlyne_requests"] = spent
+            out[key] = copy
+        return out
+
+    def stock_page_snapshot(
+        self, symbol: str, *, force_refresh: bool = False
+    ) -> Dict[str, pd.DataFrame]:
+        """Sync variant of :meth:`stock_page_snapshot_async`."""
+        return _run_async(
+            self.stock_page_snapshot_async(symbol, force_refresh=force_refresh)
+        )
 
 
 #: Shared client for the module-level shortcuts. Created on first use, never at import.

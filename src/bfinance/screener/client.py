@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 import pandas as pd
 
@@ -34,6 +34,20 @@ def extract_company_id(html: str) -> Optional[int]:
         return None
     m = _COMPANY_ID_RE.search(html)
     return int(m.group(1)) if m else None
+
+
+def _company_id_cache_key(symbol: str) -> str:
+    """The single cache key a symbol's company id is stored under.
+
+    ``symbol`` is expected **normalised**, which is what both call sites already have in hand:
+    :meth:`ScreenerClient.resolve_company_id` normalises to build the page URL, and
+    :meth:`ScreenerClient.get_company_profile` normalises for every other key it writes. This is the
+    one key where a second spelling costs a request rather than a row, so a caller that hands over a
+    raw ticker turns one entry into three -- ``TCS``, ``tcs`` and ``TCS.NS`` must be the same
+    company, and ``tests/test_screener_company_id_cache.py`` drives those three spellings through
+    the public methods to keep it that way.
+    """
+    return f"screener_company_id_{symbol}"
 
 # Global pacing state shared across all client instances so concurrent
 # Ticker clients respect one rate limit instead of bursting N×.
@@ -113,6 +127,12 @@ class ScreenerClient:
     #: =====================  ======  ===========================================================
     #: ``search``             168.0  company-name -> id resolution: static for the life of a
     #:                                  listing, so it can afford the longest life here.
+    #: ``company_id``         168.0  symbol -> id: the same kind of fact ``search`` resolves, read
+    #:                                  off the company page instead of the disallowed search
+    #:                                  route. An id does not change for the life of a listing, so
+    #:                                  it takes the longest life in this table; and it is the key
+    #:                                  the chart cache is *built* from, so a shorter life here
+    #:                                  would put a live request back in front of every chart read.
     #: ``profile``               1.0  carries ``ratios.current_price`` and ``market_cap``. A price
     #:                                  is not "slightly old", it is a *wrong number* the moment
     #:                                  the market moves, so this sits BELOW the 5-year chart
@@ -136,6 +156,7 @@ class ScreenerClient:
     #: client cannot silently retune another.
     CATEGORY_TTL_HOURS: Dict[str, float] = {
         "search": 168.0,
+        "company_id": 168.0,
         "profile": 1.0,
         "chart": 6.0,
         "market_overview": 24.0,
@@ -169,9 +190,9 @@ class ScreenerClient:
                 carries its own default.
 
                 Every category this client actually caches names its own TTL, and every one of them
-                therefore *ignores* this argument: ``search`` 168.0h, ``profile`` 1.0h, ``chart``
-                6.0h, ``market_overview`` 24.0h, ``market_leaf`` 12.0h (see
-                :data:`CATEGORY_TTL_HOURS`, and ``ttl_hours``). To retune one, set it on the
+                therefore *ignores* this argument: ``search`` 168.0h, ``company_id`` 168.0h,
+                ``profile`` 1.0h, ``chart`` 6.0h, ``market_overview`` 24.0h, ``market_leaf`` 12.0h
+                (see :data:`CATEGORY_TTL_HOURS`, and ``ttl_hours``). To retune one, set it on the
                 instance. Before that was true, this argument was the *only* lever on the
                 price-bearing ``profile`` entry -- which is precisely how a 24-hour-old
                 ``currentPrice`` became the shipped default without anyone choosing it.
@@ -208,7 +229,15 @@ class ScreenerClient:
             "User-Agent": ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
+            # Brotli is deliberately NOT advertised. httpx decodes gzip/deflate natively but
+            # only decodes brotli when the optional `brotli` (or `brotlicffi`) package is
+            # installed; without it `resp.text` is the raw compressed bytes, so the parser sees no
+            # tables and every screener-backed member degrades to empty. Measured live
+            # 2026-10-11: screener.in answers `Accept-Encoding: gzip, deflate, br` with
+            # `Content-Encoding: br`, and the same request with br removed returns gzip which
+            # decodes to HTML with `data-company-id` present. Re-add br only if the dependency
+            # is added to pyproject.toml.
+            "Accept-Encoding": "gzip, deflate",
             "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
@@ -307,6 +336,35 @@ class ScreenerClient:
             raise RateLimitExceededError("Screener.in rate limit exceeded after maximum retries.")
         raise UpstreamServiceError("Screener.in request failed after maximum retries.")
 
+    # ================================================================= cache plumbing
+
+    def _cache_read(self, cache_key: str) -> Tuple[Optional[Any], str]:
+        """Read a cache entry **and** the
+        :class:`~bfinance.cache.sqlite_cache.CacheLookup` name for how it was found.
+
+        Copied from :meth:`bfinance.ownership.OwnershipClient._cache_read` rather than invented,
+        because the vocabulary is now shared: the status is the ``CacheLookup.status`` string and
+        nothing else, so a consumer learns it from one key in one package.
+
+        The previous form of this call was ``self.cache.get(cache_key)``, which is
+        :meth:`SQLiteCache.get` — and that returns ``.value`` and throws the status away. Every
+        one of this client's five cache reads did it, so ``cached is not None`` was the only signal
+        any caller had, and it is a signal about *presence*, not about *provenance*: a row holding
+        JSON ``null``, a row that had expired and a row that could not be read all arrive as
+        ``None`` and are all followed by a refetch. That is the safe direction for *fetching*, and
+        it is why nothing was ever wrong — but it means the frame a caller finally received could
+        not say whether anything was cached at all.
+
+        ``"disabled"`` is returned when this client has no cache. It is not a value the frame will
+        ever carry (a disabled cache also returns no value, so the caller fetches and reports
+        ``"miss"``), and it is here for the same reason it is in ``ownership``: a sentinel beats a
+        ``None`` status, which would be indistinguishable from a real one.
+        """
+        if not self.cache:
+            return None, "disabled"
+        lookup = self.cache.get_result(cache_key)
+        return lookup.value, lookup.status
+
     async def search(self, query: str) -> List[Dict[str, Any]]:
         """
         Search companies on Screener.in by name, symbol, or scrip code.
@@ -331,6 +389,14 @@ class ScreenerClient:
         clean_q = normalize_symbol(query)
         cache_key = f"screener_search_{clean_q}"
         if self.cache:
+            # Deliberately NOT routed through `_cache_read`. This method returns a plain
+            # `List[Dict[str, Any]]`, and there is nowhere on a list to publish a status: the
+            # attrs vocabulary (`attrs["bfinance_cache_status"]`, ownership's) is a DataFrame
+            # convention and inventing a parallel one for lists would be a second vocabulary for
+            # the same fact. Switching the read would therefore change nothing observable. It also
+            # stays `get()` rather than `get_result()` because there is no caller here that could
+            # use the extra distinction: `None` already means "fetch it", which is the safe
+            # reading of a miss, an expired row, a stored null and a corrupt row alike.
             cached = self.cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -373,11 +439,37 @@ class ScreenerClient:
         ``data-company-id`` extraction is exact rather than a best-match guess against search
         ordering.
 
+        **The mapping is cached** (``category="company_id"``, 168h: see
+        :data:`CATEGORY_TTL_HOURS`), because an id is *identity*, not a price: it does not change
+        for the life of a listing, so re-reading the page can only discover whether the page is
+        reachable today. That is not a local detail -- ``get_chart_timeseries`` *builds* its cache
+        key from the id, so while this call always went to the network, a warm six-hour chart row
+        still cost one request per call and the chart cache was defeated (measured: chart calls
+        whose frame already said ``'hit'`` were spending one request each). A caller who has read a
+        profile pays nothing even for the first resolve, because :meth:`get_company_profile` writes
+        this row from the page it had already fetched; the profile path deliberately does **not**
+        call this method, which would add a request there rather than remove one here.
+
+        A row holding anything but an ``int`` -- a stored ``null``, a hand-edited value -- is read
+        as a miss and the page is re-read. The page is the only authority, and a wrong id does not
+        mean "no chart", it means another company's chart.
+
         Returns:
             The company id, or ``None`` if the page has no id attribute (a page shape change, which
-            is now visible as a missing attribute rather than a swallowed HTTP error).
+            is now visible as a missing attribute rather than a swallowed HTTP error). ``None`` is
+            never cached: there is no id to remember, and a negative answer cached for a week would
+            outlive the markup break that produced it.
         """
         clean = normalize_symbol(symbol)
+        cache_key = _company_id_cache_key(clean)
+        # `_cache_read` rather than `self.cache.get`: one read path, and the value arrives with the
+        # `CacheLookup` status beside it. The status is not published, for the same reason
+        # `search()` documents for its own read -- an `int` is not a frame and has nowhere to
+        # carry it.
+        cached_id = self._cache_read(cache_key)[0]
+        if isinstance(cached_id, int):
+            return cached_id
+
         resp = await self._send_with_retry(f"{self.BASE_URL}/company/{clean}/")
         if resp.status_code != 200:
             raise UpstreamServiceError(
@@ -389,21 +481,51 @@ class ScreenerClient:
             logger.warning(
                 "No data-company-id on /company/%s/ - Screener.in markup may have changed.", clean
             )
+        elif self.cache:
+            self.cache.set(
+                cache_key, comp_id, category="company_id", ttl_hours=self.ttl_hours("company_id")
+            )
         return comp_id
 
     async def get_company_profile(self, ticker: str, force_refresh: bool = False) -> CompanyProfile:
         """
         Fetch and parse complete company fundamental profile.
+
+        The returned :class:`~bfinance.models.company.CompanyProfile` carries ``cache_status``:
+        ``"hit"`` when the profile came out of the cache, ``"miss"`` when this call fetched it
+        (which includes ``force_refresh=True`` and a client built with ``cache=None``). It is the
+        model's equivalent of ``attrs['bfinance_cache_status']`` on the frame methods, and it is
+        excluded from ``model_dump()``, so the cached payload has the shape it always had.
         """
         symbol = normalize_symbol(ticker)
         cache_key = f"screener_profile_{symbol}"
 
-        if not force_refresh and self.cache:
-            cached = self.cache.get(cache_key)
+        # The store's word for "there was no lookup to make", exactly as in the chart and /market/
+        # readers below -- and, also as there, never what the caller receives: a profile carries
+        # `cache_status`, and every path that builds one has either measured a hit or fetched.
+        cache_status = "disabled"
+        if not force_refresh:
+            # This read goes through `_cache_read` like every other one, and the status now has
+            # somewhere to live. It used to be `self.cache.get`, and the comment here used to call
+            # that a real gap: the return value is a `CompanyProfile` -- a pydantic model, not a
+            # frame -- so `attrs` has nowhere to go, and adding a field to the model would change
+            # `model_dump()`, which is exactly what the write below stores.
+            #
+            # The model now carries `cache_status` with `Field(exclude=True)`, which is what makes
+            # that objection false rather than merely inconvenient: the status travels on the
+            # object, and `model_dump()` -- and therefore the cached payload -- stays byte-for-byte
+            # what it was before the field existed. So a hit below reports the lookup's own name,
+            # and the live path reports "miss"; the one-hour-old `ratios.current_price` and
+            # `market_cap` this used to replay silently can now say that they are old.
+            cached, cache_status = self._cache_read(cache_key)
             if cached is not None:
                 try:
                     p = CompanyProfile.model_validate(cached)
                     if p.ratios.current_price is not None or p.ratios.market_cap is not None:
+                        # The lookup's own word, not a hardcoded second spelling of it: a non-None
+                        # value is exactly `CacheLookup.status == "hit"`, and if that contract ever
+                        # grows a value-bearing status this line publishes it instead of guessing.
+                        p.cache_status = cache_status
                         return p
                 except Exception:
                     pass
@@ -430,10 +552,20 @@ class ScreenerClient:
         #    This used to be a separate resolve_company_id() call first, which hit the
         #    robots-disallowed /api/company/search/?q= route. Reading it here costs no extra request
         #    and cannot be silently blocked into a company_id=0 profile.
+        #
+        #    ...and the id is cached from here, also for free. The direction matters: this method
+        #    writes the row that `resolve_company_id` reads, and never calls the resolver -- routing
+        #    the profile through it would add a request to *this* path, while the chart path is
+        #    where a request is removed (its cache key is built from the id).
         comp_id = extract_company_id(main_html)
         if comp_id is None:
             logger.warning(
                 "No data-company-id on %s - peers will be skipped and company_id will be 0.", final_url
+            )
+        elif self.cache:
+            self.cache.set(
+                _company_id_cache_key(symbol), comp_id, category="company_id",
+                ttl_hours=self.ttl_hours("company_id"),
             )
 
         # 3. Fetch Dynamic Peers HTML if company ID is available
@@ -475,12 +607,21 @@ class ScreenerClient:
             except Exception as e:
                 logger.debug("Failed standalone fallback for %s: %s", symbol, e)
 
+        # A fetch happened, so whatever the lookup said before it -- "miss", "expired", "null",
+        # "corrupt" -- the object the caller receives was built from the pages fetched just now,
+        # and the one status a frame is allowed to carry for that is "miss". "disabled" is not
+        # published either, for the same reason: it describes the store, not this profile.
+        profile.cache_status = "miss"
+
         # Cache profile. The TTL is stated here because this payload carries a price
         # (`ratios.current_price`, `market_cap`) and a price cannot be cached for a day and still
         # be a price. It used to pass no `ttl_hours` at all and inherited 24h from the cache
         # default -- the only one of the five call sites that did, so the number nobody chose was
         # also the one that shipped.
         if self.cache:
+            # `model_dump()` leaves `cache_status` out (`Field(exclude=True)`), so this payload has
+            # the same shape it had before the field existed -- which is what keeps the status a
+            # provenance fact rather than the first key of a cache-format change.
             self.cache.set(
                 cache_key, profile.model_dump(), category="profile",
                 ttl_hours=self.ttl_hours("profile"),
@@ -495,11 +636,20 @@ class ScreenerClient:
         Fetch historical price or valuation time series as a Pandas DataFrame.
         metric options: 'price', 'pe', 'margins', 'ev_ebitda', 'pb', 'mcap_sales'.
         days: 30 (1M), 180 (6M), 365 (1Y), 1095 (3Y), 1825 (5Y), 3652 (10Y), 10000 (Max).
+
+        The frame carries ``attrs['bfinance_cache_status']`` — the real
+        :class:`~bfinance.cache.sqlite_cache.CacheLookup` status for the read, ``'hit'`` when the
+        raw JSON came out of the cache and ``'miss'`` when this call fetched it. Before that, a
+        cached chart frame was indistinguishable from a live one, because this parser published no
+        attrs at all; see :func:`bfinance.screener.charts.ScreenerChartEngine.parse_chart_json_to_dataframe`.
         """
         symbol = normalize_symbol(ticker)
-        # Reachable only when search() actually succeeded and matched nothing, so
-        # TickerNotFoundError here is now a claim about the symbol, not about the
-        # upstream being unreachable.
+        # Reachable only when the symbol's company page answered 200 *without* a
+        # `data-company-id`, which is where the id comes from now that `/api/company/search/?q=`
+        # is robots-disallowed. So TickerNotFoundError here is a claim about that page -- either
+        # a symbol screener.in has no id for, or a markup break that removed the attribute -- and
+        # not about the upstream being unreachable: a 403, 404 or 5xx raises UpstreamServiceError
+        # inside the resolver, before this line is reached.
         comp_id = await self.resolve_company_id(symbol)
         if not comp_id:
             raise TickerNotFoundError(f"Cannot resolve company ID for '{symbol}'")
@@ -508,8 +658,9 @@ class ScreenerClient:
         cache_key = f"screener_chart_{comp_id}_{q_param}_{days}"
 
         raw_json = None
-        if not force_refresh and self.cache:
-            raw_json = self.cache.get(cache_key)
+        cache_status = "disabled"
+        if not force_refresh:
+            raw_json, cache_status = self._cache_read(cache_key)
 
         if raw_json is None:
             # `companyId` first, deliberately. screener.in's robots.txt carries
@@ -531,8 +682,11 @@ class ScreenerClient:
                 self.cache.set(
                     cache_key, raw_json, category="chart", ttl_hours=self.ttl_hours("chart")
                 )
+            cache_status = "miss"
 
-        return ScreenerChartEngine.parse_chart_json_to_dataframe(raw_json)
+        frame = ScreenerChartEngine.parse_chart_json_to_dataframe(raw_json)
+        frame.attrs["bfinance_cache_status"] = cache_status
+        return frame
 
     # ============================================================ the /market/ tree
 
@@ -578,7 +732,14 @@ class ScreenerClient:
             key                          meaning
             ==========================  ====================================================
             ``bfinance_source_url``      the URL fetched
-            ``bfinance_retrieved_at``    UTC ISO-8601 timestamp of that fetch
+            ``bfinance_retrieved_at``    UTC ISO-8601 timestamp of **this call**, not of the
+                                           fetch — on a cache hit it is the moment the cached
+                                           HTML was re-parsed. Pair it with
+                                           ``bfinance_cache_status``, which says which.
+            ``bfinance_cache_status``    ``"hit"`` when the HTML came from the cache,
+                                           ``"miss"`` when this call fetched it. The real
+                                           :class:`~bfinance.cache.sqlite_cache.CacheLookup`
+                                           status, never inferred from ``html is not None``.
             ``bfinance_market_row_count``          rows parsed (188)
             ``bfinance_market_skipped_rows``       non-industry ``<tr>`` skipped (13 repeated
                                            header rows on the recording)
@@ -597,8 +758,9 @@ class ScreenerClient:
         """
         cache_key = "screener_market_industries"
         html = None
-        if not force_refresh and self.cache:
-            html = self.cache.get(cache_key)
+        cache_status = "disabled"
+        if not force_refresh:
+            html, cache_status = self._cache_read(cache_key)
 
         url = self.MARKET_OVERVIEW_URL
         if html is None:
@@ -616,11 +778,13 @@ class ScreenerClient:
                 self.cache.set(
                     cache_key, html, category="market", ttl_hours=self.ttl_hours("market_overview")
                 )
+            cache_status = "miss"
 
         frame = self.parser.parse_market_industries(html)
         frame.attrs["bfinance_source_url"] = url
         frame.attrs["bfinance_retrieved_at"] = datetime.now(timezone.utc).isoformat()
         frame.attrs["bfinance_market_single_request"] = True
+        frame.attrs["bfinance_cache_status"] = cache_status
         if not len(frame):
             logger.warning("/market/ parsed to zero industries; Screener.in markup may have changed.")
         return frame
@@ -690,6 +854,8 @@ class ScreenerClient:
                                         else 0
         ``bfinance_constituents_pagination_robots_blocked``  always ``True``: why this is partial
         ``bfinance_source_url`` / ``bfinance_retrieved_at``  provenance
+        ``bfinance_cache_status``                            ``"hit"`` when the HTML came from
+                                        the cache, ``"miss"`` when this call fetched it
         ==============================  =====================================================
 
         ⚠ **``not_returned`` and the market-wide "1,246 unreachable" are different numbers and
@@ -729,8 +895,9 @@ class ScreenerClient:
         url = self._leaf_url(code)
         cache_key = f"screener_industry_{url.rsplit('/market/', 1)[-1]}"
         html = None
-        if not force_refresh and self.cache:
-            html = self.cache.get(cache_key)
+        cache_status = "disabled"
+        if not force_refresh:
+            html, cache_status = self._cache_read(cache_key)
 
         if html is None:
             resp = await self._send_with_retry(url)
@@ -745,6 +912,7 @@ class ScreenerClient:
                 self.cache.set(
                     cache_key, html, category="market", ttl_hours=self.ttl_hours("market_leaf")
                 )
+            cache_status = "miss"
 
         peers, page_info = self.parser.parse_industry_constituents(html)
         frame = (
@@ -774,6 +942,7 @@ class ScreenerClient:
         frame.attrs.update(
             bfinance_source_url=url,
             bfinance_retrieved_at=datetime.now(timezone.utc).isoformat(),
+            bfinance_cache_status=cache_status,
             bfinance_industry_code=url.rsplit("/market/", 1)[-1].strip("/").rsplit("/", 1)[-1],
             bfinance_constituents_partial=partial,
             bfinance_constituents_total_reported=total,

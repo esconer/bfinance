@@ -7,6 +7,7 @@ from .quotes import QuoteEngine
 from .fast_info import FastInfo
 from .derivatives import DerivativesEngine
 from .corporate import CorporateActionsEngine
+from .technical import TechnicalIndicators
 
 __all__ = [
     "OHLCVEngine",
@@ -14,4 +15,5 @@ __all__ = [
     "FastInfo",
     "DerivativesEngine",
     "CorporateActionsEngine",
+    "TechnicalIndicators",
 ]

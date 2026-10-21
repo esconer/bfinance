@@ -153,10 +153,43 @@ def test_genuine_search_miss_is_still_an_empty_list():
         assert asyncio.run(_client().search("NOSUCHTICKERXYZ")) == []
 
 
-def test_genuine_miss_still_produces_ticker_not_found_for_the_chart_step():
-    with fake_httpx(empty_ok):
-        with pytest.raises(TickerNotFoundError):
+def page_without_an_id(url):
+    """A company page that answered 200 but carries no ``data-company-id``."""
+    return httpx.Response(
+        200,
+        text="<html><body><h1>No such company</h1></body></html>",
+        request=httpx.Request("GET", url),
+    )
+
+
+def test_a_genuine_miss_on_the_company_page_is_a_ticker_not_found():
+    """HTTP 200 with no ``data-company-id`` is the only way to reach ``TickerNotFoundError`` here.
+
+    **This test used to pass for a reason that no longer exists, and its comment said so.** It
+    fed ``empty_ok`` -- the *search* route's payload, ``200 []`` -- to the chart step, whose comment
+    described the resolver as "search() actually succeeded and matched nothing". The resolver has
+    not called ``search()`` since it moved: ``/api/company/search/?q=`` is robots-disallowed
+    (``Disallow: /*?q=``), so the id is read off ``data-company-id`` on ``/company/{symbol}/``. The
+    old stub was not even shaped like a page; it passed because ``[]`` has no such attribute in it,
+    which would have kept passing with the resolver deleted entirely.
+
+    So the mechanism is asserted instead of assumed: exactly one request, to the company page, and
+    no search route anywhere. ``empty_ok`` remains the right responder for ``search()`` itself --
+    the two tests above it use it for exactly that -- but it is the wrong shape for this path.
+    """
+    with fake_httpx(page_without_an_id) as calls:
+        with pytest.raises(TickerNotFoundError) as excinfo:
             asyncio.run(_client().get_chart_timeseries("NOSUCHTICKERXYZ"))
+
+    assert calls == ["https://www.screener.in/company/NOSUCHTICKERXYZ/"], (
+        f"the id must come off the company page: {calls}"
+    )
+    assert not any("/api/company/search/" in call for call in calls), (
+        f"the robots-disallowed search route was requested: {calls}"
+    )
+    assert "NOSUCHTICKERXYZ" in str(excinfo.value), (
+        "the error must name the symbol it could not resolve"
+    )
 
 
 def test_block_and_miss_are_distinguishable():

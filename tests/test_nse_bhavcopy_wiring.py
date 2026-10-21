@@ -332,13 +332,47 @@ async def test_window_before_the_archive_explains_itself(stub_bhavcopy):
 
 
 async def test_window_is_clamped_to_the_archive_start_with_a_warning(stub_bhavcopy, caplog):
+    """
+    A clamped request is cut at the floor and says so -- and the split does not change the cut.
+
+    The window is clamped in the reader before it reaches the cache, so the first call is one
+    whole-window range fetch beginning at the floor (the cold prefix is the walk that was always
+    spent). A repeat call is answered from that stored prefix and asks only for the tail. Both
+    halves are asserted because ``calls[0]`` alone is the cold-store half: once the store is warm
+    the first recorded call is the tail, and the clamp can only be read off the whole-window one.
+    """
     calls = stub_bhavcopy()
     with caplog.at_level("WARNING", logger="bfinance"):
-        await _engine().fetch_history(symbol="RELIANCE", period="10y", actions=False, auto_adjust=False)
-    assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE
+        first = await _engine().fetch_history(
+            symbol="RELIANCE", period="10y", actions=False, auto_adjust=False
+        )
+    assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE, (
+        "the first call must ask from the archive floor, not for the pre-2024 span "
+        f"{calls[0]}"
+    )
+    assert len(calls) == 1, (
+        "and it is one whole-window range fetch, not one fetch for the prefix and another for "
+        f"the tail: {calls}"
+    )
     assert any(
         ohlcv_mod.BHAVCOPY_FIRST_DATE in r.getMessage() for r in caplog.records
     ), "truncating a 10y request to the archive must be said out loud"
+
+    before = len(calls)
+    second = await _engine().fetch_history(
+        symbol="RELIANCE", period="10y", actions=False, auto_adjust=False
+    )
+    assert len(calls) - before == 1, (
+        "a repeat call is answered from the stored prefix and asks for the tail alone: "
+        f"{calls[before:]}"
+    )
+    assert calls[-1][0] > ohlcv_mod.BHAVCOPY_FIRST_DATE, (
+        "so the archive is not walked from the floor a second time"
+    )
+    assert calls[-1][1] == calls[0][1], "and the tail ends at the requested end"
+    assert first["Close"].tolist() == second["Close"].tolist(), (
+        "the repeat frame is the same series, prefix and tail together"
+    )
 
 
 async def test_typed_bhavcopy_errors_are_not_blurred(stub_bhavcopy):

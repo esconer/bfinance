@@ -4,17 +4,23 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 import numpy as np
 import pandas as pd
 
 try:  # real-OHLC source; the opt-in synthetic path must keep working without it
-    from bfinance.nse.bhavcopy import bhavcopy_range
+    from bfinance.nse.bhavcopy import MISSING_DATES_ATTR as BHAVCOPY_MISSING_DATES_ATTR
+    from bfinance.nse.bhavcopy import bhavcopy_range, iter_trading_days
 except ImportError:  # pragma: no cover - depends on whether that module is installed
     bhavcopy_range = None
+    iter_trading_days = None
+    BHAVCOPY_MISSING_DATES_ATTR = "bfinance_bhavcopy_missing_dates"  # that module's own name
 
 logger = logging.getLogger("bfinance")
 
+# The cache-status constant, not the literal: ``bfinance_cache_status`` is what tells a replayed
+# frame from a live fetch, and the module that publishes it is the one place that spells it.
+from bfinance.cache.frame_store import CACHE_STATUS_ATTR
 from bfinance.market.corporate import (
     ACTIONS_SOURCE_NONE,
     ACTIONS_SOURCE_NSE,
@@ -23,7 +29,7 @@ from bfinance.market.corporate import (
 )
 from bfinance.screener.client import ScreenerClient
 from bfinance.utils.exceptions import BFinanceError, TickerNotFoundError
-from bfinance.utils.symbols import normalize_symbol
+from bfinance.utils.symbols import normalize_symbol, resolve_exchange_and_symbol
 
 IST = "Asia/Kolkata"
 
@@ -43,6 +49,16 @@ OHLC_SOURCES = ("bhavcopy", "synthetic")
 SOURCE_NETWORK = "network"
 SOURCE_MIRROR = "mirror"
 SOURCE_MIRROR_NETWORK = "mirror+network"
+
+#: The fourth transport label: the bars came out of the frame cache -- a row the price layer wrote
+#: when the network did answer -- and nothing was fetched on this call. It is NOT ``"network"``,
+#: because that key's question is "did these numbers leave the local SQLite mirror, leave NSE, or
+#: both", and a replay left neither: it was served off disk. The distinction is the liveness one a
+#: cache cannot be allowed to fake -- a frame replayed at 14:00 whose data ends the previous Monday
+#: reads exactly like "NSE is open and this scrip has not traded" -- so the transport names the
+#: replay, and ``bfinance_cache_status``/``bfinance_cache_coverage_end``/``bfinance_cache_fetched_at``
+#: date it.
+SOURCE_CACHE = "cache"
 
 #: Set this to opt the bhavcopy path into reading :mod:`bfinance.mirror`. A bare truthy value
 #: means the default location (``~/.bfinance/mirror.db``); any other non-empty value is read as
@@ -850,6 +866,193 @@ def resolve_price_source_names(
     return tuple(ordered)
 
 
+def _price_cache_or_default(price_cache):
+    """The frame cache an engine reads through: the caller's, or the default one.
+
+    ``None`` means "the shipped default", and the shipped default is ON, over
+    ``~/.bfinance/frames.db`` (``$BFINANCE_HOME/frames.db`` when that is set). The reason is the
+    defect this exists to remove: ``bhavcopy_range`` spends one archive request per weekday of the
+    span it is handed -- 184 s for ``Ticker("TCS").info`` in the plan's measurement -- and
+    ``Ticker`` constructs this engine with a single argument, so a cache that had to be injected
+    would never be on the path the 184 s was measured on. ``PriceCache(enabled=False)`` is the
+    opt-out, and it is a real one: no lookup, no write, no store file opened.
+
+    Imported here rather than at module scope for the reason the archive reader above is guarded --
+    ``bfinance.market.price_cache`` imports ``bfinance.nse.bhavcopy`` for the trading-day calendar,
+    and a build without that module (or without ``bfinance.cache``) must still construct this
+    engine for the ``ohlc="synthetic"`` path. ``None`` is then the honest answer: no cache, the
+    same call path as before the cache existed.
+    """
+    if price_cache is not None:
+        return price_cache
+    try:
+        from bfinance.market.price_cache import PriceCache  # lazy: see the docstring
+    except ImportError:  # pragma: no cover - depends on whether those modules are installed
+        return None
+    return PriceCache()
+
+
+#: How far back the immutable boundary looks for a trading day. Any seven consecutive days hold at
+#: least five Mon-Fri days, so the newest one strictly before today is always inside the span.
+_BOUNDARY_LOOKBACK = pd.Timedelta(days=7)
+
+
+def _ist_today() -> pd.Timestamp:
+    """
+    Today on the exchange's own clock: midnight, IST.
+
+    Midnight rather than the wall clock because every date this is compared against is a *date* -- a
+    bar's index value, a window end, an archive file's name -- and a boundary derived from a time of
+    day would move at noon while all of those stayed still. For the five and a half hours by which
+    IST leads UTC it is also the day NSE itself is on, which is the only one a publish schedule can
+    mean.
+    """
+    return pd.Timestamp.now(tz=IST).normalize()
+
+
+def _immutable_boundary(on: Optional[pd.Timestamp] = None) -> Optional[pd.Timestamp]:
+    """
+    The newest day whose archive file is final: the last Mon-Fri strictly before ``on`` (or today).
+
+    This is the line the frame cache is drawn at, and it is drawn exactly where
+    :class:`~bfinance.cache.frame_store.FrameStore` already refuses to go. That store will not hold a
+    window whose end is today or later, and it is right not to: today's file does not exist until NSE
+    publishes it after the close, so a frame that reached today would be a moment of a session
+    wearing the shape of a final one. Everything strictly before today is the other way round -- a
+    published day's file never changes -- which is what makes that half of a window cacheable at all.
+
+    "Yesterday" is not how that boundary is spelled, and the ordinary cases that break it are the
+    weekend and the day after a holiday: on a Monday, yesterday is a Sunday; the day after a holiday,
+    yesterday is a day with no session. Both are days NSE never publishes, so a prefix ending there
+    would be filed under a window whose last day can never be present. On the weekend reading that
+    matters: Saturday, Sunday and the Monday after them all resolve to the *same* Friday, so a row
+    stored on Saturday is still looked up by the same key on Monday, where one day's worth of shift
+    would have missed it.
+
+    The calendar asked here is the same one the archive walk itself uses
+    (:func:`bfinance.nse.bhavcopy.iter_trading_days`: Mon-Fri, holidays kept as candidates), so the
+    two cannot disagree about which days cost a request. It is not a holiday calendar and does not
+    pretend to be one: a holiday stays a candidate and is still discovered by the walk's own 404.
+
+    ``None`` means no boundary is knowable -- the archive module is absent from this build, or the
+    calendar answered with nothing -- and every caller must then behave as though the cache were not
+    there rather than guess a day.
+    """
+    if iter_trading_days is None:  # no archive calendar in this build: never guess one
+        return None
+    stamp = _ist_today() if on is None else pd.Timestamp(on)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(IST)
+    stamp = stamp.tz_convert(IST).normalize()
+    days = iter_trading_days(
+        (stamp - _BOUNDARY_LOOKBACK).date(), (stamp - pd.Timedelta(days=1)).date()
+    )
+    return None if not days else pd.Timestamp(days[-1], tz=IST)
+
+
+def _prefix_and_tail(
+    prefix: pd.DataFrame, tail: pd.DataFrame, *,
+    boundary_iso: str, start_iso: str, end_iso: str,
+) -> pd.DataFrame:
+    """
+    The cached immutable prefix and the freshly fetched tail, as one frame for the requested window.
+
+    ``prefix`` lies inside ``start..boundary`` by construction: :meth:`FrameStore.read` refuses a row
+    whose bars do not answer the key it is filed under (``_bars_lie_inside_the_window``, which cites
+    this window as the reason it compares ISO strings), and a refused row reaches this path as the
+    live read it stood in for. ``tail`` is the live read of the days after the boundary, so the two
+    halves are disjoint and the result is the window's own series rather than two stitched readings.
+
+    Two things below are load-bearing and neither is decorative:
+
+    * **The attrs are re-asserted after the concatenation.** ``pd.concat`` keeps ``attrs`` only when
+      every input carries the *same* one and answers ``attrs == {}`` otherwise, silently: measured on
+      pandas 3.0.5, equal attrs survive, one differing key and the result is empty -- no exception,
+      and nothing in the result saying the provenance was dropped. The two halves of a split window
+      are exactly a case that disagrees: two walks, two instants, and a record covering a single day
+      of one span. The prefix's attrs are the base because the prefix is the whole-window read's own
+      slice, so ``bfinance_provenance``, ``price_basis``, ``bfinance_series`` and the rest survive
+      whole instead of vanishing into an empty dict.
+    * **The window keys are restated for the *requested* window.** The stored prefix's record
+      describes the walk that stored it -- the same walk for the rest of the session, an earlier one
+      afterwards -- and the tail's describes the tail. So ``bfinance_requested_start``,
+      ``bfinance_requested_end`` and ``bfinance_candidate_trading_days`` are computed again for
+      ``start_iso..end_iso``, and the archive's missing-dates record is the union of the prefix's
+      entries up to the boundary that prefix is filed under with the tail's, which re-observed every
+      day after the boundary. Two failure directions, and the union is what closes both. A stored
+      entry *later* than that boundary is either this session's own slice -- the walk that wrote the
+      row read a window that reached today, and recorded a day its own payload does not reach -- or a
+      row written by something else; either way the tail re-observed those days on this call, so its
+      word wins, and a record naming a day this call is holding a bar for would be a shortfall claim
+      about data that is not missing. An entry *inside* the boundary is kept, and has to be: the
+      tail's walk starts the day after it and can never see those days again, so dropping the entry
+      would lose a hole the frame still has.
+
+    An empty tail is dropped rather than concatenated: an empty frame is not neutral in
+    ``pd.concat`` -- measured on pandas 3.0.5, concatenating one turns the real value columns into
+    ``object`` and moves the index from second to nanosecond resolution, so the merged frame stops
+    being the frame a cold read produces -- and no caller has a reason to accept that for a half with
+    no bars in it. (The prefix is never empty here: the store refuses to keep one.) A duplicate date
+    would mean the halves overlapped, which their windows make impossible for a read that observed
+    its span; it is resolved the way :func:`bfinance.nse.bhavcopy.bhavcopy_range` resolves one, the
+    later copy winning, and said out loud, because no legitimate writer of either half produces it.
+    """
+    if not len(tail):
+        merged = prefix.copy()
+    else:
+        merged = pd.concat([prefix, tail])
+        if merged.index.duplicated().any():
+            repeated = int(merged.index.duplicated(keep="last").sum())
+            logger.warning(
+                "Frame cache: %d bar date(s) appeared in both halves of the split window %s..%s; "
+                "the later read wins. The stored prefix is only ever a walk's own slice of that "
+                "window, so an overlap means the row was written by something else.",
+                repeated, start_iso, end_iso,
+            )
+            merged = merged[~merged.index.duplicated(keep="last")]
+        merged = merged.sort_index(kind="stable")
+
+    attrs = dict(prefix.attrs)
+    attrs["bfinance_requested_start"] = start_iso
+    attrs["bfinance_requested_end"] = end_iso
+    attrs["bfinance_candidate_trading_days"] = len(iter_trading_days(start_iso, end_iso))
+    recorded = attrs.get(BHAVCOPY_MISSING_DATES_ATTR) or []
+    attrs[BHAVCOPY_MISSING_DATES_ATTR] = sorted(
+        {str(day)[:10] for day in recorded if str(day)[:10] <= boundary_iso}
+        | {str(day)[:10] for day in (tail.attrs.get(BHAVCOPY_MISSING_DATES_ATTR) or [])}
+    )
+    merged.attrs = attrs
+    return merged
+
+
+def _empty_symbol_rows(market: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    No rows for one symbol, as a frame the merge and the cache know what to do with.
+
+    The one caller is a split window's tail, whose emptiness is an ordinary answer rather than a
+    failure -- a weekend, a holiday, the hours before the close. It is built rather than sliced
+    because the market frame that answered nothing may have no columns at all (an archive client
+    that 404'd every candidate day answers with an empty frame, not with a schema), and slicing a
+    schema-less frame would leave the caller holding a shape no other read produces.
+
+    The market frame's attrs are carried deliberately: they are this read's record of what it
+    observed, the 404'd candidate days among them, and that record is what the missing-dates union
+    needs from an empty tail.
+    """
+    market_columns = None if market is None else getattr(market, "columns", None)
+    # ``list(...)`` and never a truthiness test: a pandas ``Index`` answers ``bool()`` with a
+    # ValueError, so "does this frame have columns" has to be asked about the list instead.
+    columns = list(market_columns) if market_columns is not None else []
+    columns = columns or ["Open", "High", "Low", "Close", VOLUME_COLUMN]
+    frame = pd.DataFrame(
+        index=pd.DatetimeIndex([], dtype="datetime64[ns, Asia/Kolkata]", name="Date"),
+        columns=columns,
+    )
+    frame.attrs.update(dict(getattr(market, "attrs", {}) or {}))
+    frame.attrs["bfinance_synthetic_ohlc"] = False
+    return frame
+
+
 class OHLCVEngine:
     """
     Historical OHLCV data builder converting deep price feeds into yfinance-identical DataFrames.
@@ -1078,7 +1281,8 @@ class OHLCVEngine:
     }
 
     def __init__(self, screener_client: ScreenerClient, corporate_actions_client=None,
-                 price_sources: Optional[PriceSourceRouter] = None):
+                 price_sources: Optional[PriceSourceRouter] = None,
+                 price_cache=None):
         """Args:
         screener_client: the Screener.in client, used by the legacy close-only path and by the
             labelled fiscal-year-end fallback for corporate actions.
@@ -1095,10 +1299,22 @@ class OHLCVEngine:
             ``source=``/``sources=`` on a call -- routes the vendor choice through the cascade,
             and a supplied ``fetch`` is how an offline caller keeps that route from reaching a
             real vendor.
+        price_cache: optional :class:`~bfinance.market.price_cache.PriceCache` -- the frame cache
+            that makes a **second identical closed-window archive call cost zero requests**, which
+            is the whole of what this argument is for. ``None`` (the default) builds one over
+            ``~/.bfinance/frames.db`` on first use, because the call this is here to stop paying for
+            twice is ``Ticker.history()``'s and ``Ticker`` constructs this engine with one argument:
+            a cache that had to be injected would be a cache no shipped caller ever had. A caller
+            who wants the pre-cache path passes ``PriceCache(enabled=False)`` -- no lookup, no write,
+            and the store is never even opened -- or a ``PriceCache`` over a store of their own.
+            What may be kept is not decided here: the window rules (a window containing today is
+            neither stored nor served, a failure shape is never stored) belong to
+            :class:`~bfinance.cache.frame_store.FrameStore` and are stated there once.
         """
         self.screener = screener_client
         self.corporate_actions = corporate_actions_client
         self.price_sources = price_sources
+        self.price_cache = _price_cache_or_default(price_cache)
 
     @staticmethod
     def _history_columns(auto_adjust: bool, back_adjust: bool, actions: bool) -> list:
@@ -1139,6 +1355,7 @@ class OHLCVEngine:
         mirror=None,
         source: Optional[str] = None,
         sources: Optional[Sequence[str]] = None,
+        requires: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV DataFrame matching exact yfinance schema:
@@ -1202,6 +1419,39 @@ class OHLCVEngine:
                 transport), ``bfinance_price_source_attempts``,
                 ``bfinance_price_source_degraded`` and ``bfinance_price_source_detail``. The
                 return type does not change: a failover is an ordinary DataFrame.
+            requires: The columns this call actually needs, or ``None`` (the default, and the
+                behaviour of every call that predates the keyword) for "a yfinance OHLCV frame".
+
+                ``None`` is not a shrug, it is the full contract: Open/High/Low/Close/Volume, the
+                two-factor corporate-action adjustment, ``auto_adjust``, and the yfinance column
+                set. Any other value is a **column-narrow** call, and it changes two things, each of
+                them deliberately:
+
+                * on the **cascade** path, a source that does not publish every requested column is
+                  **never called** -- it is skipped with ``skipped_columns`` and spends nothing,
+                  which is what makes a Close-only request safe to route at MarketLens at all (it
+                  publishes Close and Volume and no Open/High/Low, and its close-only frame is a
+                  perfectly good *answer* as far as ``is_empty_payload`` is concerned);
+                * the frame returned is the winner's, **narrowed to the columns asked for and
+                  unadjusted**. No ``Adj Close``, no ``auto_adjust`` scaling, no Volume restatement,
+                  no ``Dividends``/``Stock Splits`` columns: deriving any of those needs Open and
+                  High and Low, and the corporate-actions feed with them, which is precisely what a
+                  caller saying ``requires=("Close", "Volume")`` has said they do not want.
+
+                So a narrow frame is **not** a yfinance frame and does not claim to be one: it
+                carries the provenance keys and no adjustment key at all, because a key reading
+                ``False`` on a frame whose prices were never restated is indistinguishable from one
+                that was restated and failed part-way. Its prices are the winner's own
+                as-published series -- ``attrs["price_basis"]`` says so -- and nothing was scaled
+                behind them.
+
+                It does NOT choose the vendor. ``requires`` says which columns you need; ``sources=``
+                says who should answer, and the two are orthogonal for the same reason
+                ``ohlc=``/``source=`` are. On the shipped try-order a Close-only request is served by
+                ``nse-bhavcopy``, which does publish Close -- correctly, and at the cost of one
+                archive file per trading day. Naming ``sources=("marketlens-close",
+                "nse-bhavcopy")`` is what buys the per-symbol route instead, and that is a decision
+                about a vendor, not about columns.
             adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
                 cumulative SHARE-COUNT factor, which is what yfinance's own ``auto_adjust=False``
                 series carries -- bhavcopy is as-traded and Yahoo's raw OHLC are not, so without
@@ -1468,10 +1718,20 @@ class OHLCVEngine:
             days = max(days, delta_days)
 
         synthetic = ohlc == "synthetic"
-        # Two independent reasons the cascade can be in force, and both must hold: the caller
-        # named a source, or the engine was built with a PriceSourceRouter. Neither alone is a
-        # default, and with neither the direct bhavcopy reader below runs exactly as it did
-        # before the cascade existed.
+        # TWO independent reasons the cascade can be in force, and both must hold: the caller named
+        # a source, or the engine was built with a PriceSourceRouter. Neither alone is a default,
+        # and with neither the direct bhavcopy reader below runs exactly as it did before the cascade
+        # existed.
+        #
+        # ``requires`` is deliberately NOT a third. It says which columns the caller wants, not which
+        # vendor should answer, and the direct reader publishes the full OHLCV five -- so it already
+        # covers every requirement a caller can state on this path, and there is nothing to filter.
+        # Forcing the cascade on it would be a much larger change than it looks: cascade
+        # ``load_provider`` imports each row's module at CALL time, so the moment the cascade is on
+        # the path every ``monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", ...)`` in the suite stops
+        # being the thing that answers and an offline test quietly reaches the live NSE. Roughly 130
+        # call sites construct this engine with two arguments and stub those two objects; the whole
+        # reason :class:`PriceSourceRouter` exists is to keep that checkable.
         cascade_on = bool(price_names) or self.price_sources is not None
         if synthetic:
             bars = await self._fetch_synthetic_bars(clean_symbol, days, raise_errors)
@@ -1491,7 +1751,7 @@ class OHLCVEngine:
             window_record = {"truncated": False, "detail": ""}
         elif cascade_on:
             bars, mirror_state, price_record, window_record = await self._fetch_cascade_bars(
-                symbol, clean_symbol, start, end, days, price_names, mirror
+                symbol, clean_symbol, start, end, days, price_names, mirror, requires=requires
             )
             if price_record["degraded"]:
                 # One line for whoever is watching the log now; the frame carries the same
@@ -1505,6 +1765,13 @@ class OHLCVEngine:
             )
             price_record = self._direct_price_source_record("bhavcopy", router_present=False)
         source = mirror_state.get("source") or SOURCE_NETWORK
+
+        if requires is not None:
+            return self._narrow_price_frame(
+                symbol, bars, requires, synthetic=synthetic, ohlc_source=ohlc, source=source,
+                price_record=price_record, mirror_state=mirror_state,
+                window_record=window_record,
+            )
 
         if bars.empty:
             if auto_adjust:
@@ -1987,6 +2254,7 @@ class OHLCVEngine:
         days: int,
         names: Sequence[str],
         mirror,
+        requires: Optional[Sequence[str]] = None,
     ) -> tuple:
         """Bars from the source cascade, plus the transport, provenance and window records.
 
@@ -2040,6 +2308,17 @@ class OHLCVEngine:
         }
         basis = self._requested_price_basis(names, registry)
         only = tuple(names) or None
+        # ONE definition of "which columns this request needs", shared by the two cascade calls
+        # below and by the post-hoc check on the winner's frame. They used to disagree: the two
+        # calls were handed the caller's raw ``requires`` -- ``None`` for every ordinary
+        # ``history()``, since the signature default is deliberately not the column list -- while
+        # the check independently defaulted to the four price columns. With ``requires is None``
+        # the cascade therefore planned and resolved with NO column requirement at all, so
+        # ``marketlens-close`` (first among the as-traded rows, and it publishes only Close and
+        # Volume) was committed to *and only then* refused for the Open/High/Low it never had: a
+        # hard :class:`RealOHLCUnavailableError` with no failover, while ``nse-bhavcopy`` -- which
+        # publishes every column -- was never asked.
+        cascade_requires = tuple(requires) if requires else ("Open", "High", "Low", "Close")
         # The plan is computed here, not only inside resolve(), and that is the whole reason
         # `bfinance_price_source_attempts` can be a complete account. resolve() returns the moment
         # one provider answers, so its own `attempts` stops there -- which is right for a caller
@@ -2048,7 +2327,8 @@ class OHLCVEngine:
         # computes every exclusion without calling anything, so merging the two gives the whole
         # try-order in the order it was actually considered.
         planned = sources_cascade.plan(
-            PRICE_CAPABILITY, basis=basis, registry=registry, health=health, only=only
+            PRICE_CAPABILITY, basis=basis, registry=registry, health=health, only=only,
+            requires=cascade_requires,
         )
         resolved = sources_cascade.resolve(
             PRICE_CAPABILITY,
@@ -2058,6 +2338,7 @@ class OHLCVEngine:
             health=health,
             fetch=fetch,
             only=only,
+            requires=cascade_requires,
         )
         # The winner's frame, used WHOLE. Not concatenated with anything, not re-based, not
         # blended with a fallback's bars: Basis.comparable() already refused the only two
@@ -2071,7 +2352,11 @@ class OHLCVEngine:
                 f"history out of bars and will not derive them from a value it does not "
                 f"understand; a real feed serving an unexpected shape is a bug worth raising."
             )
-        missing = [c for c in ("Open", "High", "Low", "Close") if c not in value.columns]
+        # The columns the WINNER must have. A caller's declared requirement replaces the four
+        # price columns when it gave one, because a close-only request answered by MarketLens is a
+        # real answer and the O/H/L check would refuse it for a column nobody asked for.
+        required = tuple(requires) if requires else ("Open", "High", "Low", "Close")
+        missing = [c for c in required if c not in value.columns]
         if missing:
             raise RealOHLCUnavailableError(
                 f"{symbol}: price source {resolved.source!r} answered a {PRICE_CAPABILITY!r} "
@@ -2084,6 +2369,7 @@ class OHLCVEngine:
             _select_symbol_rows(value, clean_symbol),
             dict(getattr(value, "attrs", {}) or {}),
             label=f"{resolved.source} bars",
+            required=required,
         )
         # The mirror is a transport for ONE vendor, and the cascade's whole job is choosing the
         # vendor. Recorded rather than silently skipped, because a caller who enabled the mirror
@@ -2333,6 +2619,68 @@ class OHLCVEngine:
         frame.attrs[PRICE_SOURCE_DETAIL_ATTR] = record.get("detail")
         return frame
 
+    def _narrow_price_frame(
+        self,
+        symbol: str,
+        bars: pd.DataFrame,
+        requires: Sequence[str],
+        *,
+        synthetic: bool,
+        ohlc_source: str,
+        source: str,
+        price_record: Mapping,
+        mirror_state: Mapping,
+        window_record: Mapping,
+    ) -> pd.DataFrame:
+        """The winner's frame, narrowed to the columns the caller named, and nothing else.
+
+        What a ``requires=`` call returns, and the reason it is a separate return rather than a
+        flag on the yfinance path: everything below this point in :meth:`fetch_history` derives
+        ``Adj Close`` from the dividend factor, scales Open/High/Low by the share-count factor,
+        restates Volume by its inverse and emits ``Dividends``/``Stock Splits``. All five need
+        Open/High/Low and the corporate-actions feed, which is precisely what a caller saying
+        ``requires=("Close",)`` has said they do not want. Running them anyway would either raise on
+        the missing columns or -- worse -- leave an ``auto_adjust``-shaped frame in front of a
+        caller who never asked for one.
+
+        So the narrow frame carries the **provenance keys and nothing else**: the four
+        price-source keys and the two window keys, on the populated and the empty frame alike, plus
+        ``price_basis`` and ``bfinance_ohlc_source``. It carries no ``Adj Close``, no action columns
+        and no adjustment flags, and the absence is the point: a key reading ``False`` on a frame
+        whose prices were never restated would be indistinguishable from a frame that was restated
+        and failed part-way.
+
+        Raises:
+            RealOHLCUnavailableError: the winner's frame does not carry a column the caller asked
+                for. A narrow request is a *permission* to return fewer columns, never a licence to
+                return a column that is not there.
+        """
+        wanted = list(dict.fromkeys(requires))  # de-duplicated, order kept: the caller's own
+        missing = [column for column in wanted if column not in bars.columns]
+        if missing:
+            raise RealOHLCUnavailableError(
+                f"{symbol}: the price source answered a column-narrow request for {wanted} with a "
+                f"frame that has no {missing}. Refusing to fill them: a fabricated column is "
+                f"indistinguishable from a measured one, and a narrow request is a statement about "
+                f"which columns the caller needs, not a licence to invent the rest."
+            )
+        frame = bars[wanted]
+        frame.attrs = dict(getattr(bars, "attrs", {}) or {})
+        frame.attrs["bfinance_synthetic_ohlc"] = bool(synthetic)
+        frame.attrs["bfinance_ohlc_source"] = ohlc_source
+        frame.attrs["bfinance_source"] = source
+        frame.attrs["bfinance_mirror"] = dict(mirror_state)
+        # Nothing was scaled, so the basis is the winner's own: as-traded, unless the winner had
+        # already published a share-count restatement. Never the adjusted label -- claiming an
+        # adjustment that did not happen is the one label this frame must not carry.
+        frame.attrs["price_basis"] = self._price_basis(
+            synthetic, False, bool(price_record.get("vendor_adjusted"))
+        )
+        frame.attrs["bfinance_price_source_columns"] = tuple(wanted)
+        self._publish_price_source(frame, price_record)
+        self._publish_window_truncation(frame, window_record)
+        return frame
+
     @staticmethod
     def _publish_window_truncation(frame: pd.DataFrame, record: Mapping) -> pd.DataFrame:
         """Write the two window keys onto a frame, populated or empty, and return it.
@@ -2506,8 +2854,9 @@ class OHLCVEngine:
         Real published Open/High/Low/Close/Volume for one symbol, and where they were read from.
 
         Returns ``(rows, state, window_record)``; ``state["source"]`` is one of
-        :data:`SOURCE_NETWORK`, :data:`SOURCE_MIRROR` or :data:`SOURCE_MIRROR_NETWORK`, and the
-        whole dict is published on ``df.attrs["bfinance_mirror"]``. ``window_record`` is
+        :data:`SOURCE_NETWORK`, :data:`SOURCE_CACHE`, :data:`SOURCE_MIRROR` or
+        :data:`SOURCE_MIRROR_NETWORK`, and the whole dict is published on
+        ``df.attrs["bfinance_mirror"]``. ``window_record`` is
         ``{"truncated": bool, "detail": str}`` and is published as the two
         ``bfinance_window_truncated*`` keys.
 
@@ -2676,7 +3025,14 @@ class OHLCVEngine:
     async def _bhavcopy_bars_from(
         self, symbol: str, clean_symbol: str, start_iso: str, end_iso: str, mirror,
     ) -> tuple:
-        """The mirror-first reader, with the network as the fallback in every direction."""
+        """The mirror-first reader, with the network as the fallback in every direction.
+
+        With no mirror in play the whole-window read goes through :meth:`_cached_network_rows`, so
+        an identical second call is answered from the frame cache. WITH a mirror in play it does
+        not: every field of the mirror record (``used``, ``network_days``, ``source``) is computed
+        from this call's own fetches or from a live coverage query, and replaying a stored frame
+        under that record would restate as observed what this call never observed.
+        """
         state = _mirror_state()
         store = None
         spec = self._mirror_spec(mirror)
@@ -2697,10 +3053,10 @@ class OHLCVEngine:
 
         try:
             if store is None:
-                rows = await self._bhavcopy_network_rows(
+                rows, source = await self._cached_network_rows(
                     symbol, clean_symbol, start_iso, end_iso
                 )
-                return rows, dict(state, used=False, source=SOURCE_NETWORK)
+                return rows, dict(state, used=False, source=source)
 
             gaps = list(state["days_missing"])
 
@@ -2804,10 +3160,38 @@ class OHLCVEngine:
         Split out of the caller so the gap-closing path can ask NSE for a sub-range through the
         identical contract -- same errors, same messages -- instead of growing a second, laxer
         copy of the fetch.
+
+        The fetch itself is the blocking twin below, for the same reason it is a plain function:
+        the frame cache is synchronous, and the function it wraps has to be callable off the event
+        loop as one. ``asyncio.to_thread`` here is what keeps concurrent fetches concurrent.
+        """
+        return await asyncio.to_thread(
+            self._bhavcopy_network_rows_blocking, symbol, clean_symbol, start_iso, end_iso
+        )
+
+    def _bhavcopy_network_rows_blocking(
+        self, symbol: str, clean_symbol: str, start_iso: str, end_iso: str,
+        *, allow_empty: bool = False,
+    ) -> pd.DataFrame:
+        """
+        The blocking body of :meth:`_bhavcopy_network_rows`, and the frame cache's fetcher.
+
+        ``allow_empty`` is for the one caller that reads a span which is *expected* to have no file
+        yet: the tail of a split window. "No candidate day in the span had a file" is the archive's
+        ordinary answer there -- a weekend, a holiday, the hours before the close -- and raising for
+        it would turn every pre-publication call into an outage. The whole-window read keeps the
+        strict behaviour, because for it "nothing at all came back for the window" IS the outage
+        signal, and an empty answer there would read exactly like a symbol that does not trade.
+
+        ``bhavcopy_range`` is read from the **module global right here, at call time**, and never
+        captured as a reference at construction: ``tests/`` replaces it with
+        ``monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", ...)`` at roughly fifteen sites, and a
+        bound reference would stop being the thing that answers -- every one of those stubs would
+        quietly reach the live archive instead. The same rule as ``ohlcv.py:11`` and the same
+        reason the cascade is not allowed on this path by default.
         """
         try:
-            # sync/blocking client -> off the event loop so concurrent fetches stay concurrent
-            market = await asyncio.to_thread(bhavcopy_range, start_iso, end_iso)
+            market = bhavcopy_range(start_iso, end_iso)
         except BFinanceError:
             # Already a typed, specific answer (NotAnNseSymbolError for a BSE scrip code,
             # ParsingError for a schema change, ...). Do not blur it into a generic one.
@@ -2819,6 +3203,8 @@ class OHLCVEngine:
             ) from e
 
         if market is None or getattr(market, "empty", True):
+            if allow_empty:
+                return _empty_symbol_rows(market)
             raise RealOHLCUnavailableError(
                 f"{symbol}: NSE bhavcopy returned no data for {start_iso}..{end_iso}. "
                 f"The archive covers {BHAVCOPY_FIRST_DATE} onward; an earlier window cannot be "
@@ -2836,9 +3222,228 @@ class OHLCVEngine:
             symbol, _select_symbol_rows(market, clean_symbol), dict(market.attrs)
         )
 
+    async def _cached_network_rows(
+        self, symbol: str, clean_symbol: str, start_iso: str, end_iso: str,
+    ) -> tuple:
+        """
+        The whole-window network read, answered from the frame cache when the cache holds it.
+
+        Returns ``(rows, source)``: :data:`SOURCE_NETWORK` when the bars came over the wire on this
+        call, :data:`SOURCE_CACHE` when a stored row answered it instead. Everything else a replay
+        must disclose -- that it is a replay, when the row was fetched, how far its data reaches and
+        which candidate days of the requested window it does not contain -- is published on the
+        frame's attrs by :class:`~bfinance.market.price_cache.PriceCache`, which is the layer that
+        knows it served a row rather than fetched one.
+
+        Three boundaries, all of them deliberate:
+
+        * **Only the network read is wrapped.** The mirror consult, the window truncation record and
+          the gap bookkeeping stay live on every call, because they are statements about what *this*
+          call observed. A stored row restating them would be provenance with nothing behind it.
+        * **The cache is consulted only with no mirror in play** (see :meth:`_bhavcopy_bars_from`),
+          where the record it would be restating is the fetch layer's own and not a live coverage
+          query's.
+        * **A failed or empty read is never cached.** That is not enforced here: the fetcher raises
+          rather than answering an empty frame for a failure, and the store refuses a frameless
+          answer, so "NSE is down" and "the CDN 404'd" cannot become rows that read, for the life of
+          the row, exactly like a holiday. The split window below does not bend that: its tail is the
+          one read allowed to answer empty (see :meth:`_rows_around_the_immutable_boundary`), the
+          window it belongs to reaches today, and the store refuses that row by its own rule -- so
+          the next call asks again, as it should.
+        * **A window the store cannot hold is not the same as an uncacheable window.** That is what
+          :meth:`_rows_around_the_immutable_boundary` is for, and it is where the primary
+          ``period="1y"`` call -- the one every caller of this package actually makes -- stops
+          spending a whole archive walk on every single call.
+
+        The key is the **resolved window** and the venue the symbol resolves to -- not ``"NSE"`` as
+        a literal, so a ``.BO``-spelled request can never be served an NSE frame. ``requires``,
+        ``auto_adjust`` and ``adjust_corporate_actions`` are deliberately absent from it: they shape
+        the frame *after* this read, so all of them consume the same bars. The series is left
+        ``None`` because a ``history()`` call names no series -- the archive's own filter is the
+        only thing that decided it, and ``"ALL"`` is how the store spells that.
+        """
+        cache = self.price_cache
+        if cache is None or not clean_symbol:
+            # No cache at all, or a symbol with no key to build. ``frame_key`` refuses an empty
+            # symbol component, and the read below already answers that request the way it always
+            # has -- an empty frame, or TickerNotFoundError -- so it is not turned into a key error.
+            rows = await self._bhavcopy_network_rows(symbol, clean_symbol, start_iso, end_iso)
+            return rows, SOURCE_NETWORK
+
+        exchange, _ = resolve_exchange_and_symbol(symbol)
+        if bool(getattr(cache, "enabled", False)):
+            # A wrapper that is switched off has no store to split a window around, and one that
+            # does not publish ``enabled`` at all is not a cache this knows how to treat as one --
+            # both take the whole-window read, which is exactly what they did before this existed.
+            split = await self._rows_around_the_immutable_boundary(
+                cache, symbol, clean_symbol, start_iso, end_iso, exchange
+            )
+            if split is not None:
+                return split, SOURCE_NETWORK
+        rows = await asyncio.to_thread(
+            cache.get_or_fetch,
+            lambda: self._bhavcopy_network_rows_blocking(
+                symbol, clean_symbol, start_iso, end_iso
+            ),
+            symbol=clean_symbol,
+            exchange=exchange,
+            series=None,
+            start=start_iso,
+            end=end_iso,
+        )
+        # Read off the frame, where the wrapper published it for this call -- "hit" is the store's
+        # own word for a row, and every other status means these bars came over the wire just now.
+        return rows, SOURCE_CACHE if rows.attrs.get(CACHE_STATUS_ATTR) == "hit" else SOURCE_NETWORK
+
+    async def _rows_around_the_immutable_boundary(
+        self, cache, symbol: str, clean_symbol: str, start_iso: str, end_iso: str, exchange: str,
+    ) -> Optional[pd.DataFrame]:
+        """
+        The window read the store can never hold: keep the immutable prefix, fetch the tail.
+
+        Why this exists -- the measured defect
+        -------------------------------------
+        :class:`~bfinance.cache.frame_store.FrameStore` refuses a window whose end is today or later,
+        and it is right to: today's archive does not exist until NSE publishes it, so no row may claim
+        it. The consequence was that the *primary* call -- ``Ticker.history(period="1y")``, whose
+        resolved end IS today -- could never be cached at all: two identical calls spent the whole
+        walk twice, 261 archive requests and 233.81 s then 232.89 s, measured. A request whose end was
+        already in the past was cached and answered from disk on the second call; the one path every
+        caller of this package is actually on was not.
+
+        So the window is split where the store's rule draws its line. Everything strictly before
+        today is a day whose file, once published, never changes -- the *immutable prefix* -- and may
+        be kept. The tail is read live on every call, and never stored, because no day in it is final
+        yet: today's file may not exist, and a day the walk could not fetch is a hole that must not
+        be written down as an answer.
+
+        Why the cold prefix fetch is a whole-window read
+        ----------------------------------------------
+        A cold prefix has to answer with a fetch whatever this does, and reading ``start..boundary``
+        and then the tail as a second fetch would spend two requests where one was spent before. So
+        the fetcher reads the **whole window once** -- byte for byte the read this method would have
+        made with no cache at all -- offers the store only the part it may keep, and keeps the frame
+        for the return value. One request, the one that was always spent, and the row the next call
+        hits is written by it. The alternative shape, a fetch per half, was rejected on exactly that
+        count: ``tests/test_nse_bhavcopy_wiring.py`` pins one range fetch for one request, and it is
+        right to.
+
+        Clamped windows are split too, and their key is the resolved one
+        ----------------------------------------------------------------
+        ``period="max"``, ``"5y"`` and the default 1825-day lookback all resolve to
+        :data:`BHAVCOPY_FIRST_DATE`, and they used to be excluded here on the argument that they
+        would share a key and therefore a frame. They do share a key -- ``start_iso`` is the
+        **resolved** start, and the clamp happens in :meth:`_fetch_bhavcopy_bars` before this method
+        is reached -- and sharing it is correct rather than a compromise: after the clamp, two such
+        requests are the same window and ask for the same bars. The only thing that differs between
+        them is the truncation sentence, and that is not read off the row: :meth:`fetch_history`
+        republishes ``bfinance_window_truncated*`` from the current call's own request
+        (:meth:`_publish_window_truncation`), which is also what makes a ``"5y"`` caller reading a
+        row written by a ``"max"`` caller get its own sentence. The alternative -- keying on the
+        *requested* start -- would file the same floor-to-boundary data once per spelling of the
+        request and never answer one from another's row, which is a second defect rather than a fix
+        for this one. Excluding the clamped window leaves three of the most common calls in the
+        library paying a full archive walk on every call.
+
+        What the return value means
+        --------------------------
+        ``None`` means "not this path", and the caller falls through to the unwrapped read above: a
+        window the store can already hold (its end is in the past -- the plain read is exactly what
+        that is for), a window with no immutable day in it (it starts today), or a boundary the
+        calendar cannot draw. A frame always means the whole requested window, and its source is
+        :data:`SOURCE_NETWORK` in both branches, because a live read did happen on this call
+        whichever branch answered.
+        """
+        today = _ist_today()
+        boundary = _immutable_boundary(today)
+        if boundary is None:
+            return None
+        today_iso = today.date().isoformat()
+        boundary_iso = boundary.date().isoformat()
+        if end_iso < today_iso or start_iso > boundary_iso:
+            # A closed window, or one with nothing immutable in it. Either way the store can hold the
+            # window as it stands, and the plain read below is what answers it.
+            return None
+        captured: Dict[str, pd.DataFrame] = {}
+
+        def _whole_window_for_the_prefix() -> pd.DataFrame:
+            """One read of the whole window; the store is offered only its immutable part."""
+            frame = self._bhavcopy_network_rows_blocking(symbol, clean_symbol, start_iso, end_iso)
+            captured["window"] = frame
+            return frame.loc[frame.index <= boundary]
+
+        prefix = await asyncio.to_thread(
+            cache.get_or_fetch,
+            _whole_window_for_the_prefix,
+            symbol=clean_symbol,
+            exchange=exchange,
+            series=None,
+            start=start_iso,
+            end=boundary_iso,
+        )
+
+        if prefix.attrs.get(CACHE_STATUS_ATTR) == "hit":
+            # A row whose bars do not answer its own key never reaches here: ``FrameStore.read``
+            # refuses one outright and answers "corrupt", which the wrapper turns into the live fetch
+            # for the window -- so a copied, hand-edited or future-rule row is read live rather than
+            # merged, and what this call returns is the walk's own frame. There is nothing to
+            # re-check on this side, and a second copy of the store's rule would be a second thing to
+            # keep in step; the test for it lives on the outcome instead (see
+            # ``test_a_stored_row_cannot_supply_a_day_that_is_not_final``).
+
+            def _tail() -> pd.DataFrame:
+                """The part no store may keep. An empty answer here is a real one, not a failure."""
+                return self._bhavcopy_network_rows_blocking(
+                    symbol, clean_symbol,
+                    (boundary + pd.Timedelta(days=1)).date().isoformat(), end_iso,
+                    allow_empty=True,
+                )
+
+            tail = await asyncio.to_thread(_tail)
+            rows = _prefix_and_tail(
+                prefix, tail, boundary_iso=boundary_iso, start_iso=start_iso, end_iso=end_iso
+            )
+        else:
+            # The prefix lookup read the whole window itself, so both halves are already in hand --
+            # including the tail, which no store would have kept.
+            rows = captured.get("window")
+            if rows is None:  # pragma: no cover - get_or_fetch calls its fetcher before answering
+                return None
+
+        # Published, not restated -- and on the warm-prefix branch that makes the claim a composite.
+        #
+        # ``rows`` is the merged frame: the stored prefix (a replay, fetched on an earlier call)
+        # plus the live tail (fetched seconds ago). Its window reaches today, so the store refuses
+        # the write and answers ``"miss"`` on the way past; this call is what publishes the five
+        # keys, and it publishes them for the merged frame. So ``miss`` and ``fetched_at`` describe
+        # the LIVE TAIL only: a live read did happen on this call, but it covered
+        # ``boundary+1..end``, not the window the key names. The prefix's own dating is not lost,
+        # and is deliberately not restated here -- read the store under the prefix key
+        # (``start..boundary``) and its row carries the ``fetched_at`` of the walk that wrote it.
+        # This is the consequence of ``PriceCache`` owning the five keys: a second set of keys here
+        # would be a second vocabulary for one frame, and there is no composite status word in that
+        # vocabulary (``hit``/``null``/``miss``/``expired``/``corrupt`` plus ``disabled``).
+        #
+        # What is NOT composite is the liveness triad. ``coverage_end``, ``requested_end`` and
+        # ``uncovered_days`` are recomputed by the wrapper for the full requested window from the
+        # merged frame's own index, so "the data ends here" and "these candidate days are absent"
+        # describe the frame the caller holds, prefix and tail together. Only the provenance/age
+        # pair is the tail's. The refusal is also what stops a row planted under this key from ever
+        # being served as today's frame.
+        return await asyncio.to_thread(
+            cache.get_or_fetch,
+            lambda: rows,
+            symbol=clean_symbol,
+            exchange=exchange,
+            series=None,
+            start=start_iso,
+            end=end_iso,
+        )
+
     @staticmethod
     def _tidy_bars(
         symbol: str, rows: pd.DataFrame, attrs: Optional[dict] = None, label: str = "bhavcopy",
+        required: Sequence[str] = ("Open", "High", "Low", "Close"),
     ) -> pd.DataFrame:
         """
         Localise, coerce and provenance-stamp a per-symbol slice, from either source.
@@ -2849,18 +3454,29 @@ class OHLCVEngine:
         difference in dtypes. ``label`` only names the feed in the one log line that can fire, so
         a drop is attributable to the source that lost the rows rather than to "bhavcopy" whatever
         actually answered.
+
+        ``required`` is the caller's declared column requirement, and it **defaults to exactly the
+        four columns an OHLCV frame is made of** so every existing path is unchanged. It is a
+        parameter rather than a hard-coded loop because a column-narrow request is a real frame --
+        MarketLens publishes Close and Volume and nothing else -- and coercing four columns that are
+        not there would raise on the way to a perfectly good answer.
         """
         rows = _localize_ist(rows)
         # Carry the source's own provenance record (provenance string, schema, dates the NSE
         # published no archive for) onto the per-symbol frame, so a gap in the returned bars
         # is explainable rather than mysterious.
         rows.attrs = {k: v for k, v in (attrs or {}).items() if k != "bfinance_synthetic_ohlc"}
-        for col in ("Open", "High", "Low", "Close"):
+        for col in required:
             rows[col] = pd.to_numeric(rows[col], errors="coerce")
         if VOLUME_COLUMN in rows.columns:
             rows[VOLUME_COLUMN] = pd.to_numeric(
                 rows[VOLUME_COLUMN], errors="coerce"
             ).fillna(0).astype(np.int64)
+        if "Close" not in required:
+            # There is no close to check, so there is no unusable bar to drop. A frame asked for on
+            # some other column has no notion of one, and removing rows for a reason the caller
+            # never asked about would be a silent edit to their series.
+            return rows
         unpriced = int(rows["Close"].isna().sum())
         if unpriced:
             logger.warning("%s: dropped %d %s row(s) with no usable close.", symbol, unpriced, label)

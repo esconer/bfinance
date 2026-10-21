@@ -28,15 +28,22 @@ its profile loader with ``getattr(self.screener, "get_company_profile", None)`` 
 whatever it is handed, so renaming the real method would leave test doubles returning
 ``None``. These tests therefore pin the resolution behaviour, and deliberately do NOT
 require a rename.
+
+Offline. The one test that drives the REAL client class replaces the HTTP transport
+(``httpx.AsyncClient`` -> ``httpx.MockTransport``) rather than the client, so the adapter, the
+client's own construction and its own refusal all still run. Before that, the test reached
+www.screener.in for real while sitting inside the ``-m "not live"`` selection.
 """
 from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pandas as pd
 import pytest
 
 from bfinance.sources import bindings
+from bfinance.utils.exceptions import TickerNotFoundError
 
 
 def test_a_coroutine_is_driven_to_completion_not_returned():
@@ -116,25 +123,58 @@ class TestScreenerChartAdapter:
         assert isinstance(got, pd.DataFrame)
         pd.testing.assert_frame_equal(got, frame)
 
-    def test_the_real_client_class_resolves_through_the_adapter(self):
+    def test_the_real_client_class_resolves_through_the_adapter(self, monkeypatch):
         """
         The end-to-end shape, without touching the network: point the adapter at the real
         class and confirm it gets far enough to construct a client and call the method.
         With a bad ticker the call fails; the point is that the failure is the CLIENT's
         refusal, not a TypeError about a coroutine having no len().
+
+        The transport is what gets stubbed, not the client, and it has to be: the real
+        ``ScreenerClient`` builds its own ``httpx.AsyncClient`` inside ``_send_with_retry`` and
+        accepts no injected transport. Left alone, this test reached www.screener.in for real —
+        a live DNS request inside the ``-m "not live"`` selection, which a warm cache on a
+        developer machine cannot hide because it is a *page* fetch and not a cacheable miss.
+        ``httpx.MockTransport`` answers ``/company/ZZZZNOTREAL/`` with a document carrying no
+        ``data-company-id``, so the client's own refusal is what comes back: ``resolve_company_id``
+        finds no id and returns None, and ``get_chart_timeseries`` raises
+        ``TickerNotFoundError`` for the symbol. Asserting the exception TYPE is what makes this
+        non-vacuous — and it is also the proof that the coroutine was driven to completion rather
+        than returned, because a coroutine object cannot raise. The request log is the third leg:
+        it shows the refusal was produced by the client *after* spending a request of its own on
+        the stubbed wire, so the test is exercising the real construction and the real call rather
+        than failing before either.
         """
         client_cls = self._client_class()
-        try:
-            got = bindings.screener_chart_history(
-                client_cls, {"ticker": "ZZZZNOTREAL", "days": 5}
-            )
-        except Exception as exc:  # network, resolution, or a typed refusal
-            assert not isinstance(exc, TypeError) or "coroutine" not in str(exc), (
-                f"the coroutine defect is back: {type(exc).__name__}: {exc}"
-            )
-        else:
-            assert not asyncio.iscoroutine(got)
-            assert isinstance(got, pd.DataFrame)
+        real_async_client = httpx.AsyncClient
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Record the request the client actually made, and answer with a page carrying no id."""
+            seen.append(request)
+            return httpx.Response(200, text="<html><body><h1>ZZZZNOTREAL</h1></body></html>")
+
+        def factory(**kwargs):
+            """The client's per-attempt construction, with the wire replaced by a canned page."""
+            return real_async_client(transport=httpx.MockTransport(handler))
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+        with pytest.raises(TickerNotFoundError) as exc:
+            bindings.screener_chart_history(client_cls, {"ticker": "ZZZZNOTREAL", "days": 5})
+
+        assert seen, (
+            "the real client must have spent its request on the stubbed wire; a refusal recorded "
+            "with no request behind it would say nothing about the client"
+        )
+        assert [r.url.path for r in seen] == ["/company/ZZZZNOTREAL/"], (
+            "the id must come off the company PAGE, not the robots-disallowed "
+            f"/api/company/search/?q= route; got {[str(r.url) for r in seen]}"
+        )
+        assert "ZZZZNOTREAL" in str(exc.value), (
+            "the refusal must name the symbol it could not resolve; got "
+            f"{exc.value}"
+        )
 
 
 def test_every_registered_adapter_is_covered_by_the_resolver():

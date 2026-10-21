@@ -290,9 +290,56 @@ cannot be shipped, so the route is open and the strict setting remains one argum
 The other constraint is unchanged either way: `Crawl-delay: 1` applies, the pacing floor
 is 1000 ms, and the `GPTBot`/`ClaudeBot` `Crawl-delay: 10` is scoped to those crawlers.
 
-**Two of the disallowed rules are load-bearing for planned sections:**
+### ⚠ CORRECTION, 2026-10-10: "Technicals and Alerts are off-limits by policy" was half wrong
+
+The old sentence read, in full: *"Two of the disallowed rules are load-bearing for planned sections:
 `Disallow: */equity/technical-analysis-*` and `*/alerts/addStockAlert/`. So **Technicals and Alerts
-are off-limits on Trendlyne by policy**, not merely unavailable. Do not attempt either.
+are off-limits on Trendlyne by policy**, not merely unavailable. Do not attempt either."*
+
+**The conclusion was drawn one step further than the measurement supports, and it was wrong about
+both nouns.** Both rules are still real and both page/write routes are still unwired — nothing below
+retracts that. What changed is that "the rule is `*/equity/technical-analysis-*`" is not the same
+claim as "technical analysis is unreachable", and the second sentence generalised from a page route
+to a *capability*.
+
+**CORRECTION, 2026-10-10 (the rule is a literal substring, and the sibling route does not match it).**
+`Disallow: */equity/technical-analysis-*` is a leading-wildcard pattern with no trailing `$`, so it
+matches any path **containing** `/equity/technical-analysis-`. The JSON sibling
+`/equity/api/stock/adv-technical-analysis/{id}/24/?format=json` contains `/equity/api/stock/` in
+front of that substring and therefore **matches none of the 28 rules** — verified by reading the
+`User-agent: *` group of the live `robots.txt` that day (28 `Disallow` rules, `Crawl-delay: 1`;
+`Disallow: */equity/technical-analysis-*` is the only equity rule). The **page** route
+`/equity/technical-analysis-*` stays off-limits and is still unwired; the sibling is not.
+
+**OPERATOR DECISION, 2026-10-10: technicals ship twice, because the local path has no robots
+question at all.**
+
+| what ships | why | where |
+|---|---|---|
+| a **local** computation over `Ticker.history()` — no network, so no robots rule can reach it | a pure-pandas engine over a frame the caller already has | `bfinance.market.technical.TechnicalIndicators` (`sma`, `ema`, `rsi(14)`, `macd(12,26,9)`, `adx(14)`, `atr(14)`, `bollinger(20,2)`, `pivots`, `snapshot`) |
+| the **vendor's own** signals, over the robots-clean JSON sibling | same parameter set the site computes, including the insight text and colour the vendor publishes | `TrendlyneClient.adv_technical_analysis` (raw `body["parameters"]`, 56 top-level keys on the recorded TCS and NTPC captures) and `TrendlyneClient.technical_signals` (tidy `name/value/insight/color/parameter` frame, 55 rows on `adv_technical_analysis_tcs.json`) |
+
+Neither is a claim about the page route. `Ticker.trendlyne_technicals()` reaches the JSON sibling
+behind `Ticker(..., trendlyne_sections=True)`; the page route remains unwired.
+
+**CORRECTION, 2026-10-10: the Alerts half was wrong on which path the rule covers.** The two
+disallowed rules in that namespace are `*/alerts/addStockAlert/` and `*/alerts/modal/stockAlert/`.
+Both are **write** routes — creating an alert and the modal that does it. **Reading**
+`/alerts/stock-alerts/{symbol}/{stock_id}/{slug}/` matches neither rule, needs no member account
+(the list is public; only *creating* an alert is login-walled), and is now wired as
+`stock_alerts_page` → `TrendlyneClient.stock_alerts` — measured 200 with the alert list on TCS
+2026-10-10, recorded as `tests/fixtures/trendlyne/stock_alerts_tcs.html` (10 parsed rows). **There
+is deliberately no `Ticker.trendlyne_alerts()` member** — the seven opt-in `Ticker` members are
+news, reports, shareholding, deals, buy-sell-zone, technicals and SWOT — so the alert list is
+reached on the client. That is an omission, not a decision against it; the count is stated so it is
+not mistaken for one.
+
+⚠ **THE WARNING STANDS AND IS NOT RETRACTED: *adding* an alert is still off-limits.** Do not build
+`/alerts/addStockAlert/`, do not build `/alerts/modal/stockAlert/`, and do not post a form to either.
+`ENDPOINTS` contains neither name, and that is the mechanical form of the rule — a path absent from
+`ENDPOINTS` is a path this package cannot build (`tests/test_trendlyne_core.py::
+TestNoDeadScaffolding::test_the_addressed_routes_are_the_ones_with_fetch_methods` asserts the set).
+What changed is the *scope of the prohibition*, not its existence.
 
 **Renaming the module does not reduce trademark exposure** — the domain is in every URL either way.
 The real levers are: don't republish their editorial content, match their crawl-delay, keep honest
@@ -506,58 +553,295 @@ the numbers:**
 Also: the insider-trading header carries `Security Type` and `Client Category`, with **no
 `Deal Type`**. The registered `deals` signature must **not** be reused for it.
 
-### None of the 8 are actually implemented
+⚠ **And two of the wired routes are not in this table because they have no server-rendered table
+at all**: `/latest-news/` and `/alerts/stock-alerts/` render card lists, not `<table>` elements
+(0 SSR tables each, verified on the recorded fixtures). "Classify by header signature" is the rule
+for the pages above and **does not extend to those two**, which are parsed over their card markup
+by `parse_latest_news` / `parse_stock_alerts`. Counting SSR tables is a way to find what a page has,
+not a precondition for reaching it.
 
-The table above describes what the **site** serves. It is not what the **module** does. An AST + test
-audit found:
+#### ⚠ CORRECTION, 2026-10-10: row counts are per-symbol, and five of them were re-measured
 
-- **0 of 8 pages have a fetch method.** The tests exercise the generic `tables.find_table` against
-  fixtures, not a route.
-- **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON, and the 6
-  registered signatures were validated against just **2** of them.
-- The `board_meeting` signature's **only ever validation is a corporate-actions table.** So
-  `find_table(corporate_actions_page, "board_meeting")` returns a 10×3 corporate-actions *purpose*
-  table, and `/equity/board-meeting/` — the route the name exists to serve — has never been checked.
-  Two honest options: rename the signature to what it was actually measured on
-  (`corporate_action_purpose`), or re-measure it on its own route. **Undecided.**
-  Separately, `tables.py:24` annotates the corporate-actions page's 4th table as having "no
-  signature" when that table **is** the `board_meeting` signature — the docstring is simply wrong,
-  and `test_trendlyne_core.py` already asserts the truth.
-- ✅ **The 14 dead `ENDPOINTS` templates are deleted.** `ENDPOINTS` now means exactly *routes this
-  package has a fetch method for*: it had three when the 14 dead templates went
-  (`stock_page`, `ohlc`, `chart_metric`), and the text then described that set as exhaustive.
-  **CORRECTION, 2026-09-30: the exhaustiveness claim was false.** It is now **five** keys
-  (`chart_metric`, `industry_page`, `ohlc`, `sector_page`, `stock_page`), because
-  `bfinance.trendlyne.sectors` landed the sector and industry group pages, reachable through
-  `TrendlyneClient.group_page`. The two group routes are also collected in `GROUP_ENDPOINTS`
-  (`industry_page`, `sector_page`). One route is deliberately **not** in `ENDPOINTS`:
-  `/member/api/ac_snames/?term=...` is a query-string template, and `ENDPOINTS` is validated by
+**Every count in the table above is a count of one symbol's page, not a property of the route.**
+That was already true and is now stated, because two of the numbers had been quoted as if it were
+not — "500 rows" as if every symbol returns 500, "101 rows" as if board meetings are a fixed count.
+The TCS captures recorded that day (`tests/fixtures/trendlyne/`, every entry cross-checkable in
+`META.json`) are a second symbol on the same routes, and they do **not** agree:
+
+| page | the number above | re-measured on TCS, 2026-10-10 | where it is recorded |
+|---|---|---|---|
+| insider-trading-sast | **500 exactly** ⚠ | **174 data rows** (175 `<tr>` = 1 header + 174) | `insider_trading_tcs.html`, `META.json` `notes` |
+| board-meeting | 101 | **95 data rows** (96 `<tr>`) | `board_meeting_tcs.html`, `META.json` `notes` |
+| research-reports | 22 | **21 data rows** (22 `<tr>`) | `research_reports_tcs.html`, `META.json` `notes` |
+| monthly MF holdings | 497 funds | **495 `<tr>`** = 2 `<thead>` + 492 `<tbody>` + 1 `<tfoot>` | `monthly_mf_holding_tcs.html`, `META.json` `notes` |
+| bulk block deals | 82 | **182 rows** (fixture keeps the first 39) | `bulk_deals_motherson.html` + `client.bulk_block_deals_async` docstring |
+
+**So `500` is not a per-symbol row count — and that is exactly why the row cap is kept as a number
+rather than as a conclusion.** `bfinance.trendlyne.client.INSIDER_ROW_CAP = 500` records the
+observed server-side cap; TCS returns 174 today and MOTHERSON returned 500 on an earlier pass. The
+guard publishes `attrs["bfinance_trendlyne_insider_rows"]` on every frame and adds a truncation note
+**only when the count equals the cap**. The converse is never asserted: a frame below the cap is
+never described as complete, because nothing measured says it is. That is the whole of the rule,
+and it is why the cap number is kept rather than the sentence "the vendor serves 500 rows".
+
+**CORRECTION, 2026-10-10: the MF grid's shape is confirmed and its period behaviour is the
+opposite of share-holding's.** Two routes carry a `{period}` path segment and they do **not** behave
+alike, which is the finding worth keeping:
+
+| route | non-`latest` period | guard shipped | measurement |
+|---|---|---|---|
+| `/equity/share-holding/{id}/{SYM}/{period}/{slug}/` | **HTTP 500** | **yes** — refused locally, **zero requests spent** | `Jun-2026` on TCS → 500, re-verified 2026-10-10; `Jun-2024`, `2024`, `2023` on MOTHERSON → 500 (2026-09-27) |
+| `/equity/monthly-mutual-fund-share-holding/{id}/{SYM}/{period}/{slug}/` | **HTTP 200, and it filters** | **no** — the period is forwarded into the template | `Jun-2026` on TCS → 200, 1,577,098 bytes; `2026` → 200, 1,402,262 bytes (2026-10-10). On MOTHERSON: `2024` → 200 (313 rows, top period Sep-2024), `Jun-2024` → 200 (260 rows), `2023` → 200 (179 rows) |
+
+A blanket snapshot guard across both routes would have broken the one route where the segment means
+something. `TrendlyneClient.share_holding_async` carries the guard;
+`TrendlyneClient.monthly_mf_holdings_async` validates the segment with `validate_period` and
+forwards it. The grid itself is **ragged** and stays that way: a `-` is a month in which that fund
+held nothing, not a missing measurement, so no month column is coerced to numeric.
+
+#### ⚠ CORRECTION, 2026-10-10: buy-sell-zone — the discriminator is positional, and the stats live in the same pane
+
+The positional claim above is confirmed and made mechanical. The two tables carry
+**byte-identical header rows** —
+`['PE range', 'Days traded in range', '% Days traded in range', 'Days traded within & below range',
+'% Days traded within & below range']`, 10 data rows each on the recorded TCS page — so **no header
+signature can separate them, and no rename of one column would**. The only discriminator is the
+enclosing **`div.tab-pane#standalone` vs `div.tab-pane#consolidated`**, and their numbers genuinely
+differ, so a swap would be invisible in the output:
+
+| basis | current PE | average PE | median PE | strong buy zone |
+|---|---|---|---|---|
+| `standalone` | 14.9 | 23.6 | 23.8 | 1.0% |
+| `consolidated` | 15.1 | 23.2 | 23.1 | 1.8% |
+
+*(measured by parsing `buy_sell_zone_tcs.html` with `tables.buy_sell_zone_tables`; the `Total` row —
+495 trading days — is kept as data, since dropping it was the defect the old note recorded.)*
+
+**The summary statistics are published inside the same pane, not on a separate block**, which is why
+the extractor reads them there: `bfinance_trendlyne_buy_sell_basis`,
+`bfinance_trendlyne_buy_sell_tiles` (the raw tile text, including the forward 1y price / PE / EPS
+trio), `bfinance_trendlyne_strong_buy_zone_pct`, `bfinance_trendlyne_current_pe`,
+`bfinance_trendlyne_average_pe`, `bfinance_trendlyne_median_pe` and
+`bfinance_trendlyne_days_below_current_pe_pct` all ride on the frame's own `attrs`. The last one
+reads **`None` on the recorded capture** — the page showed no such tile — and that is the measured
+answer, not a gap.
+
+#### ⚠ CORRECTION, 2026-10-10: the board_meeting signature was re-measured on its own route — the collision is real and inherent
+
+The old text recorded this as **"Undecided."** It is decided, and the answer was neither of the two
+options offered, because the finding changed what the options were:
+
+> *Two honest options: rename the signature to what it was actually measured on
+> (`corporate_action_purpose`), or re-measure it on its own route. **Undecided.***
+
+**Re-measured on 2026-10-10 on its own route**, using `board_meeting_tcs.html` (recorded from
+`https://trendlyne.com/equity/board-meeting/TCS/1372/tata-consultancy-services-ltd-board_meeting/`,
+HTTP 200): the header row is exactly `Ex-date | Purpose | Notes` over **95 data rows**, leading
+forward-dated at `08 Oct 2026 Quarterly Results & Interim Dividend`. **So the signature does serve
+the route it was named for, and `corporate_action_purpose` would have been a rename that made things
+worse** — it would have given a board-meeting table a corporate-actions name to paper over a
+collision that a name cannot fix. No rename shipped.
+
+**The collision is CONFIRMED AND INHERENT.** `/equity/board-meeting/` and the corporate-actions
+page's purpose/notes table present the same three header cells, so no header signature can separate
+them — this is not a defect in either signature, it is a property of the two pages. The consequence
+is stated rather than engineered away: **the caller-side discriminator is the table index**, and
+every frame publishes `attrs["bfinance_trendlyne_table_index"]` so a caller holding a page knows
+which of them it got. Pinned by
+`tests/test_trendlyne_tables_sections.py::TestBoardMeetingIsValidatedOnItsOwnRoute`, which asserts
+both halves — `page_signatures(board_meeting_page) == {0: "board_meeting"}` and
+`page_signatures(corporate_actions_page)[3] == "board_meeting"` — plus a negative control that
+renaming `Notes` unclassifies the board-meeting page.
+
+**The related claim that the corporate-actions page's 4th table has "no signature" is false, and
+`tables.py` has been corrected.** The `tables.py` module docstring now reads
+`['Ex-Date', 'Purpose', 'Notes'] -> board_meeting` in the header-signature table and carries the
+collision note above, rather than annotating that table as unclassified. Measured on
+`corporate_actions_motherson.html`: `page_signatures(...)[3] == "board_meeting"` and the frame it
+returns is `(10, 3)`.
+
+#### ⚠ CORRECTION, 2026-10-10: four parsing traps, all of which cost rows silently
+
+These are the ones that produce a **smaller, plausible-looking frame** rather than an exception —
+the failure mode a review cannot see. Each is measured on a fixture in
+`tests/fixtures/trendlyne/`, and each is enforced by a test rather than by a comment.
+
+1. **`display:none` is data, not chrome — and this one loses 8 of 13 rows.** The share-holding
+   summary grid (`#shareSummaryTable`) carries 13 `<tbody>` rows and **8 are collapsed accordion
+   sub-rows** with `style="display:none"`: Promoter's `Holding` / **`Pledged`** / `Locked`, DII's
+   **`Mutual Funds`** / `Banks` / `Insurance` / `Others`, plus one empty spacer `<tr>`. So 5 of 13
+   rows are visible and **`pandas.read_html`'s default `displayed_only=True` returns exactly those
+   5** — verified directly on `shareholding_tcs.html` with no code of this package involved.
+   **`Pledged` is a genuinely different holding figure from Promoter's own `Holding`, so the default
+   is data loss and not cosmetics.** `tables.share_holding_tables` passes `displayed_only=False` for
+   this one table (wrapping the fragment in `io.StringIO` — a bare HTML string is read as a
+   filename) and publishes `frame["Row Type"]` — `"category"` or `"subgroup"` — because with the
+   collapsed rows restored the index is deliberately **not unique**: `Others` is both a DII sub-row
+   and a top-level category. `displayed_only=False` is **not** a module-wide default: every other
+   page in this package uses `display:none` for layout scaffolding no caller wants.
+   The parsed TCS frame is `(12, 13)` — 12 rows because the empty spacer row carries no cells, and
+   13 columns because `Row Type` is added to the vendor's `Summary` + 12 quarter columns.
+2. **Two tables, one header row, byte for byte.** Buy-sell-zone, above. Positional only.
+3. **`board_meeting` collides across two pages.** Above. Inherent; the table index is the answer.
+4. **Column labels rot.** Share-holding and MF headers carry live month names (`Holding Jun 2026`,
+   `Sep-2026`) that rewrite themselves every quarter, so a signature keyed on either expires with
+   the data. The three positional extractors select on structure and stable tokens instead —
+   `No of holders` / `History` for the holder tables, the fund column's own `MF` label for the MF
+   grid, and the enclosing `div.tab-pane` for buy-sell-zone. **The quarter stays a column label.**
+
+### ⚠ CORRECTION, 2026-10-10: "None of the 8 are actually implemented" is false — all of them are
+
+The section below this one described what the **site** serves, and then said, in two places, that
+the **module** does not fetch any of it:
+
+> ### None of the 8 are actually implemented
+> - **0 of 8 pages have a fetch method.** …
+> - **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON …
+
+> ### Still true, worth re-reading
+> - **0 of 8 pages have a fetch method.** … Deleting the templates did not add them.
+
+**Both statements were true when written and are false now.** All 8 of those pages have a fetch
+method and a fixture recorded from their own route, and the reason is a 2026-10-10 reconnaissance
+pass that fetched every candidate route live, re-read `robots.txt`, and then wired what answered.
+What follows replaces both sections rather than annotating them.
+
+#### The wire status, measured
+
+`bfinance.trendlyne.client.ENDPOINTS` holds **19 keys**, read from the module — not from this table,
+which is what the next sentence means by *auditable*. Read it directly:
+
+```
+stock_page  ohlc  chart_metric  sector_page  industry_page          (5 base)
+corporate_actions_page  bulk_block_deals_page  share_holding_page
+board_meeting_page  research_reports_page  latest_news_page
+stock_alerts_page  insider_trading_page  monthly_mf_holding_page
+buy_sell_zone_page  swot_page                                      (11 section pages)
+adv_technical_analysis  overview_second_part  price_performance_analysis  (3 JSON siblings)
+```
+
+**Every key has a `build_path` site and a public fetch method behind it, and that pairing is
+enforced in both directions** by
+`tests/test_trendlyne_core.py::TestNoDeadScaffolding::test_no_endpoint_template_is_a_dead_string`
+(declared == referenced, by AST walk) and `::test_the_addressed_routes_are_the_ones_with_fetch_methods`
+(hardcodes the 19-name set above, so a key added without a method fails there). That is the whole
+argument for "wired": not this table's say-so, but a test that fails when the two disagree.
+
+| the 8 studied pages | `ENDPOINTS` key | fetch method | fixture recorded from **its own route** | rows parsed from that fixture |
+|---|---|---|---|---|
+| `/equity/bulk-block-deals/` | `bulk_block_deals_page` | `bulk_block_deals` | `bulk_deals_motherson.html` | 39 data rows (the stored window keeps the first 40 `<tr>` of the 82 the page served) |
+| `/equity/insider-trading-sast/all/` | `insider_trading_page` | `insider_trading` | `insider_trading_tcs.html` | 174 |
+| `/equity/share-holding/` | `share_holding_page` | `share_holding` + `share_holding_holders` | `shareholding_tcs.html` | summary `(12, 13)` + 3 holder tables `(6,6) (10,5) (13,5)` |
+| `/equity/monthly-mutual-fund-share-holding/` | `monthly_mf_holding_page` | `monthly_mf_holdings` | `monthly_mf_holding_tcs.html` | `(31, 10)` from the retained window |
+| `/research-reports/stock/` | `research_reports_page` | `research_reports` | `research_reports_tcs.html` | `(21, 12)` |
+| `/equity/board-meeting/` | `board_meeting_page` | `board_meetings` | `board_meeting_tcs.html` | `(95, 3)` |
+| `/equity/corporate-actions/` | `corporate_actions_page` | `corporate_actions` | `corporate_actions_motherson.html` | `bonus (10,4) · dividend (26,6) · other (13,10)` |
+| `/tools/buy-sell-zone/` | `buy_sell_zone_page` | `buy_sell_zone` | `buy_sell_zone_tcs.html` | `standalone (10,5)` + `consolidated (10,5)` |
+| `/fundamentals/financials/` | *(not here)* | — | `financials_motherson.html` | a **second client**: `bfinance.statements.fundamentals_fetch`, deliberately its own copy because the isolation rule forbids this one importing anything named `*trendlyne*` |
+
+**Two wired routes have zero server-rendered `<table>` elements, and `tables.find_table` would
+return nothing for them** — so they are not read that way, and the count is recorded here rather
+than left to be discovered:
+
+| route | what the page actually renders | how it is parsed | rows parsed from the fixture |
+|---|---|---|---|
+| `/latest-news/{id}/{SYM}/{slug}/` | **0 SSR tables** — the news list is a card list (`div.panel-post`, keyed `div#post-{id}`, each carrying the `/posts/{id}/{slug}` href, date, kind badge and publisher) | `parse_latest_news`, over the card markup | `(10, 5)` — `date, kind, title, url, source` |
+| `/alerts/stock-alerts/{SYM}/{id}/{slug}/` | **0 SSR tables** — the alert list is cards too (`div.tr-alert-body`; kinds seen: `RESEARCH REPORT`, `SMA 30 Crossover`, `SMA 100 Crossover`) | `parse_stock_alerts`, over the card markup | `(10, 5)` — `date, kind, headline, detail, values` |
+
+⚠ **Both fixtures deliberately keep two alert families, because a parser reading only one would
+silently miss the other**: the `aside#allposts` card list *and* the sidebar
+`div#stockaccordion` / `div#researchreportcollapse` research-report block. `RESEARCH REPORT` and
+`SMA 30 ABOVE Crossover` are both present in the stored file. `?page=2` on the news route was
+measured answering 200, which is what makes `page=` a real argument rather than a decoration.
+
+**"0 of 8 have a fixture matching their own route / All 9 fixtures are MOTHERSON" is the claim that
+died hardest, and it is now false in a specific way worth naming.** The fixtures are no longer
+MOTHERSON-only. `tests/fixtures/trendlyne/` holds **29 recorded responses** (plus `META.json`, which
+carries one entry per file), and **12 of them are TCS** (id 1372) rather than MOTHERSON:
+`board_meeting_tcs.html`, `buy_sell_zone_tcs.html`, `insider_trading_tcs.html`, `latest_news_tcs.html`,
+`monthly_mf_holding_tcs.html`, `research_reports_tcs.html`, `shareholding_tcs.html`,
+`stock_alerts_tcs.html`, `swot_tcs.html`, `adv_technical_analysis_tcs.json`,
+`overview_second_part_tcs.json` and `price_performance_tcs.json` — plus `sitemap_excerpt_tcs.xml`,
+which exists precisely so the offline tests resolve `TCS` rather than `MOTHERSON` (the reason is in
+that fixture's own `META.json` entry), and `option_chain_tcs.json`, which is a **different host**
+(`smartoptions.trendlyne.com`). Every fixture carries a full `META.json` record (`url`,
+`http_status`, `captured_at_utc`, `original_bytes`, `original_sha256_16`, `stored_bytes`, a mandatory
+`trim_rule`, `notes`, `stored_sha256`, `stored_line_endings`), and
+`tests/test_trendlyne_fixtures.py` fails if a fixture is missing, if its `stored_sha256` does not
+match, or if it does not parse.
+
+**The counts in the "rows parsed" column above are what the *shipped parsers* return from the
+*stored fixture windows*, which are trimmed, not what the live page served** — where the two differ
+the `META.json` `trim_rule` says by how much and why. That is the reason the trimmed number is the
+one quoted: it is the number a caller actually gets from this package on the bytes that ship.
+
+**Registered signatures went from 6 to 10**: `board_meeting`, `bonus`, `deals`, `dividend`,
+`insider_trade`, `research_report`, `rights`, `sector_constituents`, `sector_industry_aggregate`,
+`split`. `research_report` (`Summary` + `Target` + `Upside`) and `insider_trade` (`Client Name` +
+`Client Category` + `Post Transaction Holding`) are new, and **`insider_trade` is deliberately not
+`deals`** — the insider page has no `Deal Type` column, so reusing the deals header would classify
+an insider frame as a bulk-deal frame with no error at all.
+
+**Three section routes are answered by three routes that had no HTML page in the study at all** —
+`adv_technical_analysis`, `overview_second_part` and `price_performance_analysis`, each a
+`?format=json` sibling recorded as a fixture (`adv_technical_analysis_tcs.json` **and**
+`adv_technical_analysis_ntpc.json`, `overview_second_part_tcs.json`, `price_performance_tcs.json`).
+They count as wired because they have an `ENDPOINTS` key, a method and a fixture, not because they
+were in the 8-page study.
+
+**One section call costs exactly one request**, and that is a contract rather than a hope: the
+symbol resolves through the cached sitemap index and the section route is fetched once — no
+stock-page fetch, no token fetch, because a section route needs only the id, the symbol and the
+slug the index already holds. The per-method request count is pinned in
+`tests/test_trendlyne_sections.py` with `len(calls) == N` assertions.
+
+#### What is *still* not implemented — stated precisely, because "everything" would be the same defect
+
+* **`/fundamentals/financials/`** is served by `bfinance.statements.fundamentals_fetch`, a second
+  client with its own JSON route (`get-fundamental_results-v2/{id}/{token}/`, token embedded in the
+  financials page). It is **deliberately not** in this package's `ENDPOINTS`: the isolation rule
+  forbids any module outside `bfinance/trendlyne/` importing anything named `*trendlyne*`, and the
+  statements layer is outside it.
+* **`/equity/technical-analysis-*` (the page route)** stays unwired and off-limits. Its JSON sibling
+  is what ships.
+* **`/alerts/addStockAlert/`** and **`/alerts/modal/stockAlert/`** stay unwired and disallowed.
+  Reading the alert *list* is a different route and does ship.
+* **`/equity/consensus-estimates/json-data/{id}/`** is a **404** — measured, not assumed. Consensus
+  targets come from the research-reports table instead.
+* **`/equity/delivery-analysis/`**, **`/equity/holding-overtime/{holder_id}/`** and
+  **`/equity/stock-mf-holding-table/{tlid}/`** were seen but not measured this pass, and a follow-up
+  is the honest description. `stock-mf-holding-table` in particular was found in the share-holding
+  page markup as an empty `div#mftabledata[data-fetchurl]` the page lazy-loads; **no request was
+  made against it**, so nothing may be claimed about what it returns.
+* The `/member/api/ac_snames/*` routes remain gated behind their own opt-ins, unchanged.
+
+#### Still true, worth re-reading
+
+* **`ENDPOINTS` means exactly *routes this package has a fetch method for*.** It is an allow-list
+  of what was requested, not a deny-list of what exists — which is the discipline that makes the
+  `build_path` rejection a real error rather than a formality. One route is deliberately **not** in
+  it: `/member/api/ac_snames/?term=...` is a query-string template and `ENDPOINTS` is validated by
   `build_path` as path templates.
-  The reason deletion beat wiring-later: a template with no method behind it still lets `build_path`
-  mint a plausible URL for a route nobody asked for, and **5 of the 14 had never returned HTTP 200 at
-  all** (`rights`, `news`, `news_only`, `news_analyst_calls`, `news_bse_announcements`) — pure
-  invention. `TestNoDeadScaffolding` now enforces declared == referenced by AST walk **and** by
-  driving the real methods against `httpx.MockTransport`, plus a guard that no docstring names a
-  module absent from disk. All guards proven non-vacuous by negative control.
-- ✅ **The forward references to `ownership`, `deals` and `corporate` are removed.** The package
-  manifest now says explicitly that no such modules exist.
+* **The reason deletion beat wiring-later, and the finding that justified it, both stand.** 5 of the
+  14 dead templates (`rights`, `news`, `news_only`, `news_analyst_calls`,
+  `news_bse_announcements`) had **never returned HTTP 200 at all**. That is what "a template with no
+  method behind it is a promise about unwritten code" means, and it is why the 14 came back as
+  *measured routes* rather than as 14 re-added strings.
+* **The forward references to `ownership`, `deals` and `corporate` remain removed.**
+  `tests/test_trendlyne_core.py::TestNoDeadScaffolding::test_the_package_docstring_lists_exactly_the_modules_on_disk`
+  asserts the package manifest matches the modules on disk in both directions.
 
-### Still true, worth re-reading
-- **0 of 8 pages have a fetch method.** The tests exercise the generic `tables.find_table` against
-  fixtures, not a route. Deleting the templates did not add them.
-- **0 of 8 have a fixture matching their own route.** All 9 fixtures are MOTHERSON, and the 6
-  registered signatures were validated against just **2** of them.
+So the honest description of `bfinance.trendlyne` is now: **a working OHLC client and symbol
+resolver, a sector/industry layer, and a wired section-page layer over 14 new routes** — 11
+server-rendered pages and 3 JSON siblings — **plus a second, separately-gated F&O client.** The row
+counts above are still a per-symbol measurement rather than a route property, and the gaps listed
+immediately above are the honest remainder. Treat none of this as covering the whole site.
 
-So the honest description of `bfinance.trendlyne` is: **a working OHLC client and symbol resolver, a
-sector/industry layer (classification, taxonomy, constituents, industry aggregate), plus scaffolding
-for 8 section tables that are not yet wired.** Treat the row counts as a scraping
-feasibility study, not as delivered features.
-
-**CORRECTION: the summary above previously stopped at "a working OHLC client and symbol resolver,
-plus scaffolding for 8 section tables", which predates `sectors.py` entirely.** The sector and
-industry capability is real, wired and reachable; the 8-table scaffolding claim still holds and is
-unaffected by it. What exists now, all in `bfinance.trendlyne` and all opt-in via an explicit
-import (nothing in `bfinance` imports it and `import bfinance` does not pull it in):
+**CORRECTION, 2026-09-30 (still in force, for the sector layer):** the summary previously stopped at
+"a working OHLC client and symbol resolver, plus scaffolding for 8 section tables", which predates
+`sectors.py` entirely. The sector and industry capability is real, wired and reachable, all opt-in
+via an explicit import (nothing in `bfinance` imports this package and `import bfinance` does not
+pull it in):
 
 | capability | entry point |
 |---|---|
@@ -577,12 +861,51 @@ is exact and unit-free. `docs/RELEASE_0.2.0.md` section 1 is the release note fo
 `docs/YFINANCE_MIGRATION_GUIDE.md` section 3.D carries the migration shape
 for a user coming from `yfinance`'s `Sector`/`Industry`.
 
-`share-holding` is **snapshot-only** — `Jun-2024` and `2024` in the path both return **HTTP 500**.
+**`share-holding` is snapshot-only, and that is a property of the route, not of the parameter.**
+`Jun-2024` and `2024` in the path both return **HTTP 500** — measured on MOTHERSON 2026-09-27 and
+re-verified on TCS 2026-10-10 with `Jun-2026`, which is also 500. Not 404, not an empty table: a
+deterministic server error. So `share_holding_async` refuses a non-`latest` period **before** the
+request and costs zero requests; a blanket guard across the MF route would have been the wrong fix
+for it, and is the counter-example recorded above. One `latest` request is still worth having —
+that single page embeds every quarter it holds (12 quarter columns on the TCS capture, 44 distinct
+quarter labels on MOTHERSON).
 
-**Not scrapeable — confirmed empty client-rendered shells** (after stripping scripts: 2,000–2,500
-chars, only `nav-item`/`dropdown-item` classes): `FORECASTER`, `Technicals`, `Consensus`, `About`,
-`Charts & Report`, `F&O`, and all ~110 `/equity/etf-dashboard/…` pages. Use the NSE FO bhavcopy instead
-of reverse-engineering the `smartoptions` SPA.
+### ⚠ CORRECTION, 2026-10-10: the "empty client-rendered shells" list splits in two, and three of the six are reachable
+
+The old claim was flat and, as a list, false:
+
+> **Not scrapeable — confirmed empty client-rendered shells** (after stripping scripts: 2,000–2,500
+> chars, only `nav-item`/`dropdown-item` classes): `FORECASTER`, `Technicals`, `Consensus`, `About`,
+> `Charts & Report`, `F&O`, and all ~110 `/equity/etf-dashboard/…` pages. Use the NSE FO bhavcopy
+> instead of reverse-engineering the `smartoptions` SPA.
+
+**The per-page observation was true and is not retracted: those HTML pages really do render as
+empty shells** (re-verified 2026-10-10 — `/equity/about/` is 97 KB with **zero** server-rendered
+tables). **The conclusion drawn from it was false**, because "this page has no tables" and "this
+data is unreachable" are different claims, and for three of the six the vendor serves the content
+on a *different* route that the study never looked for. Measured 2026-10-10:
+
+| page | the page itself | what is actually reachable | how |
+|---|---|---|---|
+| **`About`** | 97 KB, 0 SSR tables — shell | **reachable** | `/equity/overview-second-part/{id}/?format=json` → `companyProfileData`: `directorsTableData`, `topExecutivesTableData`, `companyDescription`, `websiteUrl`; plus `eventsData` (board meeting / dividend / bonus / split / rights). Parsed from `overview_second_part_tcs.json` into a `(44, 12)` directors-and-executives frame + 5 event frames (board_meeting `(5,3)`, dividend `(5,5)`, bonus `(3,3)`, split `(0,4)`, rights `(0,5)` — the two zeroes are TCS having neither, not a parse failure). The `ceo-salary-history/{ID}/{name}/` links on the page are **login-walled** |
+| **`Technicals`** | 2 small SSR tables (volume, pivots) — not even a shell | **reachable** | `/equity/api/stock/adv-technical-analysis/{id}/24/?format=json`, **robots-clean** (see the robots-pattern analysis above). `parameters` holds 56 top-level keys on both recorded captures (TCS and NTPC) |
+| **`F&O`** | 73 KB SPA, 0 SSR tables | **reachable, on a different host** | `smartoptions.trendlyne.com/phoenix/api/fno/option/chain/?stockCode=TCS&expDate=2026-10-27` → 276 KB, `body.tableData` + 35 `tableHeaders` keyed by `unique_name`, `maxPain=2140.0`, `atTheMoney`, `MWPL`, `stockLevelData` (PCR), `expiryLevelPCRValues`, `tableDataV2`. Shipped as `bfinance.trendlyne.smartoptions.SmartOptionsClient`, opt-in `allow_smart_options` (default `False`). ⚠ **`expDate` must be ISO `YYYY-MM-DD` — `27-Oct-2026` returns HTTP 500**; and `body.IV` is `null` **by design**, never an error |
+| **`Consensus`** | client-rendered | **truly unreachable — no clean JSON sibling** | `/equity/consensus-estimates/json-data/1372/` returns **404** (measured). Consensus targets are **derived** from the research-reports `Target` column instead, excluding the vendor's own aggregate row. No endpoint was invented to fill this |
+| **`FORECASTER`** | shell | **not addressed** | no route built, and none claimed |
+| **`Charts & Report`** | shell | **partly reachable** | `/share-price/price-performance-analysis/{id}/?format=json` → `body.{lastModified, returnsComparison, returnsDeepDive, returnsPatternData, dailyData}` (14 KB on the recorded capture). Note this route's `head.statusDescription` reads `"success"` in **lower case** where every other trendlyne route sends `"Success"` — which is the concrete reason success is decided on `head.status == "0"` and never on the description |
+| **~110 `/equity/etf-dashboard/…`** | shells | **not addressed** | unchanged, and no ETF-dashboard route is claimed |
+
+**The two-list form is the honest one**, and it is worth restating why: a client-rendered page is
+evidence about that *page*, not about the site. Trendlyne serves several of these datasets as
+first-class JSON behind the very pages that render nothing — finding them required reading the
+markup for a `data-fetchurl` on the empty containers, which is how `overview-second-part` and
+`adv-technical-analysis` were found.
+
+**What is still genuinely out**, stated as a list rather than a hedge: the **consensus page** (the
+one measured 404, with no sibling found), **`/equity/delivery-analysis/`** — 98 KB,
+client-rendered, **no clean JSON found on 2026-10-10** — `FORECASTER`, `Charts & Report`'s remaining
+sections, and the ETF dashboards. No smartoptions-SPA reverse-engineering is needed for F&O any more;
+that route is read directly.
 
 ### Mutual funds
 

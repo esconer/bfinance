@@ -54,7 +54,28 @@ class Tickers:
         proxy: Optional[str] = None,
         session: Optional[object] = None,
         multi_level_index: bool = True,
+        statement_fallback: bool = False,
+        trendlyne_sections: bool = False,
     ):
+        """
+        Args:
+            statement_fallback: forwarded to every :class:`~bfinance.ticker.Ticker` this collection
+                builds, with the same meaning there: when set, a statement accessor whose primary
+                source carries no statement at all may fall back to a second vendor. Default
+                ``False``, so a collection opens no second-vendor socket unless asked. Without it
+                ``Tickers([...]).tickers["NTPC"].financials`` could never fall back, which reads
+                as a broken flag rather than a collection that cannot set it. Named for what it
+                does rather than for the vendor that currently serves it.
+            trendlyne_sections: the same forwarding, for the other opt-in: when set, each
+                ``Ticker``'s ``trendlyne_*`` section members and the trendlyne half of
+                ``analyst_price_targets`` may run. Default ``False`` for the same reason -- a
+                collection opens no trendlyne request unless asked -- and separate from
+                ``statement_fallback`` rather than folded into it, because they are different
+                capabilities against different routes. Without it
+                ``Tickers([...]).tickers["TCS"].share_holding`` raises ``NotImplementedError`` on
+                every symbol, which reads as a broken member rather than a collection that cannot
+                turn it on.
+        """
         if isinstance(cache_ttl_hours, bool):
             multi_level_index = cache_ttl_hours
             cache_ttl_hours = 24.0
@@ -64,9 +85,18 @@ class Tickers:
         else:
             self.symbols = [str(t).strip() for t in tickers if str(t).strip()]
 
+        # Keyword-passed so it survives `_apply_ticker_bool_shim`'s
+        # `(ticker, cache_ttl_hours=24.0, *args, **kwargs)` wrapper untouched -- that shim only
+        # pops `multi_level_index` and re-passes everything else through as keywords.
         self.tickers: Dict[str, Ticker] = {
             normalize_symbol(sym): Ticker(
-                sym, cache_ttl_hours=cache_ttl_hours, timeout=timeout, proxy=proxy, session=session
+                sym,
+                cache_ttl_hours=cache_ttl_hours,
+                timeout=timeout,
+                proxy=proxy,
+                session=session,
+                statement_fallback=statement_fallback,
+                trendlyne_sections=trendlyne_sections,
             )
             for sym in self.symbols
         }

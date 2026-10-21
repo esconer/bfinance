@@ -60,7 +60,7 @@ sets, and matching it is the point.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .bindings import PATH as _BINDINGS
 from .model import Basis
@@ -110,6 +110,20 @@ class SourceSpec:
             is rejected in :meth:`Registry.register`.
         bases: The bases this source publishes. **Never inferred from the source's own output** —
             that is the whole failure mode. See the module docstring for the measurements.
+        provides: The **columns** this source's price rows actually carry, spelled in the
+            vocabulary :mod:`bfinance.market.ohlcv` builds frames in. This is the second
+            eligibility rule, and it exists because a basis is not the only way a source can fail
+            to answer: MarketLens publishes ``Close`` and ``Volume`` and no Open/High/Low, and a
+            close-only frame is a *non-empty* answer, so a caller asking for bars would be served a
+            frame with none of them and nothing would say so. Declared here rather than left to be
+            discovered at call time, for the same reason :attr:`bases` is: **the provider is not in
+            a position to know what was asked for**.
+
+            Empty — the default, and the right value for every row that is not a price row — means
+            "this source publishes no named price column", and such a row is **not** column-filtered.
+            That is the conservative reading on purpose: skipping a source for a column it might
+            publish under another name is how a working failover gets turned into a refusal, and an
+            unregistered column is not a measurement.
         note: Why the row says what it says. Mandatory and non-empty, because a basis column with
             no evidence next to it is a claim, and this table's whole purpose is to replace claims
             with measurements.
@@ -134,6 +148,7 @@ class SourceSpec:
     capabilities: Tuple[str, ...]
     bases: Tuple[Basis, ...]
     note: str
+    provides: Tuple[str, ...] = ()
     module: str = ""
     entry: str = ""
     adapter: str = ""
@@ -186,6 +201,19 @@ class SourceSpec:
         """Whether this row publishes ``basis`` and so is eligible for a request on it."""
         return basis in self.bases
 
+    def missing_columns(self, required: Sequence[str]) -> Tuple[str, ...]:
+        """The requested columns this row does **not** publish, in the order asked for.
+
+        Empty means "eligible", and empty is also what an empty :attr:`provides` returns for any
+        request — a row that publishes no named price column is not column-filtered, for the reason
+        :attr:`provides` documents. Order is preserved rather than sorted so the refusal sentence
+        quotes the caller back the columns it named, in its own order.
+        """
+        if not self.provides:
+            return ()
+        published = set(self.provides)
+        return tuple(column for column in required if column not in published)
+
     def unavailability(self) -> str:
         """The refusal text for a row that cannot be loaded, naming the reason.
 
@@ -208,7 +236,10 @@ class SourceSpec:
         if self.adapter:
             target += f" via {self.adapter}"
         solo = " [only publisher upstream]" if self.upstream_only else ""
-        return f"{self.name} -> {', '.join(self.capabilities)} on {bases} via {target}{solo}"
+        columns = f" columns: {', '.join(self.provides)}" if self.provides else ""
+        return (
+            f"{self.name} -> {', '.join(self.capabilities)} on {bases} via {target}{columns}{solo}"
+        )
 
 
 #: Why the second vendor's adjusted price history is registered but not wired. Kept as a constant
@@ -537,64 +568,6 @@ def build_default() -> Registry:
     # -- price history: five sources, three different bases ------------------- #
     registry.register(
         SourceSpec(
-            name="nse-bhavcopy",
-            capabilities=("price_history",),
-            bases=(Basis.AS_TRADED,),
-            note=(
-                "The NSE bhavcopy is the tape: ClsPric as printed, with no corporate-action "
-                "adjustment of any kind. This is the reference basis, and the measurement that "
-                "establishes it is that screener.in's own quote agrees with it to the decimal — "
-                "269.0 on both for the same symbol and day. Note what this row is NOT: it is a "
-                "whole-market daily file read over a date range, with no per-symbol argument. "
-                "Narrowing it to one symbol is the caller's job, and a caller who assumes this "
-                "source takes a ticker will either pass a key it ignores or conclude the source is "
-                "broken."
-            ),
-            module="bfinance.nse.bhavcopy",
-            entry="bhavcopy_range",
-            adapter=_BINDINGS["bhavcopy"],
-        )
-    )
-    registry.register(
-        SourceSpec(
-            name="marketlens-close",
-            capabilities=("price_history",),
-            bases=(Basis.AS_TRADED,),
-            note=(
-                "MarketLens publishes a raw close and volume, unadjusted, for one symbol at a "
-                "time. Comparable with the bhavcopy, so this row is a genuine second source for an "
-                "as-traded request — which makes as-traded the only price basis in this package "
-                "with real redundancy. The redundancy is worth naming precisely: it is per-symbol "
-                "and whole-market is not, so a request for one symbol has two answers and a "
-                "request for a market-wide screen has one."
-            ),
-            module="bfinance.nse.marketlens",
-            entry="price_history",
-            adapter=_BINDINGS["marketlens"],
-        )
-    )
-    registry.register(
-        SourceSpec(
-            name="screener-chart",
-            capabilities=("price_history",),
-            bases=(Basis.DIVIDEND_ADJUSTED,),
-            note=(
-                "screener.in's QUOTE is as-traded and its CHART HISTORY is not: the same vendor, "
-                "the same symbol, two different bases, one page. The effect is measured and the "
-                "cause is not, and this row says so rather than inventing one. That the quote and "
-                "the chart disagree is the whole reason a same-vendor failover is not automatically "
-                "basis-preserving: this source is the concrete case where it is not. The entry is "
-                "ScreenerClient, not bfinance.screener.charts.ScreenerChartEngine — the latter "
-                "builds a query parameter and parses JSON and cannot fetch anything, so a row "
-                "pointing at it would look wired and never answer."
-            ),
-            module="bfinance.screener.client",
-            entry="ScreenerClient",
-            adapter=_BINDINGS["screener_chart"],
-        )
-    )
-    registry.register(
-        SourceSpec(
             name=TRENDLYNE_OHLC_PROVIDER,
             capabilities=("price_history",),
             bases=(Basis.SPLIT_ADJUSTED,),
@@ -622,18 +595,28 @@ def build_default() -> Registry:
                 "it. The 11 that match have no event inside the span, so 'matches the bhavcopy' is "
                 "what as-traded looks like when no corporate action falls in the window -- a "
                 "per-symbol match is not evidence of a shared basis. CONSEQUENCE FOR THIS TABLE: "
-                "the row is registered split_adjusted and ordered AFTER the two as-traded rows, "
-                "not first. An as_traded request skips it on basis and spends no request on it, and "
-                "the order a report prints is the order a reader will assume -- a first position "
-                "here would claim a comparability this measurement refuses. What it does buy is "
-                "the only wired source on the split_adjusted basis, ahead of the declared-but-"
-                "unwired row below, and the only price row here that can be asked for a window: "
-                "this route publishes no period segment, so start/end are applied locally and cost "
-                "the vendor nothing. One coverage limit is part of the row, not a caveat: ETFs are "
+                "the row is registered split_adjusted, and BASIS -- not position -- is what routes "
+                "a call, so an as_traded request skips it on basis and spends no request on it. "
+                "It is nevertheless declared FIRST (operator decision, 2026-10-13): the default "
+                "vendor, with the two NSE as-traded rows as the cascade behind it. That ordering is "
+                "safe precisely because of the measurement above -- moving the row up cannot make "
+                "an as-traded call land on a split-adjusted series, because the basis column "
+                "refuses it before the request is built. It also buys the only wired source on the "
+                "split_adjusted basis, which was already first for every request it can serve. What "
+                "it does not buy is speed on the default path: DEFAULT_PRICE_BASIS is as_traded, "
+                "so Ticker.info() still reaches the bhavcopy, which downloads one archive file per "
+                "trading day (measured 2026-10-13: 184s for info(), against 3.5s for this row's "
+                "single-request path) -- a cost of the as-traded basis, not of this ordering. "
+                "One coverage limit is part of the row, not a caveat: ETFs are "
                 "absent from the sitemap entirely and the route that resolves them is "
                 "robots-disallowed, so that class of instrument is refused rather than answered "
-                "thin."
+                "thin.\n\n"
+                "COLUMNS: the full OHLCV five, read off bfinance.sources.price_provider.COLUMNS "
+                "(parse_ohlc_payload returns ``frame[list(COLUMNS)]``) and off the leaf reader this "
+                "row deliberately does not import, whose own COLUMNS tuple is the same five. So a "
+                "Close-only request and an OHLC request can both reach this row."
             ),
+            provides=("Open", "High", "Low", "Close", "Volume"),
             module="bfinance.sources.price_provider",
             entry="price_history",
             adapter=_BINDINGS["price_provider"],
@@ -641,10 +624,114 @@ def build_default() -> Registry:
     )
     registry.register(
         SourceSpec(
+            name="marketlens-close",
+            capabilities=("price_history",),
+            bases=(Basis.AS_TRADED,),
+            note=(
+                "MarketLens publishes a raw close and volume, unadjusted, for one symbol at a "
+                "time. Comparable with the bhavcopy, so this row is a genuine second source for an "
+                "as-traded request — which makes as-traded the only price basis in this package "
+                "with real redundancy. The redundancy is worth naming precisely: it is per-symbol "
+                "and whole-market is not, so a request for one symbol has two answers and a "
+                "request for a market-wide screen has one.\n\n"
+                "COLUMNS: Close and Volume ONLY. This is the row's limitation and it is a "
+                "measurement, not a guess: bfinance.nse.marketlens builds its frame as "
+                "``{'Close': close, 'Volume': volume}`` and its docstring says twice that the "
+                "endpoint has no Open/High/Low. So this row is skipped -- never called -- for an "
+                "OHLC request, and it is the reason :attr:`SourceSpec.provides` exists at all: "
+                "a close-only frame is a NON-EMPTY answer, so without a declared column set the "
+                "cascade would hand one back for a request that needs bars and the caller would "
+                "lose its Open/High/Low with nothing raised. What it IS good for is the measured "
+                "2.5s against the bhavcopy's 530s over two years, because it is per-symbol and "
+                "answers one request; that is the reason a Close-only request wants it, and it is "
+                "worth 200x rather than a rounding difference."
+            ),
+            provides=("Close", "Volume"),
+            module="bfinance.nse.marketlens",
+            entry="price_history",
+            adapter=_BINDINGS["marketlens"],
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name="nse-bhavcopy",
+            capabilities=("price_history",),
+            bases=(Basis.AS_TRADED,),
+            note=(
+                "The NSE bhavcopy is the tape: ClsPric as printed, with no corporate-action "
+                "adjustment of any kind. This is the reference basis, and the measurement that "
+                "establishes it is that screener.in's own quote agrees with it to the decimal — "
+                "269.0 on both for the same symbol and day. Note what this row is NOT: it is a "
+                "whole-market daily file read over a date range, with no per-symbol argument. "
+                "Narrowing it to one symbol is the caller's job, and a caller who assumes this "
+                "source takes a ticker will either pass a key it ignores or conclude the source is "
+                "broken.\n\n"
+                "COLUMNS: the OHLCV five, read off bfinance.nse.bhavcopy.OHLCV_COLUMNS -- the half "
+                "of its output contract that OHLCVEngine looks up BY NAME. Its COLUMNS tuple also "
+                "carries TurnoverValue, which is a traded-value figure rather than a price and is "
+                "additive here; it is not in this row because no caller of this layer can ask for "
+                "it by name. Being the one row that can serve every price column, this is the row "
+                "an OHLC request is routed to -- and, on the shipped try-order, the row it is "
+                "routed to for a CLOSE-ONLY request too, which is a fact about the ordering rather "
+                "than about this row's capabilities.\n\n"
+                "THE COST OF THIS ROW, measured 2026-10-13 on TCS, because a reader deciding whether "
+                "to ask this layer for a price series needs it before paying for it: "
+                "bhavcopy_range iterates one archive file PER TRADING DAY over the window, so one "
+                "month is 18.3s and 60,736 rows, two years is 530s and 1,211,192 rows, and the "
+                "1-year window Ticker.info used to ask for took 184s. The one as-traded alternative "
+                "answers the same window in 2.5s over 1,237 rows. Column eligibility does not change "
+                "that -- it decides what MAY answer, never who answers first."
+            ),
+            provides=("Open", "High", "Low", "Close", "Volume"),
+            module="bfinance.nse.bhavcopy",
+            entry="bhavcopy_range",
+            adapter=_BINDINGS["bhavcopy"],
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name="screener-chart",
+            capabilities=("price_history",),
+            bases=(Basis.DIVIDEND_ADJUSTED,),
+            note=(
+                "screener.in's QUOTE is as-traded and its CHART HISTORY is not: the same vendor, "
+                "the same symbol, two different bases, one page. The effect is measured and the "
+                "cause is not, and this row says so rather than inventing one. That the quote and "
+                "the chart disagree is the whole reason a same-vendor failover is not automatically "
+                "basis-preserving: this source is the concrete case where it is not. The entry is "
+                "ScreenerClient, not bfinance.screener.charts.ScreenerChartEngine — the latter "
+                "builds a query parameter and parses JSON and cannot fetch anything, so a row "
+                "pointing at it would look wired and never answer.\n\n"
+                "COLUMNS: NONE in this layer's vocabulary, and that is measured rather than "
+                "forgotten. bfinance.screener.charts builds its frame from "
+                "``datasets[].metric`` -- the column NAMES are whatever the vendor called the "
+                "metric, so the price chart's single column is called ``price``, not ``Close`` -- "
+                "and it publishes no Open/High/Low either. So ``provides`` is empty here, which by "
+                ":meth:`SourceSpec.missing_columns` means the row is NOT column-filtered rather "
+                "than being skipped for every column: refusing it for a name it might use is a "
+                "guess, and the engine's own required-column check still refuses this row's frame "
+                "loudly rather than accepting it, which is the shape the defect takes either way."
+            ),
+            module="bfinance.screener.client",
+            entry="ScreenerClient",
+            adapter=_BINDINGS["screener_chart"],
+        )
+    )
+    registry.register(
+        SourceSpec(
             name="vendor-b-adjustments",
             capabilities=("price_history",),
             bases=(Basis.SPLIT_ADJUSTED,),
-            note=UNWIRED_NOTE,
+            note=(
+                UNWIRED_NOTE
+                + "\n\nCOLUMNS: the OHLCV five, declared from the reader this row names -- "
+                "bfinance.trendlyne.client.COLUMNS, which is documented there as identical to the "
+                "bhavcopy's so a frame drops into the same consumers. It is read rather than "
+                "imported, for the two isolation reasons the note above gives; the row itself is "
+                "unwired and so is never called, which is why declaring its columns costs nothing "
+                "and omitting them would cost a future row its eligibility check."
+            ),
+            provides=("Open", "High", "Low", "Close", "Volume"),
         )
     )
 

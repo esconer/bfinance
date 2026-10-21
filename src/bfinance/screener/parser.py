@@ -49,6 +49,86 @@ _PAGE_INFO_RE = re.compile(
 )
 
 
+#: The three marker classes on the ``div.documents`` blocks of ``section#documents`` that are
+#: *not* the announcements list. They are the exclusion set of the structural-inverse selector
+#: ``div.documents:not(.annual-reports):not(.credit-ratings):not(.concalls)`` and are spelled out
+#: here because ``:not()`` with a class predicate has no ``find_all`` equivalent — see
+#: :meth:`ScreenerHTMLParser._parse_documents`.
+_DOCUMENTS_MARKER_CLASSES: Tuple[str, ...] = (
+    "annual-reports",
+    "credit-ratings",
+    "concalls",
+)
+
+
+def _iter_descendants_of_any(scope: Any, tag: str, containers: List[Any]):
+    """Yield every ``tag`` element that is a **strict descendant** of one of ``containers``.
+
+    The exact stand-in for a soupsieve comma-union such as
+    ``".company-info a, .company-profile a"``. Three properties have to survive the rewrite, and
+    each of them is a way a naive ``find_all`` translation silently loses nodes:
+
+    * **Document order.** soupsieve walks the document once, so ``"#first a, .second a"``
+      interleaves the two halves by position. Concatenating two ``find_all`` results does not —
+      on a probe fragment the selector returned ``f1 s1 l1a f2 s2`` and the concatenation
+      ``f1 f2 s1 l1a s2``. Every list this feeds (concalls, pros, cons, annual reports, credit
+      ratings) is itself a parsed value, so order is part of the contract.
+    * **De-duplication.** A node matching two halves is returned **once**. This is not
+      hypothetical: ``.company-profile`` is nested inside ``.company-info`` on the live page, so
+      the halves measure 6 and 7 against a union of 7 — summing them returns 13 (+86%) and feeds
+      the wrong ``bse_code`` / ``nse_symbol`` / ``website``.
+    * **Descendant semantics.** A container never matches itself, so
+      ``<div class="company-profile about">`` contributes no ``p`` to the
+      ``.company-profile .about p`` chain via itself.
+
+    One pass over ``tag`` with an ancestor walk, against one soupsieve compilation and
+    full-document match per half.
+    """
+    keys = {id(container) for container in containers}
+    if not keys:
+        return
+    for node in scope.find_all(tag):
+        ancestor = node.parent
+        while ancestor is not None:
+            if id(ancestor) in keys:
+                yield node
+                break
+            ancestor = ancestor.parent
+
+
+def _descendants_of_any(scope: Any, tag: str, containers: List[Any]) -> List[Any]:
+    """The whole :func:`_iter_descendants_of_any` result, in document order."""
+    return list(_iter_descendants_of_any(scope, tag, containers))
+
+
+def _first_descendant_of_any(scope: Any, tag: str, containers: List[Any]) -> Optional[Any]:
+    """The first match only — the stand-in for ``select_one``, which returns the same node.
+
+    Returns ``None`` when nothing matches, exactly as ``select_one`` does, so the ``or`` fallback
+    the call sites are written with still decides on emptiness.
+    """
+    return next(_iter_descendants_of_any(scope, tag, containers), None)
+
+
+def _structural_inverse(doc_sec: Any) -> Optional[Any]:
+    """The container ``div.documents:not(.annual-reports):not(.credit-ratings):not(.concalls)``
+    elects — the **first** ``div.documents`` carrying none of :data:`_DOCUMENTS_MARKER_CLASSES`, or
+    ``None``.
+
+    A function rather than an inline comprehension because this is the one rewritten site that is
+    not a single ``find_all``: the exclusion has to be spelled out, the ``first match only`` rule
+    has to live in exactly one place, and a test has to be able to call it to compare against
+    ``select_one`` instead of restating it.
+    """
+    return next(
+        (
+            d for d in doc_sec.find_all("div", class_="documents")
+            if set(d.get("class") or []).isdisjoint(_DOCUMENTS_MARKER_CLASSES)
+        ),
+        None,
+    )
+
+
 def _first_present(raw: Dict[str, Optional[float]], *keys: str) -> Optional[float]:
     """First of ``keys`` whose parsed value is not ``None``, in the order given.
 
@@ -162,8 +242,21 @@ class ScreenerHTMLParser:
         h1 = soup.find("h1")
         company_name = h1.get_text(strip=True) if h1 else fallback_symbol
 
-        # About text
-        about_div = soup.select_one(".company-profile .about p") or soup.select_one(".about p")
+        # About text.
+        #
+        # `.company-profile .about p` is a two-level descendant chain, so `.about` is resolved
+        # *inside* each `.company-profile` — a `.about` that sits outside one never satisfies it.
+        # The `or` is a short-circuit fallback, not a union: only when the profile-scoped
+        # paragraph is absent does the document-wide `.about p` get a turn.
+        about_div = _first_descendant_of_any(
+            soup,
+            "p",
+            [
+                about
+                for profile in soup.find_all(class_="company-profile")
+                for about in profile.find_all(class_="about")
+            ],
+        ) or _first_descendant_of_any(soup, "p", soup.find_all(class_="about"))
         about_text = about_div.get_text(strip=True) if about_div else ""
 
         # Links (Website, BSE, NSE)
@@ -171,7 +264,18 @@ class ScreenerHTMLParser:
         bse_code = None
         nse_symbol = None
 
-        links = soup.select(".company-links a, .links a, .company-info a, .company-profile a")
+        # One pass over the document's anchors, not four soupsieve traversals — and NOT the sum of
+        # four `find_all` calls: `.company-profile` sits inside `.company-info` on the live page, so
+        # the halves are 6 and 7 nodes against a union of 7, and adding them double-counts the six
+        # nested ones. That feeds bse_code / nse_symbol / website below.
+        links = _descendants_of_any(
+            soup,
+            "a",
+            soup.find_all(class_="company-links")
+            + soup.find_all(class_="links")
+            + soup.find_all(class_="company-info")
+            + soup.find_all(class_="company-profile"),
+        )
         for a in links:
             href = a.get("href", "").strip()
             text = a.get_text(strip=True)
@@ -234,9 +338,12 @@ class ScreenerHTMLParser:
     def _parse_top_ratios(self, soup: BeautifulSoup) -> TopRatios:
         raw_ratios: Dict[str, Optional[float]] = {}
 
-        for li in soup.select("#top-ratios li"):
-            name_el = li.select_one(".name")
-            val_el = li.select_one(".value")
+        for li in _descendants_of_any(soup, "li", soup.find_all(id="top-ratios")):
+            # Scoped to the `li`, and it has to stay scoped: `#top-ratios` holds nine `.name` and
+            # nine `.value` nodes and the document holds the same nine again, so a document-wide
+            # `find_all` here would pair each ratio with whichever name happened to come first.
+            name_el = li.find(class_="name")
+            val_el = li.find(class_="value")
             if not name_el or not val_el:
                 continue
 
@@ -284,13 +391,25 @@ class ScreenerHTMLParser:
         )
 
     def _parse_analysis(self, soup: BeautifulSoup) -> AnalysisInsights:
-        pros = [li.get_text(strip=True) for li in soup.select(".pros ul li")]
-        cons = [li.get_text(strip=True) for li in soup.select(".cons ul li")]
+        # `.pros ul li` is a three-level chain: the `ul` must sit *inside* a `.pros` block, so the
+        # `ul`s are resolved within the blocks first and the `li`s are then collected under them.
+        pros = [
+            li.get_text(strip=True)
+            for li in _descendants_of_any(
+                soup, "li", [ul for block in soup.find_all(class_="pros") for ul in block.find_all("ul")]
+            )
+        ]
+        cons = [
+            li.get_text(strip=True)
+            for li in _descendants_of_any(
+                soup, "li", [ul for block in soup.find_all(class_="cons") for ul in block.find_all("ul")]
+            )
+        ]
         return AnalysisInsights(pros=pros, cons=cons)
 
     def _parse_cagrs(self, soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
         cagrs: Dict[str, Dict[str, str]] = {}
-        for table in soup.select(".ranges-table"):
+        for table in soup.find_all(class_="ranges-table"):
             th = table.find("th")
             if not th:
                 continue
@@ -363,8 +482,21 @@ class ScreenerHTMLParser:
         if not doc_sec:
             return concalls, annual_reports, credit_ratings, announcements
 
-        # Concalls
-        concall_items = doc_sec.select(".concalls ul li") or doc_sec.select("#concalls ul li")
+        # Concalls.
+        #
+        # The `or` is a **short-circuit fallback**: `.concalls` wins outright when it matches, and
+        # `#concalls` is consulted only when it does not. Running both and concatenating would
+        # turn `or` into `+` and count every concall twice the day a block carries both the class
+        # and the id — so the right-hand side stays behind the `or`.
+        concall_items = _descendants_of_any(
+            doc_sec,
+            "li",
+            [ul for block in doc_sec.find_all(class_="concalls") for ul in block.find_all("ul")],
+        ) or _descendants_of_any(
+            doc_sec,
+            "li",
+            [ul for block in doc_sec.find_all(id="concalls") for ul in block.find_all("ul")],
+        )
         for li in concall_items:
             title_text = li.get_text(" ", strip=True)
             date_match = re.search(r"(\w+\s+\d{4}|\d{1,2}\s+\w+\s+\d{4})", title_text)
@@ -397,14 +529,22 @@ class ScreenerHTMLParser:
             )
 
         # Annual reports
-        for a in doc_sec.select(".annual-reports a, #annual-reports a"):
+        for a in _descendants_of_any(
+            doc_sec,
+            "a",
+            doc_sec.find_all(class_="annual-reports") + doc_sec.find_all(id="annual-reports"),
+        ):
             annual_reports.append({
                 "year": a.get_text(strip=True),
                 "url": a.get("href", "")
             })
 
         # Credit ratings
-        for a in doc_sec.select(".credit-ratings a, #credit-ratings a"):
+        for a in _descendants_of_any(
+            doc_sec,
+            "a",
+            doc_sec.find_all(class_="credit-ratings") + doc_sec.find_all(id="credit-ratings"),
+        ):
             credit_ratings.append({
                 "title": a.get_text(strip=True),
                 "url": a.get("href", "")
@@ -422,16 +562,24 @@ class ScreenerHTMLParser:
         # to empty: the heading text (semantic, survives a class shuffle) and the structural inverse
         # (the unmarked `div.documents`, survives a reworded heading). The first match only, because
         # a future fifth `div.documents` with no marker class would otherwise double-count.
+        #
+        # ⚠ **`:not()` with a class predicate has no `find_all` equivalent**, so the second selector
+        # is hand-filtered in :func:`_structural_inverse`. The set test is the negation of
+        # soupsieve's, not a substring test: a block classed `documents concalls-archive` is
+        # excluded by neither, and dropping it here would silently disagree with soupsieve.
+        doc_blocks = doc_sec.find_all("div", class_="documents")
         ann_block = next(
-            (d for d in doc_sec.select("div.documents")
+            (d for d in doc_blocks
              if (h3 := d.find("h3")) and h3.get_text(strip=True) == "Announcements"),
             None,
-        ) or doc_sec.select_one(
-            "div.documents:not(.annual-reports):not(.credit-ratings):not(.concalls)"
-        )
+        ) or _structural_inverse(doc_sec)
         # `ul.list-links` is the list itself; the container's other anchor is the "All" link to
         # BSE's announcement page, which is navigation and not an announcement.
-        for a in (ann_block.select("ul.list-links a") if ann_block else []):
+        for a in (
+            _descendants_of_any(ann_block, "a", ann_block.find_all("ul", class_="list-links"))
+            if ann_block
+            else []
+        ):
             announcements.append({
                 "title": a.get_text(strip=True),
                 "url": a.get("href", "")

@@ -1008,14 +1008,22 @@ def unexplained_price_jumps(
     # function exists to prevent.
     explained: Dict[Any, str] = {}
     if actions is not None and not actions.empty and actions.index.notna().any():
-        for stamp, row in actions[actions.index.notna()].iterrows():
+        frame = actions[actions.index.notna()]
+        # itertuples hands back plain tuples rather than a Series per row, so the two columns are
+        # addressed by position: "Stock Splits" is not a valid Python identifier and pandas would
+        # rename the field, which would turn a typo into a silent 0.0. Offset by one for the index,
+        # which itertuples puts first.
+        names = list(frame.columns)
+        div_at = 1 + names.index("Dividends") if "Dividends" in names else None
+        split_at = 1 + names.index("Stock Splits") if "Stock Splits" in names else None
+        for row in frame.itertuples():
             kinds = []
-            if float(row.get("Dividends", 0.0) or 0.0) != 0.0:
+            if div_at is not None and float(row[div_at] or 0.0) != 0.0:
                 kinds.append("dividend")
-            if float(row.get("Stock Splits", 0.0) or 0.0) not in (0.0, 1.0):
+            if split_at is not None and float(row[split_at] or 0.0) not in (0.0, 1.0):
                 kinds.append("split")
             if kinds:
-                day = pd.Timestamp(stamp)
+                day = pd.Timestamp(row[0])
                 if day.tzinfo is not None:
                     day = day.tz_localize(None)
                 explained[day.normalize()] = "+".join(kinds)

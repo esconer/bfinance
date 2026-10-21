@@ -233,6 +233,31 @@ def _clamped(days: int) -> str:
     return str(max(start, floor).date())
 
 
+async def _repeat_asks_only_the_tail(stub_bhavcopy, period):
+    """Run the same request again and pin the repeat half of the clamped-split contract.
+
+    The first call is the cold prefix: one whole-window range fetch, the walk that was always
+    spent. This helper re-runs it against the same ``$BFINANCE_HOME`` (the autouse fixture gives
+    the test one store), so the prefix the first call stored is now a hit, and the archive may only
+    be asked for the days after the immutable boundary. That is the half ``stub_bhavcopy[-1][0] ==
+    BHAVCOPY_FIRST_DATE`` used to hide: on a warm store ``[-1]`` was the tail, and on a cold one
+    the assertion said nothing about the repeat at all.
+    """
+    before = len(stub_bhavcopy)
+    second = await _engine().fetch_history(
+        symbol="RELIANCE", period=period, actions=False, auto_adjust=False
+    )
+    assert len(stub_bhavcopy) - before == 1, (
+        "a repeat call must be answered from the stored prefix and ask for the tail alone; it "
+        f"asked for {stub_bhavcopy[before:]}"
+    )
+    assert stub_bhavcopy[-1][0] > BHAVCOPY_FIRST_DATE, (
+        "so the archive is not walked from the floor a second time"
+    )
+    assert stub_bhavcopy[-1][1] == stub_bhavcopy[0][1], "and the tail ends at the requested end"
+    return second
+
+
 @pytest.mark.parametrize(
     "period",
     ["BANANA", "2w", "1M", "1 month", "5years", "  ", "1d "],
@@ -296,6 +321,11 @@ async def test_a_recognised_period_reaches_the_window_it_names(stub_bhavcopy, pe
     ``'1M'`` a *typo* rather than an unsupported feature. ``'max'`` is here to prove the archive
     clamp is applied identically on the way in and in this expectation, so the assertion above
     cannot be satisfied by simply refusing long windows.
+
+    The first range is asserted, and the call count with it, because a clamped window is split now:
+    the cold prefix is ONE whole-window range fetch (the walk that was always spent), so "the first
+    call spans the resolved window" is the contract. ``stub_bhavcopy[-1]`` was the last call, which
+    on a warm store is the tail and on a cold one merely happened to be the only call.
     """
     # auto_adjust=False is explicit and is the pre-2026-09-30 default: these tests are about the
     # WINDOW the archive was asked for, and on the new default auto_adjust=True raises out of a
@@ -304,11 +334,15 @@ async def test_a_recognised_period_reaches_the_window_it_names(stub_bhavcopy, pe
         symbol="RELIANCE", period=period, actions=False, auto_adjust=False
     )
 
-    requested_start = stub_bhavcopy[-1][0]
+    requested_start = stub_bhavcopy[0][0]
     assert requested_start == _clamped(expected_days), (
         f"period={period!r} should have requested {_clamped(expected_days)} "
         f"({expected_days} days back, clamped to the archive floor), "
         f"but the archive was asked for {requested_start}"
+    )
+    assert len(stub_bhavcopy) == 1, (
+        "and the first call is one whole-window range fetch, not one fetch per half: "
+        f"{stub_bhavcopy}"
     )
 
 
@@ -320,17 +354,33 @@ async def test_a_long_but_recognised_period_still_clamps_with_a_warning(stub_bha
     2024-01-01 -- and that has to stay a *logged* clamp rather than a refusal, or the fix has
     traded a silent wrong answer for a loud wrong refusal. This is the assertion that separates
     "period we do not know" (raise) from "period the archive cannot fill" (clamp + warn).
+
+    The clamp assertion is on the FIRST call and on the repeat: the first is the cold prefix, one
+    whole-window range fetch from the floor, and the second is answered from that stored prefix and
+    asks only for the tail. ``stub_bhavcopy[-1][0]`` used to stand for both halves and no longer
+    can -- on a warm store the last call is the tail.
     """
     with caplog.at_level(logging.WARNING, logger="bfinance"):
-        await _engine().fetch_history(
+        first = await _engine().fetch_history(
             symbol="RELIANCE", period="5y", actions=False, auto_adjust=False
         )
 
-    assert stub_bhavcopy[-1][0] == BHAVCOPY_FIRST_DATE, (
-        f"a 5y request should clamp to the archive floor, not ask for {stub_bhavcopy[-1][0]}"
+    assert stub_bhavcopy[0][0] == BHAVCOPY_FIRST_DATE, (
+        f"a 5y request should clamp to the archive floor, not ask for {stub_bhavcopy[0][0]}"
+    )
+    assert len(stub_bhavcopy) == 1, (
+        "and the cold prefix is one whole-window range fetch, the walk that was always spent"
     )
     assert BHAVCOPY_FIRST_DATE in caplog.text, (
         "the clamp must be logged, exactly as the floor case was; got: " + caplog.text
+    )
+
+    second = await _repeat_asks_only_the_tail(stub_bhavcopy, "5y")
+    assert second.attrs["bfinance_window_truncated"] is True, (
+        "the repeat is still a clamped request, however it was served"
+    )
+    assert first["Close"].tolist() == second["Close"].tolist(), (
+        "and the repeat frame is the same series, prefix and tail together"
     )
 
 
@@ -343,8 +393,13 @@ async def test_no_period_given_means_the_documented_default(stub_bhavcopy, perio
     keeps working, and it means what :data:`PERIOD_DAYS_MAP` documents: 1825 days, the same window
     as ``'5y'``. The distinction being pinned is *refused* vs *accepted*, so this goes red if the
     validation is ever widened to reject the empty case.
+
+    Both spellings resolve to the same clamped window, so the second half of the split contract
+    belongs here too: the first call asks for the whole window in one range fetch, and a repeat call
+    reads the prefix and asks only for the tail. ``stub_bhavcopy[-1][0]`` was the last request, which
+    is the tail once the store is warm.
     """
-    await _engine().fetch_history(
+    first = await _engine().fetch_history(
         symbol="RELIANCE", period=period, actions=False, auto_adjust=False
     )
 
@@ -352,9 +407,17 @@ async def test_no_period_given_means_the_documented_default(stub_bhavcopy, perio
         "the documented no-period default is 1825 days; if that changes this test's expectation "
         "has to change with it"
     )
-    assert stub_bhavcopy[-1][0] == _clamped(1825), (
+    assert stub_bhavcopy[0][0] == _clamped(1825), (
         f"the no-period default is 1825 days -> {_clamped(1825)}; "
-        f"the archive was asked for {stub_bhavcopy[-1][0]}"
+        f"the archive was asked for {stub_bhavcopy[0][0]}"
+    )
+    assert len(stub_bhavcopy) == 1, (
+        "and the first call is one whole-window range fetch: " f"{stub_bhavcopy}"
+    )
+
+    second = await _repeat_asks_only_the_tail(stub_bhavcopy, period)
+    assert first["Close"].tolist() == second["Close"].tolist(), (
+        "the repeat frame is the same series, prefix and tail together"
     )
 
 
@@ -401,15 +464,15 @@ def test_every_cache_set_call_site_passes_an_explicit_ttl():
     """
     A TTL that exists only at the call sites that remembered it is not a policy.
 
-    Before the fix, four of the five ``self.cache.set`` calls in :class:`ScreenerClient` passed
+    Before the fix, four of the five ``self.cache.set`` calls then in :class:`ScreenerClient` passed
     ``ttl_hours`` and the price-bearing ``profile`` entry did not, so it inherited
-    ``SQLiteCache(default_ttl_hours=24.0)``. This scans the source, so a *sixth* call site added
-    tomorrow without a TTL is caught too -- a behavioural test could only ever cover the five paths
+    ``SQLiteCache(default_ttl_hours=24.0)``. This scans the source, so an *eighth* call site added
+    tomorrow without a TTL is caught too -- a behavioural test could only ever cover the seven paths
     it already knows about.
     """
     nodes = _cache_set_call_nodes()
-    assert len(nodes) == 5, (
-        f"expected the five known cache.set call sites, found {len(nodes)}; a new one needs a TTL "
+    assert len(nodes) == 7, (
+        f"expected the seven known cache.set call sites, found {len(nodes)}; a new one needs a TTL "
         f"declared here and in CATEGORY_TTL_HOURS"
     )
 
@@ -419,6 +482,28 @@ def test_every_cache_set_call_site_passes_an_explicit_ttl():
             f"a cache.set at line {node.lineno} passes no ttl_hours, so its age would come from "
             f"the cache's construction default"
         )
+
+    # The seven sites again, by the category each stores under: ``search``; ``company_id`` twice
+    # (``resolve_company_id`` and the identifier row ``get_company_profile`` writes from the page it
+    # already fetched); ``profile``; ``chart``; and the two ``/market/`` pages, which store
+    # ``category="market"`` and select their TTL under ``market_overview``/``market_leaf``. Pinned
+    # beside the count so the number above is auditable rather than merely moved: an eighth site has
+    # to add its category here -- and therefore its TTL to ``CATEGORY_TTL_HOURS`` -- or this fails.
+    categories = []
+    for node in nodes:
+        named = [keyword for keyword in node.keywords if keyword.arg == "category"]
+        assert len(named) == 1 and isinstance(named[0].value, ast.Constant), (
+            f"the cache.set at line {node.lineno} must name its category as a literal, so the TTL "
+            f"it selects (CATEGORY_TTL_HOURS) is auditable from here"
+        )
+        categories.append(named[0].value.value)
+
+    assert sorted(categories) == [
+        "chart", "company_id", "company_id", "market", "market", "profile", "search",
+    ], (
+        f"the known cache.set sites are search, resolve_company_id, get_company_profile x2, "
+        f"get_chart_timeseries, market overview and market leaf; got {sorted(categories)}"
+    )
 
 
 def test_the_price_bearing_profile_ttl_is_sixty_minutes(temp_cache):

@@ -1,8 +1,20 @@
-"""Drop-in financials parity vs live yfinance for RELIANCE.NS (yfinance 1.7.0).
+"""Drop-in financials parity vs live yfinance: RELIANCE.NS for every accessor, INFY.NS for the
+currency-gated income bridge (yfinance 1.7.0).
 
 bfinance orientation/rows/units are the contract (metric rows x period columns,
 TitleCase Indian labels, Rs Cr) -- this file asserts self-consistency +
 yfinance-bridge alignment, never native equality.
+
+**The numeric comparison is gated on currency.** ``Ticker.info["currency"]`` is the *trading*
+currency and reads "INR" for every NSE symbol; ``Ticker.info["financialCurrency"]`` is the
+currency Yahoo denominates that company's *statements* in, and it follows the filings rather
+than the listing. INFY.NS reports "USD" -- inherited from its ADR/SEC filings -- so comparing
+its rows to bfinance, which is absolute rupees by contract (``docs/API_REFERENCE.md:227``,
+"Values are absolute rupees"), reads as an ~83x data bug that is really the exchange rate:
+measured 82.79 (Mar 2024), 84.55 (Mar 2025), 88.62 (Mar 2026) -- rupee depreciation, not a
+units error. That is why ``test_to_yfinance_bridge_income_anchors`` is parametrized over one
+INR ticker and one non-INR ticker: the non-INR one is *recorded as a skip naming its currency*
+(``-rs`` prints it) rather than quietly dropped, which is how the apparent 82x gap survived CI.
 
 **Row vocabulary, since the accessors were wired to the yfinance shape.**
 ``get_income_stmt``, ``get_balance_sheet`` and ``get_cash_flow`` return
@@ -24,7 +36,8 @@ same rows required, same arithmetic, same tolerances. The mapping used:
 
 A test that stops asserting anything is worse than a red one, so every migrated test kept
 every assertion it had -- only the vocabulary moved. The four ``to_yfinance_bridge_*`` tests
-and the balance-sheet tests already spoke the yfinance vocabulary and are untouched.
+and the balance-sheet tests already spoke the yfinance vocabulary and needed no label
+migration.
 """
 import pandas as pd
 import pytest
@@ -37,6 +50,14 @@ TOL_RECONCILE = 0.05
 TOL_BRIDGE = 0.15
 # Fiscal Mar-year: screener "Mar YYYY" <-> yfinance YYYY-03-31. Align by year.
 BRIDGE_YEARS = [2024, 2025]
+
+#: The only currency in which the two sides are directly comparable: bfinance reports absolute
+#: rupees, Yahoo reports whatever ``info["financialCurrency"]`` says.
+STATEMENT_CURRENCY = "INR"
+
+#: One ticker whose Yahoo statements are denominated in INR and one whose are not (INFY.NS ->
+#: USD). Both are parametrized so the excluded one is a visible, reasoned skip, not an absence.
+BRIDGE_TICKERS = ("RELIANCE.NS", "INFY.NS")
 
 
 def _rel_close(a, b, tol):
@@ -60,6 +81,39 @@ def _bridge_by_year(yf_bridge: pd.DataFrame):
         except Exception:
             continue
     return out
+
+
+def _statement_currency_skip_reason(symbol: str, info: dict):
+    """Why a bfinance-vs-yahoo statement comparison is meaningless, or ``None`` if it is not.
+
+    Yahoo's ``currency`` is the currency the *quote* trades in and is INR for every NSE symbol,
+    so it cannot be the gate: INFY.NS measured ``currency="INR"`` with
+    ``financialCurrency="USD"``. Only ``financialCurrency`` says what the statement tables are
+    denominated in, and bfinance's statements are absolute rupees, so the two numbers are only
+    comparable when that key reads INR.
+
+    A missing key is *not* treated as INR. Guessing the currency is what turns the ~83x
+    exchange-rate gap into an apparent data bug, so unknown is skipped and said out loud.
+    """
+    currency = info.get("financialCurrency")
+    if currency is None or not str(currency).strip():
+        return (
+            f"yahoo reports no financialCurrency for {symbol}; its statement currency is "
+            f"unknown, so comparing it against bfinance's absolute INR is unverified"
+        )
+    if str(currency).strip().upper() != STATEMENT_CURRENCY:
+        return (
+            f"yahoo reports {symbol} statements in {currency} "
+            f"(financialCurrency={currency!r}); comparing against absolute INR is meaningless"
+        )
+    return None
+
+
+def _require_statement_currency(symbol: str, info: dict) -> None:
+    """Skip the calling test unless Yahoo reports this company's statements in INR."""
+    reason = _statement_currency_skip_reason(symbol, info)
+    if reason is not None:
+        pytest.skip(reason)
 
 
 @pytest.mark.live
@@ -196,15 +250,28 @@ def test_income_operating_profit_reconcile():
 
 
 @pytest.mark.live
-def test_to_yfinance_bridge_income_anchors():
+@pytest.mark.parametrize("ticker", BRIDGE_TICKERS)
+def test_to_yfinance_bridge_income_anchors(ticker):
+    """The one place a bfinance amount is compared to a yfinance amount.
+
+    INFY.NS is here so its exclusion stays *observable*: Yahoo reports its statements in USD,
+    so the test skips naming that currency instead of the ticker being absent from the file.
+    RELIANCE.NS runs the value assertion exactly as it did before the gate existed.
+    """
     from bfinance.ticker import Ticker
 
-    bt = Ticker(TICKER)
+    # Gate first, on the same Ticker the statement is read from, so the currency checked is the
+    # one that produced the numbers. ``currency`` would pass for INFY.NS; ``financialCurrency``
+    # is what actually denominates a statement table.
+    yt = yf.Ticker(ticker)
+    _require_statement_currency(ticker, yt.info)
+
+    bt = Ticker(ticker)
     prof = bt._ensure_profile()
     bridge = prof.profit_loss.to_yfinance()
     assert isinstance(bridge.columns, pd.DatetimeIndex)
     by = _bridge_by_year(bridge)
-    ydf = yf.Ticker(TICKER).income_stmt
+    ydf = yt.income_stmt
     assert isinstance(ydf.columns, pd.DatetimeIndex)
     for anchor in ("Total Revenue", "Pretax Income"):
         assert anchor in bridge.index, f"missing bridge row {anchor}"

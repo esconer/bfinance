@@ -49,6 +49,8 @@ __all__ = [
     "ATTR_BASIS_REQUESTED",
     "ATTR_DROPPED_ROWS",
     "ATTR_DUPLICATE_ROWS",
+    "ATTR_EXCLUDED_ROW_CENSUS",
+    "ATTR_EXCLUDED_ROWS",
     "ATTR_FALLBACK",
     "ATTR_FALLBACK_FROM",
     "ATTR_FREQUENCY",
@@ -135,6 +137,19 @@ ATTR_SKIP_REASONS = "bfinance_statements_skip_reasons"
 ATTR_DUPLICATE_ROWS = "bfinance_statements_duplicate_rows"
 ATTR_DROPPED_ROWS = "bfinance_statements_dropped_rows"
 ATTR_OMITTED_ROWS = "bfinance_statements_omitted_numeric_rows"
+#: Every row id the vendor published for this frequency that this result does **not** carry,
+#: named. Distinct from :data:`ATTR_DROPPED_ROWS`, which means "matched this statement and had no
+#: number in any cell": a dropped row is a row that was looked for and found empty, while an
+#: excluded row is one the provider decided belongs to some other statement — or to a category
+#: :class:`StatementKind` deliberately has no member for. Without this the two collapse into a
+#: count and a caller cannot tell "the vendor published no balance sheet" from "we decided this row
+#: was not a balance-sheet row", which are opposites.
+ATTR_EXCLUDED_ROWS = "bfinance_statements_excluded_rows"
+#: :data:`ATTR_EXCLUDED_ROWS` counted per ``cat1`` value, so the exclusion is auditable by
+#: *reason* rather than only in bulk. trendlyne is the source: its JSON dump serves all four
+#: categories in one response and :class:`StatementKind` models three, so the ratios bucket is
+#: excluded from every statement by name.
+ATTR_EXCLUDED_ROW_CENSUS = "bfinance_statements_excluded_row_census"
 ATTR_UNITS_NOTE = "bfinance_statements_units_note"
 
 #: Every key this package writes. Asserted to be the complete set by
@@ -160,6 +175,8 @@ ATTR_KEYS: Tuple[str, ...] = (
     ATTR_DUPLICATE_ROWS,
     ATTR_DROPPED_ROWS,
     ATTR_OMITTED_ROWS,
+    ATTR_EXCLUDED_ROWS,
+    ATTR_EXCLUDED_ROW_CENSUS,
     ATTR_UNITS_NOTE,
 )
 
@@ -223,6 +240,18 @@ class StatementResult:
     rows: Mapping[str, Tuple[Optional[float], ...]]
     row_ids: Mapping[str, str] = field(default_factory=dict)
     row_labels: Mapping[str, str] = field(default_factory=dict)
+    #: The **vendor's own unit string** per row, verbatim, or ``""`` when the route that produced
+    #: this result carries no unit metadata. This is a third parallel map for the same reason the
+    #: first two exist: the row key, what a human reads, and what the number is denominated in are
+    #: three different facts and collapsing them is how a percentage becomes ``350000000.0``.
+    #:
+    #: Measured on trendlyne's ``get-fundamental_results-v2`` payload (NTPC, 347
+    #: ``parameterMetadata`` keys, 2026-10-09), the vocabulary is five strings: ``"Cr"`` (201 keys),
+    #: ``"%"`` (55), ``"Rs"`` (25, per-share), ``"abs"`` (15, ratios and counts) and ``""`` (6: five
+    #: document-link rows plus ``PBV_A``, which is a price-to-book **ratio**). Only the first
+    #: denominates money. See :func:`bfinance.statements.yfinance_bridge.result_to_yfinance_frame`
+    #: for the one rule that reads this, and why it is the positive one.
+    row_units: Mapping[str, str] = field(default_factory=dict)
     identified_by: str = ""
     identify_note: Optional[str] = None
     #: Every provider the registry lists for this (kind, frequency), in order — the basis on which
@@ -236,6 +265,15 @@ class StatementResult:
     duplicate_rows: int = 0
     dropped_rows: Tuple[str, ...] = ()
     omitted_rows: int = 0
+    #: Row ids present in the payload at this frequency that this result does not carry, because
+    #: the provider placed them in another statement or in a category :class:`StatementKind` has no
+    #: member for. Empty for a provider with one statement per payload — the HTML page really does
+    #: carry one table's rows and no others — and populated for trendlyne's JSON dump, which serves
+    #: income, balance sheet, cash flow and ratios out of one response.
+    excluded_rows: tuple[str, ...] = ()
+    #: :attr:`excluded_rows` counted per reason, so a ratio exclusion is distinguishable from an
+    #: uncategorised one.
+    excluded_row_census: Mapping[str, int] = field(default_factory=dict)
     units_note: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -381,6 +419,8 @@ class StatementResult:
             ATTR_DUPLICATE_ROWS: int(self.duplicate_rows),
             ATTR_DROPPED_ROWS: tuple(self.dropped_rows),
             ATTR_OMITTED_ROWS: int(self.omitted_rows),
+            ATTR_EXCLUDED_ROWS: tuple(self.excluded_rows),
+            ATTR_EXCLUDED_ROW_CENSUS: dict(self.excluded_row_census),
             ATTR_UNITS_NOTE: self.units_note,
         }
         unknown = set(payload) - set(ATTR_KEYS)

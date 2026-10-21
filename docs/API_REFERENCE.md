@@ -96,8 +96,10 @@ bf.Ticker(
     cache_ttl_hours: float = 24.0,
     timeout: float = 15.0,
     proxy: Optional[str] = None,
-    raise_errors: bool = False,
     session: Optional[Any] = None,
+    raise_errors: bool = False,
+    statement_fallback: bool = False,
+    trendlyne_sections: bool = False,
 )
 ```
 
@@ -106,7 +108,10 @@ bf.Ticker(
 * **`cache_ttl_hours`** (*float*): Local SQLite cache time-to-live in hours. Set to `0.0` to force live network requests. Default is `24.0`.
 * **`timeout`** (*float*): Maximum network request timeout in seconds. Default is `15.0`.
 * **`proxy`** (*str, optional*): Proxy connection URL.
+* **`session`** (*Any, optional*): Caller-supplied HTTP session. It precedes `raise_errors` in the real signature; it is documented here rather than omitted because a positional call that assumes the old order passes the wrong object to the wrong parameter.
 * **`raise_errors`** (*bool*): If `False` (default), invalid tickers or missing data log warnings and return safe empty DataFrames/dictionaries. If `True`, raises `TickerNotFoundError` or `UpstreamServiceError`.
+* **`statement_fallback`** (*bool*): **Default `False`, and off by default on purpose.** Set `True` to let the statement accessors below fall back to a second vendor (today: trendlyne.com) when Screener.in carries **no statement at all**. `bf.Ticker("NTPC")` without it opens no second-vendor socket. Appended last so every existing call site and the yfinance-compat shim in `tickers.py` are unaffected. Named for what it does rather than for the vendor that happens to serve it: a third vendor would need no change here, where `trendlyne_fallback` would already be a lie. See section 2.3.1 for what the fallback frame does and does not promise.
+* **`trendlyne_sections`** (*bool*): **Default `False`, and off by default on purpose.** Set `True` to enable the seven `trendlyne_*` members and the derived `analyst_price_targets`. **Appended last**, after `statement_fallback`; neither flag is forwarded by the other and the statement fallback keeps its own. A default `Ticker(...)` makes **zero** second-vendor requests, and `bfinance.trendlyne` stays out of `sys.modules` after one. See section 2.3.2.
 
 ---
 
@@ -219,15 +224,18 @@ accessors below.** They return `FinancialStatement.to_yfinance()` -- the yfinanc
 * **There is no `'TTM'` column.** A trailing-twelve-months total is not a fiscal period and has no
   month-end date, so it is dropped **by name**; the dropped headers are published on the frame as
   `df.attrs['bfinance_dropped_period_columns']`. The TTM values are not lost, just not here.
-* **Values are absolute rupees, not Rs Crore -- but only on the monetary rows.** screener.in
-  states a row's unit in its label, so the `1e7` crore-to-rupee conversion is applied only to rows
-  that really are amounts. Percentages (`OPM %`, `Tax Rate`, `Dividend Payout %`, `ROCE %`),
-  per-share quantities (`Diluted EPS`) and ratio / days / count rows (`CFO/OP`, `Debtor Days`,
-  `No. of Shareholders`) pass through **unscaled**. So `income_stmt.loc["OPM %"]` is `35.0`, not
-  `350000000.0`.
+* **Values are absolute rupees, not Rs Crore -- but only on the monetary rows, and the rule that
+  picks them is per vendor.** screener.in states a row's unit in its label, so the `1e7`
+  crore-to-rupee conversion is applied only to rows that really are amounts. Percentages
+  (`OPM %`, `Tax Rate`, `Dividend Payout %`, `ROCE %`), per-share quantities (`Diluted EPS`) and
+  ratio / days / count rows (`CFO/OP`, `Debtor Days`, `No. of Shareholders`) pass through
+  **unscaled**. So `income_stmt.loc["OPM %"]` is `35.0`, not `350000000.0`. The second vendor in
+  2.3.1 states its unit **per row** instead, and its labels carry no unit marker at all, so its
+  rule is the positive one: **only a row the vendor marks `Cr` is scaled.**
 * **Row labels are yfinance's generic names**: `Sales` -> `Total Revenue`, `Net Profit` ->
   `Net Income`, `Expenses` -> `Total Expenses`, `Operating Profit` -> `Operating Income`. Rows with
-  no mapping keep their Indian label.
+  no mapping keep their Indian label. **This is a screener.in-only guarantee** -- on the fallback
+  path the index carries the second vendor's own strings. See 2.3.1.
 
 **The native shape was not removed.** `FinancialStatement.to_dataframe()` is unchanged and still
 returns the string headers, the Indian labels, Rs Crore and the `TTM` column. It is reached
@@ -251,6 +259,238 @@ through the profile rather than through these accessors: `Ticker._ensure_profile
   Flow.~~ **Raises `NotImplementedError`**, annual only, for the same reason. The raise is in
   `get_cash_flow(freq="quarterly")` rather than in either property body. **A caller gets an
   exception, not a frame.**
+
+---
+
+#### 2.3.1 The opt-in second-vendor fallback (`statement_fallback=True`)
+
+```python
+bf.Ticker("NTPC", statement_fallback=True).financials
+```
+
+With `statement_fallback=True`, the three statement accessors fall back to a second vendor
+(trendlyne.com) when -- **and only when** -- the primary source (Screener.in) carries **no
+statement at all**. What it changes, and what it does not:
+
+* **Off by default.** `bf.Ticker("NTPC")` opens no second-vendor socket; the default path is
+  unchanged by construction. `bf.Tickers([...], statement_fallback=True)` forwards it to every
+  `Ticker` the collection builds.
+* **It covers** `get_income_stmt`, `get_balance_sheet`, `get_cash_flow` (and the `get_cashflow`
+  alias) and every property delegating to them -- `financials`, `income_stmt`, `balance_sheet`,
+  `cashflow`, `cash_flow`, `quarterly_financials`, `quarterly_income_stmt`. A populated primary
+  statement is returned whole and the second vendor is never asked.
+* **It never blends.** One vendor's statement whole, or the other's whole: no row-level merge and
+  no back-filling a missing period from the other vendor. A frame half from each would be
+  indistinguishable from either, and the two disagree about basis.
+* **Quarterly income becomes reachable here.** `get_income_stmt(freq="quarterly")` normally raises
+  `NotImplementedError` when the primary source carries no quarters; the fallback is attempted
+  *before* that raise, and 13 quarters come back instead. `quarterly_balance_sheet` and
+  `quarterly_cashflow` still raise -- neither vendor publishes them.
+* **It degrades rather than raises by default.** A failed or empty fallback returns an empty frame
+  with the reason on `ticker.data_warnings`; `raise_errors=True` re-raises instead.
+
+**The row vocabulary is the vendor's, not yfinance's.** This is a real behavioural difference from
+the primary path, so read `df.attrs["bfinance_statements_provider"]` before you index a label:
+
+| row | primary (Screener.in) | fallback (trendlyne.com) |
+| :--- | :--- | :--- |
+| income, revenue | `Total Revenue` | `Total Rev. Ann.` |
+| income, operating margin | `OPM %` | `OPM Ann. %` |
+| income, diluted EPS | `Diluted EPS` | `Diluted EPS Ann.` |
+| balance sheet, total assets | `Total Assets` | `Total Assets Ann.` |
+
+The two are **not** mapped onto each other. `INDIAN_TO_YFINANCE_LABELS` is a measured
+Screener.in -> yfinance map, no trendlyne -> yfinance map has ever been measured, and the repo
+refuses to invent one: a rename asserted from memory would put one vendor's number into another's
+vocabulary with nothing behind it. The fallback index is at least human-readable rather than keyed
+by machine ids (`SR_A`), and `attrs` names whose words they are.
+
+**Each frame carries only its own statement's rows**, partitioned on the vendor's own category
+label (`cat1`) rather than on a guess, so the three annual frames are disjoint row sets -- a
+balance sheet does not answer with a revenue row. Two categories are deliberately **absent**
+rather than folded into a neighbour: the `Financial Ratios` rows, because there is no ratios
+statement to put them in (and they are excluded as a *category*, not by shape -- several of them
+are money the vendor marks `Cr`), and the ids the vendor states no category for, which are
+excluded from all three rather than assigned to a plausible neighbour. The counts behind that
+decision are published per frame on `df.attrs["bfinance_statements_units_note"]`, alongside the
+unit census; read it rather than assuming a row count.
+
+**Scaling on this path is decided by the vendor's per-row unit, never by the label.** A row is
+multiplied by `1e7` **only** when the vendor marks it `Cr`; `%` rows, per-share `Rs` rows, `abs`
+ratios and counts, and every row whose unit the vendor did not state are left alone. That last case
+is load-bearing: the payload carries a price-to-book **ratio** with no unit at all, which a "scale
+unless told otherwise" rule would multiply by ten million. Measured on the committed NTPC capture:
+`Total Rev. Ann.` is `1897985600000.0` for a reported `189,798.56` Cr, while `OPM Ann. %` is `29.13`
+and `Diluted EPS Ann.` is `30.44`, both unscaled. The rows that were *not* scaled are named on the
+frame, so the decision is auditable rather than inferred from a magnitude that looks wrong:
+`df.attrs["bfinance_statements_unscaled_rows"]`.
+
+**Provenance and basis ride on the frame**, so you never have to guess which vendor answered:
+
+* `bfinance_statements_provider` (`"trendlyne-json"`) -- which route served the frame.
+* `bfinance_statements_basis`, `bfinance_statements_basis_requested`,
+  `bfinance_statements_basis_mismatch`, `bfinance_statements_basis_note` -- the basis actually
+  served against the one requested. The fallback asks for `consolidated` because Screener.in is
+  consolidated-only on this route; the frame is never relabelled, converted or adjusted, so a
+  mismatch is a boolean you can check rather than a number that was quietly substituted.
+* `bfinance_statements_unscaled_rows` -- see above.
+* `bfinance_statements_providers_tried` / `…_skip_reasons` -- which providers this frame's
+  statement cascade actually asked, and why any of them did not answer. On this path **Screener.in
+  never appears in either**, because it is not consulted here at all: the fallback holds one
+  payload, so the cascade is restricted to the provider that reads it and its `fetch` refuses any
+  spec whose payload it does not carry. For the same reason `bfinance_statements_fallback` is
+  `False` and `…_fallback_from` is empty -- **inside that call there was no failover to record**,
+  since the primary source is not part of it. The primary source's absence is established by the
+  accessor's own branch condition (its table was empty), not by a vendor that was never asked.
+  (Before this was fixed, the fallback handed its JSON payload to *every* provider the cascade
+  offered, so Screener.in's HTML parser raised `KeyError: slice(None, 500, None)` and the frame
+  published that as a Screener.in outage -- a vendor failure fabricated by bfinance.)
+* `bfinance_provenance` (`"bfinance.statements"`), `bfinance_dropped_period_columns` and
+  `bfinance_merged_row_labels` -- the same two `to_yfinance()` attrs the primary path publishes, so
+  both shapes are read the same way.
+* The rest of the result's `attrs` (`bfinance_symbol`, `…_kind`, `…_frequency`, `…_periods`,
+  `…_payload`, `…_omitted_numeric_rows`, `…_duplicate_rows`, `…_dropped_rows`, `…_units_note`,
+  `…_identified_by`, `…_identify_note`) are present too; `bfinance.statements.model.ATTR_KEYS` is
+  the complete, declared set.
+
+**`pretty=True` raises `NotImplementedError` on these accessors**, on both the primary and the
+fallback path. yfinance's `pretty=True` applies `camel2title` to yfinance's *own* label vocabulary,
+and bfinance has no measured correspondence between that vocabulary and either upstream's labels,
+so honouring the flag would mean inventing a label map. The default `pretty=False` is unchanged and
+returns the labels the serving path already publishes.
+
+---
+
+#### 2.3.2 The opt-in trendlyne section layer (`trendlyne_sections=True`)
+
+```python
+bf.Ticker("TCS", trendlyne_sections=True).trendlyne_reports()
+```
+
+⚠ **This is a separate package with its own rules, not a fifth fallback.** `bfinance.trendlyne` is
+a **third-party analytics site**, not an exchange source: nothing in `bfinance` imports it,
+`import bfinance` does not put it in `sys.modules`, and it is not in the price cascade. The flag
+makes seven new members reachable and changes one existing property — it does **not** alter any
+existing behaviour, and every failure on these members degrades to an honest empty shape with the
+reason on `ticker.data_warnings` rather than raising.
+
+Each member costs **exactly one request**: the symbol resolves through the cached sitemap index and
+the section route is fetched once, with no stock-page fetch and no per-symbol token.
+
+| member | returns | route | one thing to know |
+|---|---|---|---|
+| `trendlyne_news(page=1)` | `List[{id, content{title, link, publisher, provider, time, pubDate, canonicalUrl}}]` | `/latest-news/` | **The same two-level shape `ticker.news` returns**, from a different vendor, so a caller who indexes those levels learns nothing new. `page>1` is `?page=N` |
+| `trendlyne_reports(page=1)` | `pd.DataFrame` | `/research-reports/stock/` | Vendor columns verbatim. **The first row is the vendor's aggregate "Consensus Share Price Target" row**, kept not filtered. One page of history, not all of it |
+| `trendlyne_shareholding()` | `pd.DataFrame` | `/equity/share-holding/…/latest/` | The **summary grid only** (categories down, quarters across), not the per-category holder tables — those are a second request, and a member that fetched both would be deciding what you wanted. Reach them as `TrendlyneClient.share_holding_holders`. Carries `attrs["bfinance_trendlyne_snapshot_only"] = True`: this route serves **only** `latest`; any other period is a measured HTTP 500, refused locally before a request is spent |
+| `trendlyne_deals()` | `pd.DataFrame` | `/equity/bulk-block-deals/` | The whole history the page serves, one request, no period axis. **Not** the insider-trading table, which shares a client but not a shape |
+| `trendlyne_buy_sell_zone()` | `Dict[str, pd.DataFrame]` → `{"standalone", "consolidated"}` | `/tools/buy-sell-zone/` | Keyed by the enclosing `div.tab-pane`, **not** by the headers: the two grids carry byte-identical header rows on the live page and their numbers differ, so a header-derived key would make a swap invisible. The page's summary stats ride on each frame's `attrs` |
+| `trendlyne_technicals()` | `pd.DataFrame` — `name, value, insight, color, parameter` | `/equity/api/stock/adv-technical-analysis/{id}/24/?format=json` | From the **robots-clean JSON sibling**, not the `/equity/technical-analysis-*` **page** — which `robots.txt` disallows and which stays unwired. The raw `parameters` mapping is on the client as `adv_technical_analysis` |
+| `trendlyne_swot()` | `Dict[str, pd.DataFrame]` — 5 tables | `/equity/swot-buy-or-sell/` | Five single-column frames whose header cell *is* the fact, each publishing it in `attrs["bfinance_trendlyne_swot_heading"]`. The fifth (`tag_others`) is the vendor's own extra tab, not a fourth quadrant |
+
+#### `ticker.analyst_price_targets` on this path
+
+`None` on a default `Ticker`. With the flag on, a real derivation: `low` / `high` / `mean` /
+`median` from trendlyne's research-report `Target` column, plus `n_reports` and
+`bfinance_analyst_source`. **`current` is always `None`** — the page's `LTP` is the price at each
+report's publication, not today's, and relabelling it would repeat the defect that got the pre-0.1.3
+synthesiser deleted. The vendor's own aggregate row is excluded, matched on a word in the `Author`
+column rather than on row position. Still `None` when the page carries no usable `Target`, with the
+reason on `data_warnings` and no retry. Full shape and rationale:
+`docs/YFINANCE_MIGRATION_GUIDE.md` section 3.E.
+
+#### The client, for everything these members do not reach
+
+```python
+from bfinance.trendlyne import TrendlyneClient
+
+client = TrendlyneClient()
+client.corporate_actions("TCS")      # {"bonus": df, "dividend": df, "other": df}
+client.share_holding_holders("TCS")  # List[pd.DataFrame], one per category in page order
+client.monthly_mf_holdings("TCS", period="Jun-2026")   # this route FILTERS by period
+client.board_meetings("TCS")         # forward-dated, page order, not re-sorted
+client.insider_trading("TCS")        # carries bfinance_trendlyne_insider_rows
+client.swot("TCS")
+client.adv_technical_analysis("TCS")          # raw body["parameters"]
+client.overview_second_part("TCS")           # raw body, incl. companyProfileData
+client.events("TCS")                # 5 frames: board_meeting / dividend / bonus / split / rights
+client.company_overview("TCS")       # directors + top executives
+client.price_performance("TCS")      # returnsComparison / returnsDeepDive / … 
+client.returns_comparison("TCS")     # the shaped view of one of those keys
+```
+
+Every method has an `_async` twin. **Three guards ship with this layer and all three are
+measurements, not preferences:**
+
+* **WAF** — HTTP 405 or an `x-amzn-waf-action` header is terminal and never retried (the budget is
+  spent, not momentarily exceeded). The ~130–150 requests/session figure in the message is a
+  **third-party** measurement, recorded as that, not a promise bfinance makes.
+* **Snapshot-only, on ONE route** — `/equity/share-holding/` answers 500 for every period but
+  `latest` (verified 2026-09-27 on MOTHERSON, re-verified 2026-10-10 on TCS), so a non-`latest`
+  period is refused locally at zero request cost. **`/equity/monthly-mutual-fund-share-holding/` is
+  the deliberate counter-example**: the same period segment returns 200 there and genuinely filters
+  (`Jun-2026` → 200 / 1,577,098 B, `2026` → 200 / 1,402,262 B on TCS, 2026-10-10), so it carries
+  **no** guard and validates the segment instead. A blanket guard would have broken the one route
+  where the segment means something.
+* **Row cap** — `/equity/insider-trading-sast/all/` was observed returning exactly 500 rows
+  server-side, which is indistinguishable from a complete history unless said out loud. Every frame
+  carries `attrs["bfinance_trendlyne_insider_rows"]`, and a note saying the frame is truncated is
+  added **only when the count equals the cap**. The converse is never asserted: a frame below the cap
+  is never called complete.
+
+#### `bfinance.market.technical.TechnicalIndicators` — local, network-free
+
+**Not gated by any flag and not trendlyne's**: a pure-pandas engine over a frame you already have,
+exported from `bfinance.market` (`bfinance.market.technical` is imported by `import bfinance`, which
+is why it is *not* part of the isolated-leaf story above). Every method returns **`None` / no value,
+never `0.0`**, on an insufficient window — a window with no data is not a reading of zero.
+
+| method | returns |
+|---|---|
+| `sma(frame, window=20)` / `ema(frame, span=20)` | `pd.Series` |
+| `rsi(frame, window=14)` | Wilder RSI `pd.Series` |
+| `macd(frame, fast=12, slow=26, signal=9)` | `{"macd", "signal", "histogram"}` |
+| `adx(frame, window=14)` / `atr(frame, window=14)` | `pd.Series` |
+| `bollinger(frame, window=20, n_std=2.0)` | `{"mid", "upper", "lower", "pct_b"}` — population sigma (`ddof=0`); `pct_b` is `NaN` on a zero-width band |
+| `pivots(frame)` | `{family: {level: value}}` over `PIVOT_FAMILIES = ('classic','woodie','camarilla','fibonacci')` and `PIVOT_LEVELS = ('pp','s1','s2','s3','r1','r2','r3')`, computed from the last bar |
+| `snapshot(frame)` | one dict over `SNAPSHOT_KEYS`: `close, sma_20, sma_50, sma_200, rsi_14, macd_hist, atr_14, adx_14, bollinger_pct_b, pivots` |
+
+#### `bfinance.trendlyne.smartoptions.SmartOptionsClient` — a second host, a second opt-in
+
+```python
+from bfinance.trendlyne.smartoptions import SmartOptionsClient
+
+result = SmartOptionsClient(allow_smart_options=True).option_chain("TCS", "2026-10-27")
+```
+
+**`allow_smart_options` defaults to `False`** and the call raises
+`TrendlyneSmartOptionsError` **before a socket opens**. This gate is **not** a robots gate and the
+distinction is stated rather than blurred: `smartoptions.trendlyne.com`'s own `robots.txt` (read
+2026-10-10) disallows only `*/my-alerts/*` and `*/strategy-builder/user/` under `User-agent: *`,
+`Crawl-delay: 1`, and the chain route matches neither. It is off because an operator recorded on
+2026-10-10 that SmartOptions ships as a **secondary** F&O source — a different host, a different
+contract, and a `smartoptions` provenance tag rather than a `trendlyne` one.
+
+⚠ **`expiry` must be ISO `YYYY-MM-DD`.** `27-Oct-2026` returns HTTP 500 (measured). `body.IV` is
+**`null` by design** and is never an error. `OptionChainResult` carries `chain` (a long frame, one
+row per `strike × side`, columns mapped from `tableHeaders[i].unique_name` — **never by index**),
+`summary` (`maxPain`, `atTheMoney`, `MWPL`, `pcr_oi`, `pcr_volume`), `expiry`,
+`contract_last_updated` and `attrs`.
+
+#### The full client surface
+
+`bfinance.trendlyne.client.ENDPOINTS` holds **19 keys** — read it rather than trusting this list.
+Each one has a `build_path` site and a public fetch method behind it, enforced in both directions by
+`tests/test_trendlyne_core.py::TestNoDeadScaffolding`. **One section call costs one request.**
+
+Off-limits and unwired, deliberately: `/equity/technical-analysis-*` (the page;
+`Disallow: */equity/technical-analysis-*` — its JSON sibling is *not* matched by that rule, which is
+why technicals ship at all), `/alerts/addStockAlert/` and `/alerts/modal/stockAlert/` (**writing**
+an alert remains off-limits; *reading* `/alerts/stock-alerts/` is a different, allowed route and
+does ship), and `/equity/consensus-estimates/json-data/{id}/` (**measured 404** — consensus targets
+are derived from the research-reports table instead of a guessed endpoint).
+`/fundamentals/financials/` is served by `bfinance.statements.fundamentals_fetch`, a deliberately
+separate client. Every row count in the section tables is **per-symbol**, not a route property.
+Measurements: `docs/UPSTREAM_SOURCES.md` §4.
 
 ---
 
@@ -410,6 +650,9 @@ group = bf.Tickers(["RELIANCE", "TCS", "INFY"])
 ```
 * **`group.tickers`**: Dictionary of individual `Ticker` instances (`group['TCS']`).
 * **`group.history(period="1mo")`**: Fetches combined historical prices in a single call.
+* **`statement_fallback`** (*bool*): Forwarded to every `Ticker` the collection builds, with the
+  same meaning as on `Ticker` (section 2.3.1). Default `False`, so a collection opens no
+  second-vendor socket unless asked.
 
 ---
 

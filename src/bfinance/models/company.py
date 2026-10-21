@@ -93,6 +93,21 @@ class CompanyProfile(BaseModel):
     annual_reports: List[Dict[str, str]] = Field(default_factory=list)
     credit_ratings: List[Dict[str, str]] = Field(default_factory=list)
     announcements: List[Dict[str, str]] = Field(default_factory=list)
+    # Provenance of this payload, in the same vocabulary every screener frame publishes under
+    # ``attrs["bfinance_cache_status"]``: "hit" when ``get_company_profile`` served this object
+    # from the cache, "miss" when the call that produced it fetched the page. None means nobody
+    # measured -- a parser, a stub, a hand-built profile.
+    #
+    # ``exclude=True`` is load-bearing, not cosmetic. ``get_company_profile`` caches
+    # ``profile.model_dump()`` and ``SQLiteCache.set`` stores ``json.dumps`` of exactly that dict,
+    # so a field that appeared in the dump would silently change the shape of every profile row
+    # written from now on -- a cache-format change smuggled in beside a status field, and one
+    # that would leave this status sitting inside the payload it describes. Excluded, the value
+    # travels with the object and not with its serialised form: a stored row still validates
+    # (the field defaults to None) and the client stamps the real lookup result over it.
+    cache_status: Optional[str] = Field(
+        None, exclude=True, description="'hit' when served from cache, 'miss' when fetched"
+    )
 
     def peers_dataframe(self) -> pd.DataFrame:
         """Return peers table as a pandas DataFrame."""

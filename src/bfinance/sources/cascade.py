@@ -22,11 +22,15 @@ off the provider rather than copied from the request. A hop that changes basis i
 price series contains a move that never happened. See :mod:`bfinance.sources.series` for the
 container that makes the seam visible instead of dissolving it.
 
-**It never calls a source that cannot serve the requested basis.** Not "calls it and checks the
-answer" — does not call it. A source that publishes only split-adjusted prices costs a request to
-tell a caller that it cannot serve an as-traded request, and for a rate-limited vendor that
-request is the expensive one. The skip is recorded with its reason, so "why is my data from that
-vendor" is answerable without reading the registry.
+**It never calls a source that cannot serve the request.** Not "calls it and checks the
+answer" — does not call it. Two things make a source ineligible: a **basis** it does not publish,
+and a **column** it does not publish. The second rule exists because a basis match is not enough —
+MarketLens is as-traded and publishes Close and Volume with no Open/High/Low, and its close-only
+frame is a perfectly good *answer* as far as :func:`is_empty_payload` is concerned, so without it
+an OHLC request would be satisfied by a frame holding none of the bars it asked for. Both rules
+cost the same thing to get wrong: a source is skipped without a request, and a source that costs
+one request per trading day over a year is the expensive one. The skip is recorded with its reason,
+so "why is my data from that vendor" is answerable without reading the registry.
 
 **It never answers with nothing.** An unavailability is
 :class:`~bfinance.sources.errors.SourceUnavailableError` naming the capability and every
@@ -73,6 +77,7 @@ from .model import (
     FAILED,
     SERVED,
     SKIPPED_BASIS,
+    SKIPPED_COLUMNS,
     SKIPPED_HEALTH,
     Attempt,
     Basis,
@@ -226,6 +231,7 @@ def plan(
     only: Optional[Sequence[str]] = None,
     disable: Sequence[str] = (),
     max_ms: Optional[float] = None,
+    requires: Optional[Sequence[str]] = None,
 ) -> Plan:
     """Work out the try-order and every exclusion, **without calling anything**.
 
@@ -234,6 +240,15 @@ def plan(
     before committing to a call — to check whether a capability has any redundancy, or to see that
     an as-traded request is being routed away from the split-adjusted source. It is the same
     computation :func:`resolve` performs, minus the calls, so the two cannot disagree.
+
+    Args:
+        requires: The columns the request needs, or ``None`` (the default) for "no column
+            requirement, which is every request that existed before this keyword". When set, a row
+            whose :attr:`~bfinance.sources.registry.SourceSpec.provides` does not cover every
+            column is **skipped, not called** — the same rule, and the same "records the reason and
+            costs no request" invariant, as a basis mismatch. The two rules are applied in that
+            order, so a row on the wrong basis is reported as being on the wrong basis whatever it
+            also lacks.
     """
     reg = DEFAULT if registry is None else registry
     led = default_ledger() if health is None else health
@@ -251,6 +266,17 @@ def plan(
                 f"{list(reg.names_for(capability))}.\n\n{reg.capability_report()}"
             )
         specs = tuple(spec for spec in specs if spec.name in wanted)
+        # ``only`` is a try-ORDER, not a filter. Two docstrings already promised this -- the one on
+        # :func:`~bfinance.market.ohlcv.OHLCVEngine.fetch_history` ("providers are tried in the
+        # order given and the first one that answers wins") and the one on
+        # :func:`bfinance.market.ohlcv.resolve_price_source_names` ("the merged order is the
+        # try-order") -- and the comprehension above filtered in *registry* order instead, so a
+        # caller naming `sources=["marketlens-close", "nse-bhavcopy"]` silently got the bhavcopy
+        # first, at 530s where it asked for 2.5s. Ordering by the caller's list here is what makes
+        # the parameter mean what it is named, and it is the only place the order is decided: a
+        # caller that names nothing still gets the registry's cold-start order, untouched.
+        rank = {name: index for index, name in enumerate(only)}
+        specs = tuple(sorted(specs, key=lambda spec: rank[spec.name]))
     disabled = set(disable)
     for spec in specs:
         if spec.name in disabled:
@@ -260,6 +286,7 @@ def plan(
     led.register(eligible)
 
     ordered = led.order(eligible)
+    wanted_columns = tuple(requires or ())
     attempts: List[Attempt] = []
     for spec in ordered:
         if not spec.serves(requested):
@@ -271,6 +298,22 @@ def plan(
                     reason=(
                         f"publishes only the {published} basis, and the {requested.value} basis was "
                         f"requested. {spec.note}"
+                    ),
+                    basis=requested,
+                )
+            )
+        elif wanted_columns and (missing := spec.missing_columns(wanted_columns)):
+            published_columns = ", ".join(spec.provides)
+            attempts.append(
+                Attempt(
+                    provider=spec.name,
+                    outcome=SKIPPED_COLUMNS,
+                    reason=(
+                        f"publishes only the {published_columns} column(s) and the request needs "
+                        f"{', '.join(missing)} as well, so it is not asked at all rather than "
+                        f"answered with a frame that has none of them: a close-only frame is a "
+                        f"non-empty answer, so accepting one here would silently cost the caller "
+                        f"the columns they named."
                     ),
                     basis=requested,
                 )
@@ -334,6 +377,7 @@ def resolve(
     only: Optional[Sequence[str]] = None,
     disable: Sequence[str] = (),
     max_ms: Optional[float] = None,
+    requires: Optional[Sequence[str]] = None,
 ) -> Resolved:
     """Resolve one capability, trying providers in order and falling through on failure.
 
@@ -353,11 +397,21 @@ def resolve(
         fetch: Called once per **eligible** provider with ``(spec, request)``. It may raise; a
             raise is a fall-through. Supplying it bypasses module loading entirely, which is how
             the suite drives this offline.
-        only: Restrict to these source names, in the registry's order.
+        only: Source names to try, **in the order given**. An unknown name is a
+            :class:`~bfinance.sources.errors.SourceCapabilityError`. Omit it to take the registry's
+            own cold-start order, which is what a caller who names nothing means.
         disable: Source names to pass over for this call, recorded as skipped.
         max_ms: A **per-source** ceiling. A source whose last observed call exceeded it is not
             called at all, which is how an ordered cascade avoids serialising everything behind a
             known-slow source. A source never observed is still asked — unknown is not slow.
+        requires: The columns the request needs, or ``None`` (the default) to express none — which
+            is byte-for-byte the behaviour of the call before this keyword existed. When set, a
+            source that does not publish every one of them is **never called**: it is skipped with
+            :data:`~bfinance.sources.model.SKIPPED_COLUMNS` and a reason naming the columns it
+            lacks, exactly the way a basis mismatch is skipped. This is the rule that makes a
+            close-only request safe: MarketLens publishes Close and Volume and no Open/High/Low,
+            and its close-only frame is a *non-empty* answer, so without it a request that needs
+            bars would be satisfied by a frame that has none of them.
 
     Returns:
         A :class:`~bfinance.sources.model.Resolved` from the first provider that answered, with
@@ -392,6 +446,7 @@ def resolve(
         only=only,
         disable=disable,
         max_ms=max_ms,
+        requires=requires,
     )
     if not planned.ordered:
         raise SourceBasisError(
@@ -415,15 +470,44 @@ def resolve(
         # the fix is to ask for a basis somebody publishes. Reporting it as an upstream failure
         # would tell a caller to retry a request that can never succeed, and would also make the
         # health ledger record four failures for sources that were never asked.
+        #
+        # Two reasons a source is passed over, and the sentence has to say which one applies or it
+        # lies. The basis-only case keeps the wording it has always had, character for character,
+        # because that is the refusal every existing caller and test reads. When the request also
+        # named columns, the headline names both, because "no source publishes the as_traded basis"
+        # is simply false when the rows were skipped for not publishing Close.
+        column_skipped = [a for a in skips.values() if a.outcome == SKIPPED_COLUMNS]
+        if column_skipped:
+            wanted_columns = ", ".join(requires or ())
+            headline = (
+                f"no source registered for {capability!r} can serve this request. "
+                f"{len(skips)} of the {len(planned.ordered)} eligible source(s) were passed over "
+                f"without being asked, and it cannot be served by any of them -- on the "
+                f"{planned.basis.value} basis, or with the column(s) it needs ({wanted_columns}), "
+                f"or both:\n"
+            )
+            remedy = (
+                "\n\nThe remedy is to relax the request, not to retry: what a vendor publishes is a "
+                "property of the vendor, not of whether it is up today.\n\n"
+            )
+        else:
+            headline = (
+                f"no source registered for {capability!r} publishes the {planned.basis.value} "
+                f"basis. {len(skips)} of the {len(planned.ordered)} eligible source(s) were "
+                f"passed over without being asked, and the request cannot be served by any of "
+                f"them:\n"
+            )
+            remedy = (
+                f"\n\nThe remedy is to relax the request, not to retry: a basis is a property of "
+                f"what a vendor publishes, not of whether it is up today.\n\n"
+            )
         raise SourceBasisError(
-            f"no source registered for {capability!r} publishes the {planned.basis.value} basis. "
-            f"{len(skips)} of the {len(planned.ordered)} eligible source(s) were passed over "
-            f"without being asked, and the request cannot be served by any of them:\n"
+            headline
             + "\n".join(
                 f"  {attempt.provider}: {attempt.reason}" for attempt in skips.values()
             )
-            + f"\n\nThe remedy is to relax the request, not to retry: a basis is a property of "
-            f"what a vendor publishes, not of whether it is up today.\n\n{reg.capability_report()}"
+            + remedy
+            + f"{reg.capability_report()}"
         )
     for spec in planned.ordered:
         preskip = skips.get(spec.name)

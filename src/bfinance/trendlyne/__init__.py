@@ -26,17 +26,42 @@ What is here
   exact market-cap weights. The module docstring records why the market-cap **unit** is not
   asserted, and what was measured instead.
 - :mod:`~bfinance.trendlyne.tables` — server-rendered table extraction classified by **header
-  signature**, not by heading text. Usable against any saved page, and currently the only way to
-  reach the section tables: no route in this package fetches one yet.
+  signature**, not by heading text, plus the structural extractors for the pages whose tables share a
+  header row or carry rotating month labels. Usable against any saved page, and the parser behind the
+  client's section methods below.
+- :mod:`~bfinance.trendlyne.smartoptions` — the option-chain client for the separate host
+  **smartoptions.trendlyne.com**, reached over a separate connection with its own crawl-delay.
+  Off by default behind ``allow_smart_options``; see below.
 - :mod:`~bfinance.trendlyne.errors` — the typed failures. Every one is a
   :class:`~bfinance.trendlyne.errors.TrendlyneError`, and also a member of the closest shared
   ``BFinanceError`` hierarchy, so ``except UpstreamServiceError`` still catches them.
 
-**That is the whole package.** There is no ``ownership``, ``deals`` or ``corporate`` module: the
-remaining section tables trendlyne serves are written up in ``docs/UPSTREAM_SOURCES.md`` and not
-yet extracted, and nothing in this package refers to code that does not exist. A caller who wants
-one today composes :meth:`~bfinance.trendlyne.client.TrendlyneClient.fetch_text` with
-:func:`~bfinance.trendlyne.tables.find_table` directly.
+There is no ``ownership``, ``deals`` or ``corporate`` module: nothing in this package refers to code
+that does not exist. The section routes trendlyne serves that are **not** wired are written up in
+``docs/UPSTREAM_SOURCES.md`` — the consensus/forecaster page and ``/equity/delivery-analysis/`` are
+client-rendered with no clean JSON sibling on the day this was measured (2026-10-10), and the per-holder
+``/equity/holding-overtime/`` routes have not been measured yet. Everything measured and clean — corporate
+actions, bulk/block deals, shareholding, board meetings, research reports, latest news, stock alerts,
+insider/SAST, monthly MF holdings, the buy/sell zone and the SWOT fact tables — is fetchable through
+:mod:`~bfinance.trendlyne.client` and parseable through :func:`~bfinance.trendlyne.tables.find_table`.
+A caller who wants a page no method covers yet composes
+:meth:`~bfinance.trendlyne.client.TrendlyneClient.fetch_text` with that parser directly.
+
+SmartOptions: a second host, behind a second opt-in
+---------------------------------------------------
+``smartoptions.trendlyne.com`` serves the option chain for one symbol at one expiry — strike-wise
+OI, IV, delta/gamma/vega/rho/theta, max pain, ATM and MWPL — as public JSON with no login.
+:meth:`~bfinance.trendlyne.smartoptions.SmartOptionsClient.option_chain` reads it, and is **off by
+default**: pass ``allow_smart_options=True`` or the call raises
+:class:`~bfinance.trendlyne.errors.TrendlyneSmartOptionsError` before a socket is opened.
+
+That gate is **not** a robots gate, and the distinction is worth stating rather than blurring. The
+host's own ``robots.txt`` (read 2026-10-10) disallows only ``*/my-alerts/*`` and
+``*/strategy-builder/user/`` under ``User-agent: *``, with ``Crawl-delay: 1`` — and the chain route
+matches neither rule. It is off because an operator recorded on 2026-10-10 that SmartOptions ships
+as a **secondary** F&O source: a different host, a different contract, and a provenance tag of
+``"smartoptions"`` rather than ``"trendlyne"``. Both opt-ins here are cheap, explicit and
+reversible; a caller who wants the chain asks for it by name.
 
 One route is opt-in, and off
 ---------------------------
@@ -128,10 +153,12 @@ from .errors import (
     TrendlyneRobotsDisallowedError,
     TrendlyneSchemaError,
     TrendlyneServerError,
+    TrendlyneSmartOptionsError,
     TrendlyneSymbolNotFoundError,
     TrendlyneTableNotFoundError,
     TrendlyneTokenError,
     TrendlyneTransportError,
+    TrendlyneWafChallengeError,
 )
 from .sectors import (
     AGGREGATE_SIG,
@@ -162,6 +189,14 @@ from .tables import (
     normalize_header,
     page_signatures,
     register_signature,
+)
+from .smartoptions import (
+    OPTION_CHAIN_PATH,
+    SMART_OPTIONS_FLAG,
+    OptionChainResult,
+    SmartOptionsClient,
+    parse_option_chain,
+    validate_expiry,
 )
 
 __all__ = [
@@ -233,6 +268,13 @@ __all__ = [
     "parse_taxonomy",
     "sparkline_points",
     "taxonomy_counts",
+    # smartoptions
+    "OPTION_CHAIN_PATH",
+    "SMART_OPTIONS_FLAG",
+    "OptionChainResult",
+    "SmartOptionsClient",
+    "parse_option_chain",
+    "validate_expiry",
     # errors
     "TrendlyneError",
     "TrendlyneHTTPError",
@@ -242,9 +284,11 @@ __all__ = [
     "TrendlyneRateLimitedError",
     "TrendlyneRobotsDisallowedError",
     "TrendlyneServerError",
+    "TrendlyneSmartOptionsError",
     "TrendlyneTransportError",
     "TrendlyneSymbolNotFoundError",
     "TrendlyneTokenError",
     "TrendlyneSchemaError",
     "TrendlyneTableNotFoundError",
+    "TrendlyneWafChallengeError",
 ]

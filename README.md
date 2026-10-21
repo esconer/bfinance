@@ -74,6 +74,10 @@ print(ticker.balance_sheet)      # 10+ Years Annual Balance Sheet
 print(ticker.cashflow)           # 10+ Years Cash Flow Statement
 print(ticker.quarterly_income_stmt) # 12+ Quarters Results
 
+# Opt-in: where Screener.in has no statement at all, fall back to Trendlyne (own row
+# labels; provider + basis on df.attrs — see docs/API_REFERENCE.md §2.3.1)
+fb = yf.Ticker("RELIANCE", statement_fallback=True).financials
+
 # 4. Multi-ticker downloading (yf.download equivalent)
 data = yf.download(["TCS", "INFY", "HDFCBANK"], period="5d")
 ```
@@ -200,6 +204,70 @@ stock = bf.Ticker("RELIANCE")
 stock.to_excel("Reliance_10Y_Financial_Model.xlsx")
 ```
 *Generates sheets: `Overview`, `Profit & Loss`, `Quarters`, `Balance Sheet`, `Cash Flow`, `Shareholding`, `Ratios History`, and `Peers`.*
+
+---
+
+### 7. Opt-in Trendlyne Sections (broker reports, shareholding, deals, F&O chains)
+
+`bfinance.trendlyne` is a **separate, isolated third-party package** — nothing else in bfinance
+imports it, and `import bfinance` never pulls it in. It reaches data no Indian exchange or official
+source publishes free: broker research targets, share-holding patterns, bulk/block deals, insider
+trades, board meetings, SWOT, vendor technical signals, and option chains. **It is off by default
+and must be asked for by name.**
+
+```python
+import bfinance as bf
+
+# One flag on the constructor. Off by default; no existing property changes behaviour.
+t = bf.Ticker("TCS", trendlyne_sections=True)
+
+# Seven members it adds — each degrades to an honest empty shape, reason on t.data_warnings
+t.trendlyne_news()             # yfinance {id, content{...}} shape, paginated
+t.trendlyne_reports()          # broker research table + LTP + Target + Upside
+t.trendlyne_shareholding()     # holder categories down, quarters across
+t.trendlyne_deals()            # bulk & block deals, full served history
+t.trendlyne_buy_sell_zone()    # {"standalone": df, "consolidated": df} PE-band grids
+t.trendlyne_technicals()       # vendor signals: name / value / insight / color
+t.trendlyne_swot()             # the five SWOT fact tables
+
+# And the one that changes an existing property from None to a real number:
+t.analyst_price_targets
+# {'current': None, 'low': ..., 'high': ..., 'mean': ..., 'median': ...,
+#  'n_reports': 20, 'bfinance_analyst_source': 'trendlyne_research_reports'}
+```
+
+`current` is **always `None`** on that path — the vendor's `LTP` column is the price at each
+report's *publication*, not today's — and the vendor's own aggregate *"Consensus Share Price
+Target"* row is excluded from the statistics. See
+[docs/YFINANCE_MIGRATION_GUIDE.md §3.E](docs/YFINANCE_MIGRATION_GUIDE.md).
+
+Two more opt-in surfaces, both reached by an explicit import:
+
+```python
+# Local technical indicators — pure pandas over history(), no network, no robots question
+from bfinance.market.technical import TechnicalIndicators as TI
+
+h = bf.Ticker("TCS").history(period="1y")
+TI.rsi(h, 14)              # Wilder RSI; a short window yields no value, never 0.0
+TI.macd(h)                 # {"macd": ..., "signal": ..., "histogram": ...}
+TI.bollinger(h)            # {"mid": ..., "upper": ..., "lower": ..., "pct_b": ...}
+TI.pivots(h)               # classic / woodie / camarilla / fibonacci, off the last bar
+TI.snapshot(h)             # the whole set as one dict (close, sma_20/50/200, rsi_14, …)
+
+# Option chains — a different host (smartoptions.trendlyne.com), gated by its own flag
+from bfinance.trendlyne.smartoptions import SmartOptionsClient
+
+chain = SmartOptionsClient(allow_smart_options=True).option_chain("TCS", "2026-10-27")
+chain.chain        # long frame, one row per strike x side
+chain.summary      # maxPain, atTheMoney, MWPL, PCR vol/OI
+```
+
+`allow_smart_options` defaults to **`False`** and the call raises before a socket opens. The
+expiry must be **ISO `YYYY-MM-DD`** — `27-Oct-2026` is a server 500. `bfinance.trendlyne` also
+honours trendlyne's `robots.txt`: one page route (`/equity/technical-analysis-*`) and the two
+alert **write** routes stay unwired, and the member-autocomplete route is behind its own opt-in.
+`docs/API_REFERENCE.md` §2.3.2 has the full surface; `docs/UPSTREAM_SOURCES.md` §4 has the
+measurements behind every claim here.
 
 ---
 

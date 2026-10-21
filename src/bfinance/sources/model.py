@@ -67,6 +67,7 @@ __all__ = [
     "FAILED",
     "SKIPPED_BASIS",
     "SKIPPED_HEALTH",
+    "SKIPPED_COLUMNS",
     "is_series",
     "basis_from",
     "cross_basis_note",
@@ -278,11 +279,26 @@ SKIPPED_BASIS = "skipped_basis"
 #: skip rather than a failure: the ledger is a *prior*, not a verdict, and the next call may well
 #: ask it.
 SKIPPED_HEALTH = "skipped_health"
+#: A provider was never asked because it does not publish every column the request named. Also a
+#: skip rather than a failure, and the reason is a property of the source rather than of today.
+#: Measured: MarketLens publishes ``Close`` and ``Volume`` and has **no** Open/High/Low (its module
+#: docstring says so and the parser builds exactly those two columns), so it cannot serve an OHLC
+#: request — and :func:`~bfinance.sources.cascade.is_empty_payload` calls its close-only frame a
+#: non-empty answer, which means a request that needs bars would otherwise be satisfied by a frame
+#: that has none of them. Recorded separately from :data:`SKIPPED_BASIS` so "why is my data from
+#: that vendor" has two distinguishable answers rather than one vague one.
+SKIPPED_COLUMNS = "skipped_columns"
 
 #: Every outcome a :class:`Attempt` may carry. Asserted to be exactly this set by
 #: ``tests/test_sources_cascade.py``, so a new outcome cannot be added without deciding whether it
 #: is a call or a non-call.
-ATTEMPT_OUTCOMES: Tuple[str, ...] = (SERVED, FAILED, SKIPPED_BASIS, SKIPPED_HEALTH)
+ATTEMPT_OUTCOMES: Tuple[str, ...] = (
+    SERVED,
+    FAILED,
+    SKIPPED_BASIS,
+    SKIPPED_HEALTH,
+    SKIPPED_COLUMNS,
+)
 
 #: Outcomes in which the provider was actually invoked. Everything else is a non-call, and the
 #: difference is load-bearing: "never called" is a stronger claim than "called and rejected", and

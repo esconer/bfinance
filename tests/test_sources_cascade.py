@@ -71,6 +71,7 @@ from bfinance.sources import (
     PROVENANCE,
     SERVED,
     SKIPPED_BASIS,
+    SKIPPED_COLUMNS,
     SKIPPED_HEALTH,
     STATEMENTS_PROVIDER,
     UNWIRED_NOTE,
@@ -780,17 +781,21 @@ class TestUnavailability:
         assert "5 sources" in DEFAULT.capability_report()
 
         planned = plan("price_history", basis=Basis.AS_TRADED, registry=DEFAULT, health=HealthLedger())
-        # Registration order IS the try-order, and it is NOT "vendor first" for this row. A live
-        # side-by-side over 14 symbols x 2 windows on 2026-09-30 found the second vendor's series
-        # to be as_traded_split_bonus_adjusted, not as_traded: HDFCBANK, MOTHERSON and NESTLEIND
+        # Registration order IS the try-order. `trendlyne-ohlc` is DECLARED FIRST (operator
+        # decision, 2026-10-13: the default vendor, with the NSE rows as the cascade behind it).
+        # Declaring it first does NOT make it answer an as-traded request: a live side-by-side
+        # over 14 symbols x 2 windows on 2026-09-30 measured the second vendor's series to be
+        # as_traded_split_bonus_adjusted, not as_traded -- HDFCBANK, MOTHERSON and NESTLEIND
         # disagreed with the bhavcopy by exactly their own corporate-action factor on 62 of 62
-        # sessions. So the row declares SPLIT_ADJUSTED, sits behind the two as-traded rows, and is
-        # skipped -- never called -- for an as-traded request. The test that this skip is real, and
-        # that it costs no request, is
+        # sessions. So the row declares SPLIT_ADJUSTED and is skipped -- never called -- for an
+        # as-traded request. Basis, not position, is what routes the call; position only decides
+        # among rows that publish the requested basis, and for SPLIT_ADJUSTED this row is the only
+        # wired one, so it already won every request it could serve before it moved.
+        # The test that this skip is real, and that it costs no request, is
         # `TestCascade.test_the_price_basis_column_is_what_routes_an_as_traded_request`.
         assert [s.name for s in planned.ordered] == [
-            "nse-bhavcopy", "marketlens-close", "screener-chart",
-            "trendlyne-ohlc", "vendor-b-adjustments",
+            "trendlyne-ohlc", "marketlens-close", "nse-bhavcopy",
+            "screener-chart", "vendor-b-adjustments",
         ]
         skipped = {a.provider: a for a in planned.attempts}
         assert set(skipped) == {"screener-chart", "trendlyne-ohlc", "vendor-b-adjustments"}
@@ -1579,7 +1584,13 @@ class TestPublicSurface:
         A new outcome added without deciding whether it is a call or a non-call would make
         ``Attempt.called`` — the property the "never called" tests assert on — wrong for it.
         """
-        assert set(ATTEMPT_OUTCOMES) == {SERVED, FAILED, SKIPPED_BASIS, SKIPPED_HEALTH}
+        assert set(ATTEMPT_OUTCOMES) == {
+        SERVED,
+        FAILED,
+        SKIPPED_BASIS,
+        SKIPPED_HEALTH,
+        SKIPPED_COLUMNS,
+    }
         assert set(CALLED_OUTCOMES) == {SERVED, FAILED}
         for outcome in ATTEMPT_OUTCOMES:
             attempt = Attempt("p", outcome, "why", Basis.AS_TRADED)

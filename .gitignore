@@ -57,3 +57,6 @@ exports/
 *.xlsx
 *.mp3
 *.pdf
+
+# Local scratch: duplicate src/tests tree plus an accidental .venv. Never commit.
+.scratch/

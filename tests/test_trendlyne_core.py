@@ -1369,18 +1369,46 @@ class TestNoDeadScaffolding:
         )
 
     def test_the_addressed_routes_are_the_ones_with_fetch_methods(self):
-        """The whole package, stated as a set: 5 templates, and a method behind each.
+        """The whole package, stated as a set: every template, and a method behind each.
 
         Two are stock routes and two are group routes, and the split is not cosmetic: a group URL
         carries no symbol segment and puts the id first, so a single template with an optional
         branch would match ``/equity/sector/20/...`` as a stock without complaining.
+
+        The block after the group routes is the 2026-10-10 section-page wiring: eleven server-
+        rendered pages and three ``?format=json`` siblings, every one of them verified robots-clean
+        against the live ``robots.txt`` the same day. ``test_no_endpoint_template_is_a_dead_string``
+        above is what keeps this list honest — a name that appears here without a ``build_path``
+        site in client.py fails there, and a ``build_path`` site without a name here fails
+        ``test_no_endpoint_template_is_a_dead_string`` in the other direction.
         """
         assert set(tl.ENDPOINTS) == {
             "stock_page", "ohlc", "chart_metric", "sector_page", "industry_page",
+            "corporate_actions_page", "bulk_block_deals_page", "share_holding_page",
+            "board_meeting_page", "research_reports_page", "latest_news_page",
+            "stock_alerts_page", "insider_trading_page", "monthly_mf_holding_page",
+            "buy_sell_zone_page", "swot_page",
+            "adv_technical_analysis", "overview_second_part", "price_performance_analysis",
         }
         for method in ("ohlc", "ohlc_token", "chart_metric", "group_page", "constituents",
-                       "taxonomy", "industry_aggregate"):
+                       "taxonomy", "industry_aggregate",
+                       # the section-page layer, one sync twin per async method
+                       "corporate_actions", "bulk_block_deals", "share_holding",
+                       "share_holding_holders", "board_meetings", "research_reports",
+                       "latest_news", "stock_alerts", "insider_trading",
+                       "monthly_mf_holdings", "buy_sell_zone", "swot",
+                       "adv_technical_analysis", "technical_signals", "overview_second_part",
+                       "company_overview", "events", "price_performance", "returns_comparison"):
             assert callable(getattr(tl.TrendlyneClient, method)), method
+        # Every section route has an async method too, and the twin is not a separate code path:
+        # it must be the documented bridge rather than a second implementation.
+        for method in ("corporate_actions", "bulk_block_deals", "share_holding",
+                       "share_holding_holders", "board_meetings", "research_reports",
+                       "latest_news", "stock_alerts", "insider_trading", "monthly_mf_holdings",
+                       "buy_sell_zone", "swot", "adv_technical_analysis", "technical_signals",
+                       "overview_second_part", "company_overview", "events", "price_performance",
+                       "returns_comparison"):
+            assert callable(getattr(tl.TrendlyneClient, f"{method}_async")), method
         assert tl.GROUP_ENDPOINTS == {"sector_page", "industry_page"}
         assert not (tl.GROUP_ENDPOINTS & {"stock_page", "ohlc", "chart_metric"})
     async def test_each_template_is_the_url_the_client_actually_requests(self):

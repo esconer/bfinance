@@ -3,12 +3,56 @@ Pytest test fixtures and configuration for bfinance test suite.
 """
 
 import asyncio
+import os
 import sqlite3
 
 import pandas as pd
 import pytest
 from bfinance.cache.sqlite_cache import SQLiteCache
 from bfinance.screener.client import ScreenerClient
+
+
+#: ``$BFINANCE_HOME`` as the process had it before any fixture could change it. It is what lets the
+#: autouse fixture below tell "the runner pointed the home somewhere for the whole session" apart
+#: from "a test pointed it somewhere for itself": only the second is a choice to leave alone.
+_SHELL_HOME = os.environ.get("BFINANCE_HOME")
+
+
+@pytest.fixture(autouse=True)
+def bfinance_home(tmp_path, monkeypatch):
+    """One ``$BFINANCE_HOME`` per test, so nothing one test caches can be served to the next one.
+
+    **The defect this exists for.** ``OHLCVEngine`` reads through a ``PriceCache`` by default
+    (``market/ohlcv.py:869``), whose store is ``$BFINANCE_HOME/frames.db`` -- a *shared* file that
+    building an engine does not reset. So a frame one test caches is handed to the next test that
+    asks the same question, and that test is then measuring the earlier test's fixture instead of its
+    own stub. Measured while this was being written: a row for ``RELIANCE|NSE|ALL|2024-08-16|2024-08-21``
+    written during one test answered a later test whose own archive stub returned nothing at all, so
+    "an empty frame still raises" came back as "a hit from somebody else's data".
+
+    Three artefacts resolve through this variable and are isolated by this fixture: the frame store
+    (``cache/frame_store.py:141-158``), the bhavcopy mirror (``mirror.py:102-105``) and the universe
+    archive (``universe.py:762``). It does **not** isolate ``SQLiteCache``'s default file:
+    ``sqlite_cache.py:109-119`` places that at ``~/.bfinance/cache.db`` and does not consult
+    ``$BFINANCE_HOME``, so a test that builds a ``ScreenerClient`` with no cache of its own still
+    writes to the user's real home. That gap is pre-existing and not this fixture's to close.
+
+    **A test's own choice wins, whichever order the two fixtures run in.** The suite already has
+    modules and tests that point the home at a directory of their own -- ``test_mirror_integration.py``'s
+    autouse fixture, ``test_mirror.py``, ``test_frame_store.py``, ``test_market_price_cache.py``,
+    ``test_ohlcv_cached_window.py`` -- and the stand-down below is what leaves them in charge of what
+    they measure: it declines to touch the variable once it is no longer the shell's value, i.e. once
+    another fixture has pointed it somewhere; and when this fixture runs first, that other fixture's
+    ``monkeypatch.setenv`` overwrites this one anyway.
+
+    The directory is *named* and never created, so "nothing was written" stays assertable: the path
+    exists only if the code under test makes it.
+
+    Tests: ``tests/test_bfinance_home_isolation.py``.
+    """
+    if os.environ.get("BFINANCE_HOME") != _SHELL_HOME:
+        return
+    monkeypatch.setenv("BFINANCE_HOME", str(tmp_path / "bfinance_home"))
 
 
 # The previous fixture used ``db_path=":memory:"``. That was a no-op: ``_connect()`` opens a NEW

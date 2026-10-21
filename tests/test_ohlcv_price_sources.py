@@ -23,15 +23,28 @@ What is under test
    use :data:`bfinance.sources.registry.DEFAULT`, so the try-order, the declared bases and the
    per-row measured notes are the shipped ones.
 3. **The basis rule, which is stronger than the plan claimed.** An as-traded request skips
-   ``trendlyne-ohlc`` on basis and spends **zero** requests on it, so the call list is
-   ``["nse-bhavcopy", "marketlens-close"]`` and never contains it. HDFCBANK's close on that
-   vendor's feed is exactly 0.5x the bhavcopy's on all 62 sessions of 2024-12-16..2025-03-13,
-   so an as-traded request served from it would carry a move that never happened.
-4. **The four attrs keys**, on the populated frame and the empty one.
+   ``trendlyne-ohlc`` on basis and spends **zero** requests on it, so that row is never in the
+   call list at all. HDFCBANK's close on that vendor's feed is exactly 0.5x the bhavcopy's on all
+   62 sessions of 2024-12-16..2025-03-13, so an as-traded request served from it would carry a
+   move that never happened.
+4. **The column rule, on the default call.** ``marketlens-close`` is first among the as-traded rows
+   and publishes Close and Volume only, so an ordinary OHLCV ``history()`` must pass it over
+   without a request and land on the bhavcopy. The two as-traded rows are therefore a failover pair
+   only for a request narrowed to what both publish, which is why the failover tests take
+   ``requires=("Close", "Volume")``.
+5. **The four attrs keys**, on the populated frame and the empty one.
 
 Everything here is offline. The price sources are reached only through an injected ``fetch``; the
 corporate-actions feed and the Screener client are stubbed; the direct path's archive is stubbed
 wherever it is exercised. No test in this file may make a network request.
+
+``auto_adjust=False`` is spelled out on the calls whose subject is not the adjustment, as it is in
+``test_mirror_integration``. auto_adjust became True by default on 2026-09-30 and a True default
+resolves the corporate-actions feed whenever EITHER flag asks for it (``actions or auto_adjust`` in
+``fetch_history``), so an unpinned call here consulted the live feed -- invisible behind a warm
+``~/.bfinance``, a live DNS request on a cold runner. The explicit False restores the pre-flip call,
+and :func:`_engine` injects the offline stub behind it so a future default flip fails loudly here
+instead of reaching the network.
 """
 
 import importlib
@@ -55,8 +68,10 @@ from bfinance.market.ohlcv import (
 )
 from bfinance.sources.errors import SourceUnavailableError
 from bfinance.sources.health import HealthLedger
-from bfinance.sources.model import SKIPPED_BASIS
+from bfinance.sources.model import SKIPPED_BASIS, SKIPPED_COLUMNS
 from bfinance.sources.registry import DEFAULT
+
+from conftest import StubCorporateActionsClient
 
 # `from bfinance import download` yields the FUNCTION, not the module, because __init__ re-exports
 # it. importlib is the reliable way to reach the module (the same note as test_silent_fallbacks).
@@ -86,6 +101,23 @@ def _bars(close=100.0, volume=1000, index=None):
             "Volume": [volume] * len(index),
         },
         index=index,
+    )
+
+
+def _marketlens_bars(close=100.0, volume=1000, index=None):
+    """``marketlens-close``'s REAL shape: Close and Volume, and no Open/High/Low at all.
+
+    ``bfinance.nse.marketlens`` builds ``{'Close': ..., 'Volume': ...}`` and says so in its own
+    docstring, and the row is registered ``provides=("Close", "Volume")``. Every other stub in this
+    file answers the full OHLCV five for EVERY source, which is exactly why the suite stayed green
+    while an ordinary ``history()`` was being routed to this row and then refused for the
+    Open/High/Low it never had: a close-only frame is a non-empty answer, so the cascade is happy
+    with it and only this engine's own column check objects. The column filter is exercised by the
+    shape the vendor actually publishes, and by nothing else.
+    """
+    index = pd.DatetimeIndex(index or _DATES, name="Date")
+    return pd.DataFrame(
+        {"Close": [close] * len(index), "Volume": [volume] * len(index)}, index=index
     )
 
 
@@ -186,10 +218,22 @@ class _SplitStub:
 
 
 def _engine(fetch=None, actions=None, screener=None):
-    """An engine with the seam wired exactly the way a caller would wire it."""
+    """An engine with the seam wired exactly the way a caller would wire it.
+
+    The corporate-actions client defaults to the offline stub rather than to ``None``, because
+    ``None`` means "build a real client on demand": auto_adjust became True by default on
+    2026-09-30 and a True default resolves the actions feed whenever EITHER flag asks for it
+    (``fetch_actions = actions or auto_adjust`` in fetch_history), so every call below that does not
+    name an actions client of its own was reaching www.nseindia.com. A warm ``~/.bfinance`` served
+    it and hid the request; a cold CI runner made it. The tests here that need a real series still
+    name one (``_SplitStub``), and the rest pin ``auto_adjust=False``, which is the argument that
+    actually stops the feed being consulted at all -- the stub is the wall behind it.
+    """
     return OHLCVEngine(
         screener or _NoScreener(),
-        corporate_actions_client=actions,
+        corporate_actions_client=(
+            actions if actions is not None else StubCorporateActionsClient()
+        ),
         price_sources=PriceSourceRouter(
             fetch=fetch,
             # A fresh ledger, not the process-wide one. The process-wide ledger *learns*, so a
@@ -228,9 +272,14 @@ async def test_the_two_argument_construction_still_means_the_direct_bhavcopy_pat
 
     monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", _range)
 
-    frame = await OHLCVEngine(_NoScreener()).fetch_history(
-        symbol="RELIANCE", period="5d", actions=False
-    )
+    # ``_NoScreener()`` stays the only POSITIONAL argument and no source is named, which is the
+    # construction under test: the actions client is the same injected stub the ~130 offline call
+    # sites in this package use, and the price-source router -- the thing that would bypass it -- is
+    # absent. ``auto_adjust=False`` is what keeps the call from consulting the actions feed at all;
+    # with it unpinned the default is True, which resolves the feed (``actions or auto_adjust``).
+    frame = await OHLCVEngine(
+        _NoScreener(), corporate_actions_client=StubCorporateActionsClient()
+    ).fetch_history(symbol="RELIANCE", period="5d", actions=False, auto_adjust=False)
 
     assert asked, "the direct archive reader was bypassed, so something else answered"
     assert not frame.empty
@@ -289,27 +338,45 @@ async def test_a_real_registry_as_traded_fails_over_and_skips_the_adjusted_sourc
     :data:`bfinance.sources.registry.DEFAULT`, with the first as-traded source failing, the second
     answers, and the adjusted source is recorded as a skip and is **absent from the call list**.
 
+    ``requires=("Close", "Volume")`` is what makes the failover reachable at all, and that is a
+    property of the shipped table rather than of this test. The two as-traded rows are the only
+    failover pair on this capability, and they are not interchangeable for a full OHLCV request:
+    ``marketlens-close`` publishes Close and Volume and no Open/High/Low, so an ordinary OHLCV
+    ``history()`` passes it over on columns without a request and leaves the bhavcopy as the only
+    as-traded row left. Both rows publish Close and Volume, so a request narrowed to those two is
+    the one request on which this pair can fail over -- and the failover itself is unchanged: the
+    first eligible source fails and the second answers, with the adjusted row passed over on basis
+    before either of them is called.
+
     The registry is the shipped one. A synthetic registry would make this test pass while the
     shipped try-order could be anything, which is exactly the gap this file exists to close: every
     pre-existing cross-capability failover test builds its own registry.
     """
     fetch = _Fetch(
         {
-            BHAVCOPY_SOURCE: ConnectionError("www.nseindia.com did not respond after 30s"),
-            "marketlens-close": _bars(close=269.0),
+            "marketlens-close": ConnectionError("marketlens timed out after 30s"),
+            BHAVCOPY_SOURCE: _bars(close=250.0),
         }
     )
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, requires=("Close", "Volume")
+    )
 
-    # (1) The real registry, and the real try-order within it.
-    assert DEFAULT.names_for("price_history")[:2] == (BHAVCOPY_SOURCE, "marketlens-close"), (
+    # (1) The real registry, and the real try-order within it. `trendlyne-ohlc` is declared
+    # FIRST (operator decision, 2026-10-13), and it publishes split_adjusted -- so the basis
+    # column removes it from an as-traded request before any request is built, and the order
+    # that actually costs requests is the two as-traded NSE rows that follow it.
+    assert DEFAULT.names_for("price_history")[0] == "trendlyne-ohlc", (
         "this test is a claim about the SHIPPED try-order; if the registry changed, the claim "
         "changed and this test must be rewritten, not adjusted"
     )
+    assert DEFAULT.names_for("price_history")[1:3] == ("marketlens-close", BHAVCOPY_SOURCE), (
+        "the as-traded rows are what an as-traded request actually reaches, in this order"
+    )
 
     # (2) The exact call list. Not "contains", not "at least" -- the order is the failover.
-    assert fetch.calls == [BHAVCOPY_SOURCE, "marketlens-close"], (
+    assert fetch.calls == ["marketlens-close", BHAVCOPY_SOURCE], (
         f"the cascade must try the registry order and only then fall through; got {fetch.calls}"
     )
 
@@ -322,13 +389,70 @@ async def test_a_real_registry_as_traded_fails_over_and_skips_the_adjusted_sourc
     )
     outcomes = _outcomes(frame.attrs)
     assert outcomes[TRENDLYNE] == SKIPPED_BASIS
-    assert outcomes[BHAVCOPY_SOURCE] == "failed"
-    assert outcomes["marketlens-close"] == "served"
+    assert outcomes["marketlens-close"] == "failed"
+    assert outcomes[BHAVCOPY_SOURCE] == "served"
 
     # (4) Degraded, and the winner's bars, whole.
-    assert frame.attrs[PRICE_SOURCE_ATTR] == "marketlens-close"
+    assert frame.attrs[PRICE_SOURCE_ATTR] == BHAVCOPY_SOURCE
     assert frame.attrs[PRICE_SOURCE_DEGRADED_ATTR] is True
-    assert list(frame["Close"]) == [269.0] * len(_DATES)
+    assert list(frame["Close"]) == [250.0] * len(_DATES)
+
+
+async def test_an_ohlc_request_passes_over_the_close_only_row_without_asking_it():
+    """
+    The default call, the shipped registry, and the row that would have broken it.
+
+    ``marketlens-close`` is first among the as-traded rows and publishes Close and Volume only, and
+    a close-only frame is a *non-empty* answer as far as the cascade is concerned -- so with the
+    caller's raw ``requires`` (``None`` for every ordinary ``history()``, since the signature
+    default is deliberately not a column list) handed to the cascade, this row was committed to and
+    only then refused by this engine's own post-hoc check: a hard
+    :class:`RealOHLCUnavailableError` with no failover at all, while ``nse-bhavcopy`` -- which
+    publishes every column -- was never asked. The close-only stub below is the real shape, so a
+    request to this row is the refusal; that is the whole reason the shape is scripted here.
+
+    The required set is therefore computed once and given to the cascade as well as to the check,
+    which is what makes the row a *skip* rather than a failed attempt.
+    """
+    fetch = _Fetch(
+        {
+            "marketlens-close": _marketlens_bars(close=269.0),
+            BHAVCOPY_SOURCE: _bars(close=250.0),
+        }
+    )
+
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, auto_adjust=False
+    )
+
+    assert fetch.calls == [BHAVCOPY_SOURCE], (
+        "a row that publishes none of the bars an OHLCV frame is made of must be passed over "
+        f"WITHOUT a request; got {fetch.calls}"
+    )
+    skip = next(
+        a for a in frame.attrs[PRICE_SOURCE_ATTEMPTS_ATTR] if a["source"] == "marketlens-close"
+    )
+    assert skip["outcome"] == SKIPPED_COLUMNS
+    assert skip["called"] is False, (
+        "the row is not 'called and rejected': a request to it is a request spent on an answer "
+        "this call cannot use"
+    )
+    assert "Open" in skip["reason"] and "Volume" in skip["reason"], (
+        "the skip has to name the columns it lacks as well as the ones it publishes, so 'why is "
+        "my data from that vendor' is answerable without reading the registry; "
+        f"got {skip['reason']!r}"
+    )
+    assert frame.attrs[PRICE_SOURCE_ATTR] == BHAVCOPY_SOURCE
+    for column in ("Open", "High", "Low", "Close", "Volume"):
+        assert column in frame.columns, (
+            "the winner has to publish the bars the caller asked for; a close-only winner here is "
+            "the silent column loss this rule exists to prevent"
+        )
+    assert list(frame["Close"]) == [250.0] * len(_DATES)
+    assert frame.attrs[PRICE_SOURCE_DEGRADED_ATTR] is False, (
+        "nothing failed -- the row that could not serve was never asked, which is the system "
+        "working rather than a fallback the caller was denied"
+    )
 
 
 async def test_a_healthy_first_choice_is_not_degraded_and_asks_nobody_else():
@@ -338,15 +462,21 @@ async def test_a_healthy_first_choice_is_not_degraded_and_asks_nobody_else():
     Without it, ``degraded`` could be a constant ``True`` and the failover test above would still
     be green. Template and rationale taken from
     ``tests/test_sources_cascade.py::TestResolution::test_a_healthy_first_choice_is_not_degraded``.
+
+    ``marketlens-close`` is the first choice for exactly the request it can serve, and that is the
+    narrow one: a full OHLCV ask passes it over on columns before anything is called, so "it
+    answered first" is only observable with the columns it publishes.
     """
     fetch = _Fetch({})
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, requires=("Close", "Volume")
+    )
 
-    assert fetch.calls == [BHAVCOPY_SOURCE], (
+    assert fetch.calls == ["marketlens-close"], (
         f"one answer ends the cascade; the rest must not be asked. got {fetch.calls}"
     )
-    assert frame.attrs[PRICE_SOURCE_ATTR] == BHAVCOPY_SOURCE
+    assert frame.attrs[PRICE_SOURCE_ATTR] == "marketlens-close"
     assert frame.attrs[PRICE_SOURCE_DEGRADED_ATTR] is False, (
         "a source that answered first was not degraded from anything"
     )
@@ -369,7 +499,7 @@ async def test_a_split_adjusted_request_asks_exactly_the_adjusted_source():
     fetch = _Fetch({TRENDLYNE: _bars(close=932.0)})
 
     frame = await _engine(fetch).fetch_history(
-        symbol="HDFCBANK", period="5d", actions=False, sources=[TRENDLYNE]
+        symbol="HDFCBANK", period="5d", actions=False, auto_adjust=False, sources=[TRENDLYNE]
     )
 
     assert fetch.calls == [TRENDLYNE]
@@ -397,7 +527,9 @@ async def test_an_as_traded_request_never_calls_the_split_adjusted_source():
     """
     fetch = _Fetch({})
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, auto_adjust=False
+    )
 
     assert TRENDLYNE not in fetch.calls
     skip = next(
@@ -416,7 +548,7 @@ async def test_an_as_traded_request_never_calls_the_split_adjusted_source():
     # -- control: the same source, asked for by name, IS reached.
     asked = _Fetch({})
     await _engine(asked).fetch_history(
-        symbol="ITC", period="5d", actions=False, sources=[TRENDLYNE]
+        symbol="ITC", period="5d", actions=False, auto_adjust=False, sources=[TRENDLYNE]
     )
     assert asked.calls == [TRENDLYNE], (
         "if this is empty the test above proves nothing but a routing table that cannot reach the "
@@ -463,6 +595,11 @@ async def test_every_as_traded_source_failing_raises_and_names_every_one_of_them
     The basis-skipped sources are named too, and separately: they were NOT asked, and a message
     that listed them beside the failures would tell a caller to retry a source that was never
     touched.
+
+    The request is narrowed to the two columns BOTH as-traded rows publish, because a full OHLCV
+    ask passes ``marketlens-close`` over on columns without a request -- it publishes no
+    Open/High/Low -- and a cascade with one eligible row left has nothing to fail over to. Two
+    failures is the scenario this test is about.
     """
     fetch = _Fetch(
         {
@@ -472,9 +609,11 @@ async def test_every_as_traded_source_failing_raises_and_names_every_one_of_them
     )
 
     with pytest.raises(SourceUnavailableError) as exc:
-        await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+        await _engine(fetch).fetch_history(
+            symbol="ITC", period="5d", actions=False, requires=("Close", "Volume")
+        )
 
-    assert fetch.calls == [BHAVCOPY_SOURCE, "marketlens-close"], (
+    assert fetch.calls == ["marketlens-close", BHAVCOPY_SOURCE], (
         "both eligible as-traded sources must be tried before the call gives up"
     )
     message = str(exc.value)
@@ -495,18 +634,26 @@ async def test_a_source_answering_with_nothing_is_a_failure_not_an_empty_history
     A zero-row frame returned as data reads as "this company has no price history", which is a
     claim about the market that the source never made. So an empty answer is a fall-through, the
     next source is asked, and if nothing else answers the call raises.
+
+    The vendor scripted to answer with nothing is the FIRST source the request actually reaches, so
+    the fall-through is observable as a second request: the request is narrowed to the two columns
+    ``marketlens-close`` publishes, which is what makes that row reachable at all.
     """
     fetch = _Fetch(
         {
-            BHAVCOPY_SOURCE: pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]),
-            "marketlens-close": _bars(close=269.0),
+            "marketlens-close": pd.DataFrame(
+                columns=["Close", "Volume"], index=pd.DatetimeIndex([], name="Date")
+            ),
+            BHAVCOPY_SOURCE: _bars(close=269.0),
         }
     )
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, requires=("Close", "Volume")
+    )
 
-    assert fetch.calls == [BHAVCOPY_SOURCE, "marketlens-close"]
-    assert frame.attrs[PRICE_SOURCE_ATTR] == "marketlens-close"
+    assert fetch.calls == ["marketlens-close", BHAVCOPY_SOURCE]
+    assert frame.attrs[PRICE_SOURCE_ATTR] == BHAVCOPY_SOURCE
     assert frame.attrs[PRICE_SOURCE_DEGRADED_ATTR] is True
     assert not frame.empty
 
@@ -641,9 +788,9 @@ async def test_the_four_keys_are_present_on_the_populated_frame(monkeypatch):
             {"RELIANCE": [(date, 100.0, 101.0, 99.0, 100.5, 1000) for date in _DATES]}
         ),
     )
-    frame = await OHLCVEngine(_NoScreener()).fetch_history(
-        symbol="RELIANCE", period="5d", actions=False
-    )
+    frame = await OHLCVEngine(
+        _NoScreener(), corporate_actions_client=StubCorporateActionsClient()
+    ).fetch_history(symbol="RELIANCE", period="5d", actions=False, auto_adjust=False)
     for key in (
         PRICE_SOURCE_ATTR, PRICE_SOURCE_ATTEMPTS_ATTR,
         PRICE_SOURCE_DEGRADED_ATTR, PRICE_SOURCE_DETAIL_ATTR,
@@ -721,10 +868,19 @@ async def test_the_detail_sentence_names_what_failed_and_why():
     and pasting it in verbatim produced a 4 KB "sentence" on every as-traded call. The evidence
     stays in ``attempts``; the sentence is the summary, and the two assertions below are what keep
     them from being the same string twice.
-    """
-    fetch = _Fetch({BHAVCOPY_SOURCE: ConnectionError("www.nseindia.com refused the connection")})
 
-    frame = await _engine(fetch).fetch_history(symbol="ITC", period="5d", actions=False)
+    The failing row is ``marketlens-close`` -- the first source a narrowed as-traded request reaches
+    -- and ``nse-bhavcopy`` answers behind it, so the sentence has both a failure and a winner to
+    name. The request is narrowed to the two columns both rows publish, which is what makes the
+    first of them reachable.
+    """
+    fetch = _Fetch(
+        {"marketlens-close": ConnectionError("marketlens.nseindia.com refused the connection")}
+    )
+
+    frame = await _engine(fetch).fetch_history(
+        symbol="ITC", period="5d", actions=False, requires=("Close", "Volume")
+    )
 
     detail = frame.attrs[PRICE_SOURCE_DETAIL_ATTR]
     assert "marketlens-close" in detail
@@ -762,7 +918,7 @@ async def test_an_enabled_mirror_is_not_silently_dropped_on_the_cascade_path(cap
 
     with caplog.at_level("WARNING", logger="bfinance"):
         frame = await _engine(fetch).fetch_history(
-            symbol="ITC", period="5d", actions=False, mirror=True
+            symbol="ITC", period="5d", actions=False, auto_adjust=False, mirror=True
         )
 
     assert "not consulted" in frame.attrs["bfinance_mirror"]["reason"]
@@ -771,7 +927,9 @@ async def test_an_enabled_mirror_is_not_silently_dropped_on_the_cascade_path(cap
 
     caplog.clear()
     with caplog.at_level("WARNING", logger="bfinance"):
-        await _engine(_Fetch({})).fetch_history(symbol="ITC", period="5d", actions=False)
+        await _engine(_Fetch({})).fetch_history(
+            symbol="ITC", period="5d", actions=False, auto_adjust=False
+        )
     assert "local mirror is configured" not in caplog.text
 
 

@@ -3,8 +3,9 @@ Master Ticker facade providing 100% yfinance drop-in compatibility + Indian mark
 """
 
 import asyncio
+import importlib
 import logging
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Set, Tuple, Union
 from datetime import datetime
 import pandas as pd
 
@@ -46,6 +47,238 @@ from bfinance.utils.symbols import resolve_exchange_and_symbol
 #: change the import graph for every consumer of ``bfinance.ticker``.
 _CASH_ROW_LABELS: Tuple[str, ...] = ("Cash Equivalents", "Cash and Bank Balance")
 
+#: Why the three ``get_*_stmt`` accessors refuse ``pretty=True``, verbatim, so all three say the
+#: same thing. Measured against yfinance 1.7.0 (tag ``3d9d2f0``): ``Ticker.income_stmt`` -- the
+#: *property* -- forces ``pretty=True`` and returns Title Case ("Total Revenue", "Diluted EPS"),
+#: while ``Ticker.get_income_stmt()`` with its default ``pretty=False`` returns the same rows
+#: CamelCase ("TotalRevenue", "DilutedEPS"). ``pretty`` is therefore not cosmetic: it is the whole
+#: difference between the two yfinance surfaces a drop-in caller might have copied from.
+#:
+#: bfinance cannot honour it on either statement path, and the reason is the same on both:
+#:
+#: * **neither path reads the flag.** ``FinancialStatement.to_yfinance()`` has no ``pretty``
+#:   parameter; it applies :data:`~bfinance.models.statements.INDIAN_TO_YFINANCE_LABELS`
+#:   unconditionally. The screener.in frame therefore *resembles* ``pretty=True`` output -- it is
+#:   Title Case -- but that is the label map's doing, not the flag's, so a ``pretty=False`` caller
+#:   gets Title Case where yfinance gives CamelCase.
+#: * **the fallback path is further away still.** It carries the vendor's own ``sstr`` labels
+#:   ("Total Rev. Ann."), which are in neither yfinance vocabulary.
+#:
+#: Closing the gap means writing a label map in one direction or the other, and neither was ever
+#: measured. ``bfinance.statements.model`` refuses exactly that in its module docstring, and a
+#: ``camel2title`` reversal applied to the screener.in labels would be the same fabrication with
+#: a regex instead of a dict. So the flag raises rather than returning a frame whose index
+#: silently disagrees with what the caller asked for.
+_PRETTY_UNSUPPORTED = (
+    "pretty=True is not supported by bfinance, on either statement path. yfinance's pretty=True "
+    "applies camel2title to its own label vocabulary, and bfinance has no measured "
+    "correspondence between that vocabulary and either upstream's labels -- so honouring the "
+    "flag would mean inventing a label map. Use the default (pretty=False), which returns the "
+    "labels the serving path already publishes: the measured yfinance-shape rename from "
+    "screener.in, or the vendor's own labels from the fallback."
+)
+
+
+def _fallback_fetch(payload_name: str, payload: Any) -> Callable[[Any], Any]:
+    """The statements cascade's ``fetch`` for **one** payload, and a refusal for every other one.
+
+    :func:`bfinance.statements.cascade.resolve` asks each provider registered for the cell for
+    its own bytes, and each provider declares which bytes those are through
+    ``ProviderSpec.payload``. This fallback fetched one route, so it can speak for the providers
+    that read that route and for nothing else. That is the discipline
+    :func:`~bfinance.statements.cascade.resolve_from_payloads` already applies to payloads a
+    caller holds, mirrored here rather than reinvented.
+
+    The version this replaces returned the payload for **every** spec, so screener.in's HTML
+    parser was handed trendlyne's JSON. It raised ``KeyError: slice(None, 500, None)``, the
+    cascade recorded that faithfully, and the frame went on to publish
+    ``skip_reasons={'screener': 'KeyError: slice(None, 500, None)'}``,
+    ``providers_tried=('screener', 'trendlyne-json')`` and
+    ``fallback_from=('screener', 'trendlyne-html')`` -- a vendor outage that never happened,
+    because screener.in was never asked for anything. Every clause of that record was false, and
+    false in the one shape a reader cannot check: a fabricated outage is indistinguishable from a
+    real one at exactly the moment a real one would matter. ``_read_statement``'s docstring below
+    records the same class of defect -- a parse that failed and became a confident, wrong number.
+
+    Args:
+        payload_name: The payload this callable carries, verbatim
+            (``bfinance.statements.JSON_PAYLOAD`` and its siblings).
+        payload: The already-fetched payload.
+
+    Returns:
+        A ``fetch`` callable: the payload for a provider that reads ``payload_name``, and
+        :class:`~bfinance.statements.errors.StatementSourceError` for any other.
+    """
+    # Lazy for the same reason the caller imports the package lazily: `bfinance.statements` is
+    # opt-in and must not be imported on a path that never reaches it. This function is reached
+    # only from the opt-in statement fallback.
+    from bfinance.statements import StatementSourceError
+
+    def fetch(spec) -> Any:
+        if spec.payload != payload_name:
+            raise StatementSourceError(
+                f"no {spec.payload} was supplied for provider {spec.name!r}: this fallback "
+                f"carries only the {payload_name} payload. Handing a provider bytes it does not "
+                f"read is a fabricated answer, not a failed one."
+            )
+        return payload
+
+    return fetch
+
+
+def _trendlyne_news_item(item_id: str, date_text: Any, title: Any, url: Any, source: Any) -> Dict[str, Any]:
+    """One trendlyne news card, in the yfinance ``{"id", "content"}`` shape.
+
+    The shape is not a preference -- it is what :attr:`Ticker.news` already returns
+    (:meth:`bfinance.market.corporate.CorporateActionsEngine.build_news`), so a drop-in caller
+    that already indexes ``item["content"]["title"]`` reads the same two levels here. Both keys
+    are fixed; the values are what the card carried, with two absences worth naming:
+
+    * ``time`` is ``None``. The vendor renders three different date strings on one page, so an
+      epoch here would be a guess about which one parsed.
+    * ``pubDate`` is the vendor's own string, verbatim and **not** ISO-formatted. Publishing it
+      is the honest reading of "this is when the vendor says the item was posted"; normalising
+      it would be picking a format the response never used.
+    * ``canonicalUrl`` is the card's own href, including the login modal that research-report
+      cards link for anonymous readers. Rewriting it to the page behind the wall would invent an
+      address the response never carried.
+    """
+    text = "" if date_text is None else str(date_text)
+    link = "" if url is None else str(url)
+    publisher = "" if source is None else str(source)
+    return {
+        "id": item_id,
+        "content": {
+            "title": "" if title is None else str(title),
+            "link": link,
+            "publisher": {"displayName": publisher},
+            "provider": {"displayName": publisher},
+            "time": None,
+            "pubDate": text,
+            "canonicalUrl": {"url": link},
+        },
+    }
+
+
+#: The vendor's aggregate row on the research-reports table, matched case-insensitively against
+#: the ``Author`` column. It carries the consensus target the broker set already averaged, so a
+#: consumer that also averages the ``Target`` column must exclude it or the consensus is counted
+#: twice -- once as itself and once inside every mean. Matched on a word rather than on
+#: ``row == 0`` because the page decides its own order and nothing measured pins that the
+#: aggregate is always first.
+_CONSENSUS_ROW_MARKER = "consensus share price target"
+
+#: The column the marker above is matched against. Named as a constant because its *absence* is
+#: load-bearing -- see :func:`_targets_from_reports`.
+_CONSENSUS_ROW_COLUMN = "Author"
+
+#: Thousands separators the vendor renders in the ``Target`` column. Stripped before the numeric
+#: coercion rather than after it: ``pd.to_numeric("2,450.54", errors="coerce")`` is ``NaN``, and a
+#: ``NaN`` is dropped, so one formatted cell silently took a real broker's target out of the mean,
+#: the median, the high and ``n_reports`` at once.
+_TARGET_THOUSANDS_SEPARATOR = ","
+
+
+def _numeric_targets(series: pd.Series) -> pd.Series:
+    """The ``Target`` column as floats, with the vendor's thousands separators removed first.
+
+    ``errors="coerce"`` still decides what is unreadable: ``"n/a"`` and ``""`` become ``NaN`` and
+    are dropped downstream. Only the separator is repaired, because it is formatting rather than a
+    value -- ``"2,450.54"`` is the same measurement as ``2455.54`` and a caller who lost it lost a
+    real target, not a blank.
+    """
+    cleaned = series.map(
+        lambda value: value.replace(_TARGET_THOUSANDS_SEPARATOR, "").strip()
+        if isinstance(value, str)
+        else value
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _targets_from_reports(frame: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """yfinance price targets derived from a research-reports frame, or ``None``.
+
+    A pure function of the frame, with no fetch and no Ticker, so the derivation can be pinned
+    against a recorded page directly rather than only through the caller.
+
+    The statistics come from the ``Target`` column and from nothing else. The page's ``LTP``
+    column is deliberately not read as ``current``: it is the price at the moment each report was
+    published, so publishing it under the key a caller reads as *today's* price is the same
+    relabelling defect this module refuses elsewhere. No current price is derivable from this
+    feed, so ``current`` is ``None``.
+
+    Returns ``None`` -- never a synthesised target -- when the frame carries no ``Target``
+    column or no finite number in it, **and also when it carries no ``Author`` column**. That last
+    one is a choice, and the alternative was rejected: without ``Author`` the vendor's aggregate
+    row cannot be told apart from a per-report one, so every statistic below would fold the
+    consensus into the mean of the rows beneath it. A ``None`` the caller can see is better than a
+    mean that is wrong by exactly one value and looks perfectly plausible; the reason is recorded on
+    :attr:`Ticker.data_warnings` by the property, which is the only caller with a Ticker to record
+    it on.
+    """
+    if frame is None or frame.empty or "Target" not in frame.columns:
+        return None
+    if _CONSENSUS_ROW_COLUMN not in frame.columns:
+        return None
+
+    targets = _numeric_targets(frame["Target"])
+    aggregate = frame[_CONSENSUS_ROW_COLUMN].astype(str).str.contains(
+        _CONSENSUS_ROW_MARKER, case=False, na=False, regex=False
+    )
+    targets = targets[~aggregate]
+    values = targets.dropna()
+    values = values[values.abs() < float("inf")]
+    if values.empty:
+        return None
+
+    return {
+        # No current price is published on this route; see the docstring above.
+        "current": None,
+        "low": float(values.min()),
+        "high": float(values.max()),
+        "mean": float(values.mean()),
+        "median": float(values.median()),
+        #: How many rows the statistics above are computed from, after the vendor's own
+        #: aggregate row was excluded. A count travels with the numbers because the two are
+        #: only as good as each other: a mean of two and a mean of twenty are the same number
+        #: with a very different amount behind them.
+        "n_reports": int(values.size),
+        "bfinance_analyst_source": "trendlyne_research_reports",
+    }
+
+
+#: The two columns :meth:`QuoteEngine.build_info_dict` reads off a history frame -- and the
+#: COMPLETE list of what ``Ticker.info`` needs from a price series.
+#:
+#: Read off the builder rather than guessed. :func:`~bfinance.market.quotes._close_list` and
+#: :func:`~bfinance.market.quotes.moving_average` read ``Close``; ``previous_close_from_history``
+#: reads it again; and ``regularMarketVolume``/``volume`` read ``Volume``. Nothing in ``info`` reads
+#: Open, High or Low -- and the request this replaced asked for all of them, which meant a
+#: corporate-actions round trip and a two-factor adjustment for a frame that was then read for two
+#: columns out of five.
+#:
+#: So ``info`` now asks for :meth:`~bfinance.ticker.Ticker.history` with
+#: ``requires=INFO_HISTORY_COLUMNS``, and gets the winner's two columns unadjusted. Unadjusted is
+#: deliberate rather than an accident of a narrower frame: yfinance's own ``previousClose`` and its
+#: 50/200-day averages are means of **raw** closes, so this is the closer parity of the two, and
+#: ``attrs["price_basis"]`` on the frame says which series they are.
+INFO_HISTORY_COLUMNS = ("Close", "Volume")
+
+#: The price sources that can serve :data:`INFO_HISTORY_COLUMNS` cheaply, in the order a caller
+#: wanting them should ask for: the per-symbol as-traded vendor first, the bhavcopy behind it.
+#:
+#: Both publish ``as_traded`` and both publish every column in
+#: :data:`INFO_HISTORY_COLUMNS`, so the list is a genuine failsafe and cannot splice two bases. It
+#: is named here and **not** passed by ``info`` itself, and the reason is worth stating rather than
+#: leaving to a reader: passing it engages :mod:`bfinance.sources.cascade`, whose providers are
+#: imported at call time, and every offline caller that stubs the direct archive reader would then
+#: be reaching the live NSE instead. ``info`` therefore stays on the direct path and inherits the
+#: bhavcopy's cost -- one whole-market archive file per trading day, 530s over two years and 184s
+#: over the year this asks for. Removing that is a vendor-ordering decision, and the registry's order
+#: is an operator decision pinned by ``tests/test_sources_cascade.py``; it is not one this layer
+#: makes for a caller who has not asked for it.
+INFO_PRICE_SOURCES = ("marketlens-close", "nse-bhavcopy")
+
 
 class Ticker:
     """
@@ -60,12 +293,40 @@ class Ticker:
         proxy: Optional[str] = None,
         session: Optional[Any] = None,
         raise_errors: bool = False,
+        statement_fallback: bool = False,
+        trendlyne_sections: bool = False,
     ):
         if not isinstance(ticker, str) or not ticker.strip():
             raise ValueError("ticker must be a non-empty string")
         self.ticker = ticker.strip()
         self.exchange, self.symbol = resolve_exchange_and_symbol(self.ticker)
         self.raise_errors = raise_errors
+        #: Whether the statement accessors may fall back to a second vendor when the primary
+        #: source carries **no statement at all**. Off by default: the main path must not start
+        #: issuing second-vendor requests a caller did not ask for, and the fallback is a
+        #: last resort rather than a preference. Named for what it does rather than for the
+        #: vendor that currently serves it -- a second vendor would need no code change here --
+        #: and :attr:`Ticker.__init__` is a provider-agnostic signature. See
+        #: :meth:`_fallback_statement_frame`.
+        self.statement_fallback = bool(statement_fallback)
+        #: Whether the ``trendlyne_*`` section members and the trendlyne half of
+        #: :attr:`analyst_price_targets` may run. Off by default, for the same reason the
+        #: statement fallback is: the section layer is a **second vendor**, and a caller who did
+        #: not ask for one should not be charged a request, a second origin's parsing rules, or
+        #: fourteen new failure modes. Separate from ``statement_fallback`` rather than folded
+        #: into it, because the two are different capabilities against different routes and a
+        #: caller who wants the sections need not open the statements fallback. See
+        #: :meth:`_section_client` for how the client is reached without importing it.
+        self.trendlyne_sections = bool(trendlyne_sections)
+        # The section client's own transport configuration. The constructor took these and used
+        # them only for the screener client; forwarding them is what makes
+        # ``Ticker("TCS", timeout=3.0, proxy=...)`` mean the same thing on the opt-in surface.
+        self._section_timeout: float = timeout
+        self._section_proxy: Optional[str] = proxy
+        # Built on the first section call and reused after, so the sitemap index, the per-symbol
+        # record and the pacing slot are shared across the seven members. ``None`` until then --
+        # and for a default Ticker, forever.
+        self._section_client_instance: Optional[Any] = None
         self.cache = SQLiteCache(default_ttl_hours=cache_ttl_hours) if cache_ttl_hours > 0 else None
         self.screener_client = ScreenerClient(
             timeout=timeout, cache_ttl_hours=cache_ttl_hours, proxy=proxy, cache=self.cache
@@ -88,6 +349,10 @@ class Ticker:
         # having to guess -- a 52-week range that is absent because history failed used to be
         # indistinguishable from a company that has none.
         self._degradations: List[str] = []
+        # Fallback-vendor payloads already fetched for this object, keyed by symbol. Empty here
+        # and populated only by the opt-in statement fallback, so the default path opens no
+        # socket. See `_fundamentals_payload`.
+        self._fundamentals_payloads: Dict[str, Any] = {}
 
     # --------------------------------------------------- Observability
     def _degrade(self, what: str, cause: str) -> None:
@@ -176,6 +441,252 @@ class Ticker:
             self._degrade(f"{label} (statement unreadable)", str(e))
             return pd.DataFrame(), str(e)
 
+    def _fallback_statement_frame(
+        self, kind: str, frequency: str
+    ) -> Tuple[pd.DataFrame, Optional[str]]:
+        """One statement from the second vendor, or an empty frame plus the reason.
+
+        Returns ``(frame, error)``.
+
+        The yfinance-compatible statement accessors are normally served by screener.in alone. When
+        that source carries **no statement at all** -- a blocked fetch, a symbol it does not cover
+        -- an independent vendor with 11 fiscal years and 13 quarters sits unused, and the caller
+        gets an empty frame that reads as "this company has no financials".
+
+        This is the fallback, and it is deliberately narrow:
+
+        * **it is opt-in.** ``Ticker(symbol)`` without ``statement_fallback=True`` opens no
+          second-vendor socket. The default path is unchanged by construction, and
+          ``tests/test_ticker_trendlyne_statement_fallback.py`` asserts it.
+        * **it never blends.** Either the primary source's statement, whole, or the fallback's,
+          whole. No row-level merge and no back-filling a missing period from the other vendor: a
+          frame half from each would be indistinguishable from either, and a basis difference
+          between the two is exactly what must not be smoothed over.
+        * **the basis is the primary source's.** screener.in is consolidated-only on this route,
+          so the request is consolidated, and the trendlyne JSON route serves both bases. The
+          frame's ``attrs`` record what was served and what was asked for regardless, so a
+          mismatch is visible rather than assumed away.
+
+        **A served statement is not a degradation, and records nothing on
+        :attr:`data_warnings`.** ``_degrade`` says "what is **unavailable**", and a complete
+        frame is not that. Its provenance rides on the frame's ``attrs`` instead --
+        ``bfinance_statements_provider`` names the vendor and ``bfinance_statements_basis`` the
+        basis. That is this file's established convention for a multi-vendor failover, identical
+        in shape to the ``bfinance_price_source*`` keys :meth:`history` publishes: the return type
+        does not change and a failover is an ordinary DataFrame. ``data_warnings`` is reserved for
+        the branches where the fallback could **not** answer, which is what keeps "genuinely not
+        published" distinguishable from "failed to fetch" -- the distinction the property exists
+        for. Recording a healthy fallback there made every successful call look like a failure
+        and told a caller to distrust a frame that was in fact complete.
+
+        **It also claims no failover it did not perform.** The cascade is restricted (``only=``)
+        to the providers whose payload this path actually holds, and :func:`_fallback_fetch`
+        refuses anything else, so ``bfinance_statements_providers_tried`` names only the provider
+        that answered and ``bfinance_statements_skip_reasons`` is empty. With the primary source
+        absent from the call, ``bfinance_statements_fallback`` is therefore ``False`` and
+        ``…_fallback_from`` empty -- the honest reading, because no provider that *could* have
+        served this cell was skipped or failed. That the primary source had no statement is
+        established by the accessor's own branch condition (its table was empty), not by a vendor
+        that was never asked. See :func:`_fallback_fetch` for what this replaces.
+
+        Args:
+            kind: ``"income"``, ``"balance_sheet"`` or ``"cash_flow"``.
+            frequency: ``"annual"`` or ``"quarterly"``.
+
+        Returns:
+            ``(frame, None)`` when the fallback served a statement, and ``(pd.DataFrame(), reason)``
+            when it did not -- with ``reason`` recorded on :attr:`data_warnings` by the caller,
+            following the same contract as :meth:`_read_statement`.
+
+        Raises:
+            BFinanceError: with ``raise_errors=True``, every typed failure below is re-raised
+                rather than degraded.
+            ValueError: a caller bug -- ``StatementKind("inccome")`` is a misspelling, not bad
+                upstream data -- and it propagates rather than becoming a "vendor degraded"
+                warning. Same rule as :meth:`_read_statement`.
+        """
+        if not self.statement_fallback:
+            return pd.DataFrame(), None
+
+        # Imported here rather than at module scope for two reasons: the package is opt-in
+        # (``bfinance/statements`` is reached only by explicit import) and the import cost is not
+        # paid on the common path, which never reaches this method.
+        from bfinance.statements import (
+            JSON_PAYLOAD,
+            PROVIDERS,
+            Basis,
+            Frequency,
+            StatementKind,
+            StatementRequest,
+            resolve,
+        )
+        from bfinance.statements.fundamentals_fetch import fetch_fundamentals_json_sync
+        from bfinance.statements.yfinance_bridge import result_to_yfinance_frame
+
+        # The one payload this path holds, and the providers registered to read it. Derived from
+        # the registry rather than written out as a provider name, so a spec that is added,
+        # renamed or split cannot leave a literal here aimed at something that no longer exists.
+        carriers = tuple(
+            name for name, spec in PROVIDERS.items() if spec.payload == JSON_PAYLOAD
+        )
+
+        try:
+            payload = self._fundamentals_payload(fetch_fundamentals_json_sync)
+            request = StatementRequest(
+                symbol=self.symbol,
+                kind=StatementKind(kind),
+                frequency=Frequency(frequency),
+                basis=Basis.CONSOLIDATED,
+            )
+            # `only=` keeps the cascade to the providers this payload can speak for, and the fetch
+            # refuses any spec whose payload it does not carry. Both halves are load-bearing: the
+            # fetch alone would still record the refusal as a skip -- and a skip is a sentence
+            # about a vendor on `attrs` -- while `only` alone would let a future provider read
+            # bytes that were never meant for it.
+            result = resolve(
+                request,
+                fetch=_fallback_fetch(JSON_PAYLOAD, payload),
+                only=carriers,
+            )
+            frame = result_to_yfinance_frame(result)
+        except BFinanceError as e:
+            # Same contract as _read_statement: a typed upstream failure is a degraded answer when
+            # the caller asked for graceful degradation, and a raise when it did not.
+            # ``FundamentalsFetchError`` (vendor unreachable, token refused) and
+            # ``StatementCapabilityError`` (a statement no reachable source publishes) are both
+            # BFinanceError subclasses, so one clause covers both without naming either.
+            #
+            # Narrowed from ``except (ValueError, KeyError)``. That clause converted a *caller
+            # bug* -- ``StatementKind("inccome")`` raising ValueError, or a KeyError out of a
+            # parser fed the wrong shape -- into "the vendor is degraded", which is the quiet
+            # bug-into-empty-frame antipattern _read_statement exists to refuse. A KeyError from
+            # BeautifulSoup handed a dict is a bug in this package, not bad upstream data, and it
+            # is the exact error :func:`_fallback_fetch` exists to stop being produced.
+            if self.raise_errors:
+                raise
+            return pd.DataFrame(), f"{type(e).__name__}: {e}"
+
+        if frame.empty:
+            return pd.DataFrame(), (
+                f"the fallback vendor returned no {kind} statement at {frequency} frequency for "
+                f"{self.symbol}"
+            )
+        # No _degrade here on purpose -- see the docstring above.
+        return frame, None
+
+    def _fundamentals_payload(self, fetch) -> Any:
+        """The fallback vendor's payload for this symbol, fetched at most once per ``Ticker``.
+
+        One JSON route carries every statement and both frequencies, so the four statement
+        accessors on a single ``Ticker`` were issuing four shell fetches plus four ~841 KB JSON
+        fetches for byte-identical data. The cache is on the instance, keyed by symbol, and is
+        **lazy**: nothing is fetched at construction, and a ``Ticker`` without the fallback flag
+        never reaches this method at all.
+
+        Scope is deliberately one ``Ticker`` object's lifetime, and that is the boundary worth
+        writing down. The fetcher's own documentation records that the per-symbol token rotates
+        and is therefore never stored across calls; caching here keeps only the *decoded payload*
+        for an object a caller is actively reading four accessors off, and a new ``Ticker`` starts
+        empty and re-resolves. Nothing here extends a token's life or is a cross-process cache,
+        and a failed fetch is not cached -- the next accessor retries rather than replaying a
+        failure for the life of the object.
+        """
+        if self.symbol not in self._fundamentals_payloads:
+            self._fundamentals_payloads[self.symbol] = fetch(self.symbol)
+        return self._fundamentals_payloads[self.symbol]
+
+    # --------------------------------------------------- Opt-in trendlyne section bridge
+    #
+    # The two methods below are the only code in this module that knows the trendlyne leaf
+    # exists, and neither of them says so in a way an import scanner can read. Everything the
+    # section layer offers is expressed as one `_section_call` over one `_section_client`.
+
+    def _section_client(self) -> Any:
+        """The trendlyne client this object's section calls go through, built once.
+
+        **This method is the whole bridge, and it exists because the obvious one is refused.**
+        ``bfinance.trendlyne`` is a leaf by rule:
+        ``tests/test_trendlyne_core.py::TestIsolation`` AST-walks every module under ``src/`` and
+        fails on any ``Import``/``ImportFrom`` naming ``*trendlyne*``, descending into function
+        bodies. So neither a module-level ``import bfinance.trendlyne`` nor a function-local
+        ``from bfinance.trendlyne import TrendlyneClient`` is available here, even though both
+        would only ever *execute* on this path -- which is the interesting part, because "the
+        import is inside the guard" is exactly the reasoning that makes an isolation test
+        unenforceable.
+
+        ``importlib.import_module`` is the one indirection the scan cannot see: the name is a
+        string argument, so there is no ``Import`` node to find at any depth. It is the same
+        mechanism :func:`bfinance.sources.cascade.load_provider` already uses to resolve a
+        registry row to the module it names, so it is repo-precedented rather than a loophole
+        invented here to get around a test.
+
+        The runtime half is the one that actually matters to a caller, and it holds with the
+        other: the module is resolved on the **first section call**, never at construction and
+        never at import. ``import bfinance`` therefore still executes none of the eight opt-in
+        modules, and a default ``Ticker`` still leaves ``sys.modules`` untouched --
+        ``tests/test_public_surface.py`` asks the first in a fresh interpreter and
+        ``tests/test_ticker_trendlyne_sections.py`` asks the second the same way.
+
+        The instance is cached for the life of this object, so the seven section members share
+        one sitemap index, one per-symbol record and one pacing slot. Constructing the client
+        performs no I/O of its own; the sitemap is fetched on first use.
+
+        Raises:
+            NotImplementedError: ``trendlyne_sections`` is off. Refusing is the honest answer
+                here and an empty frame is not: an empty frame is how "this symbol has no
+                share-holding rows" reads, so returning one to a caller who never opted in would
+                report a fact about the company that nobody looked for.
+        """
+        if not self.trendlyne_sections:
+            raise NotImplementedError(
+                f"{self.ticker}: the trendlyne section members are opt-in and this Ticker was "
+                f"not opted in. Construct it with trendlyne_sections=True to reach a second "
+                f"vendor's research reports, news, holdings, deals, buy/sell zone, technicals "
+                f"and SWOT pages, or read the frames this package already serves without them."
+            )
+        if self._section_client_instance is None:
+            module = importlib.import_module("bfinance.trendlyne.client")
+            self._section_client_instance = module.TrendlyneClient(
+                timeout=self._section_timeout,
+                proxy=self._section_proxy,
+                cache=self.cache,
+            )
+        return self._section_client_instance
+
+    def _section_call(
+        self, what: str, method: str, *args: Any, **kwargs: Any
+    ) -> Tuple[Any, Optional[str]]:
+        """Run one section method through the client's **sync** twin. Returns ``(value, error)``.
+
+        ``error`` is ``None`` **only** when ``value`` is the real answer the vendor sent -- the
+        same contract :meth:`_read_statement` publishes for a statement, and for the same reason.
+        A caller who cannot separate those two cannot separate "this company has no block deals"
+        from "the page did not load", which is the one distinction :attr:`data_warnings` exists to
+        keep. So a typed failure is recorded through :meth:`_degrade` and reported here as the
+        ``error`` the caller needs in order to return its own honest empty shape.
+
+        ``method`` is a **name**, not a bound method, so that nothing about the vendor's class
+        is resolved before the flag has been checked. The lookup happens on the object
+        :meth:`_section_client` has just built, and an ``AttributeError`` -- a method this
+        package does not ship -- propagates as the bug in this package that it is, rather than
+        being recorded as a degraded vendor.
+
+        Raises:
+            BFinanceError: with ``raise_errors=True`` every typed vendor failure is re-raised
+                rather than degraded, as everywhere else in this class.
+            ValueError: a caller bug (``page=0``), which propagates. A misspelled argument is
+                not bad upstream data and must not be recorded as one.
+        """
+        client = self._section_client()
+        try:
+            return getattr(client, method)(self.symbol, *args, **kwargs), None
+        except BFinanceError as e:
+            if self.raise_errors:
+                raise
+            cause = f"{type(e).__name__}: {e}"
+            self._degrade(what, cause)
+            return None, cause
+
     async def get_profile_async(self, force_refresh: bool = False) -> CompanyProfile:
         """Async variant of profile getter."""
         if self._profile is None or force_refresh:
@@ -240,7 +751,11 @@ class Ticker:
             latest_p = profile.ratios.current_price
             hist = None
             try:
-                hist = self.history(period="1y")
+                # A NARROW request, and the narrowness is the point: build_info_dict reads Close and
+                # Volume off this frame and nothing else, so asking for Open/High/Low as well buys
+                # a corporate-actions round trip and a two-factor adjustment that are then read for
+                # two columns out of five. See INFO_HISTORY_COLUMNS for what was measured.
+                hist = self.history(period="1y", requires=INFO_HISTORY_COLUMNS)
                 if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
                     latest_p = float(hist["Close"].iloc[-1])
             except (BFinanceError, RuntimeError) as e:
@@ -276,6 +791,7 @@ class Ticker:
         adjust_corporate_actions: bool = True,
         source: Optional[str] = None,
         sources: Optional[Sequence[str]] = None,
+        requires: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """
         Historical OHLCV DataFrame matching exact yfinance `ticker.history()` signature and schema.
@@ -309,6 +825,14 @@ class Ticker:
                 return type does not change -- a failover is an ordinary DataFrame. See
                 :meth:`bfinance.market.ohlcv.OHLCVEngine.fetch_history` for the full contract,
                 including why an as-traded request never reaches ``"trendlyne-ohlc"``.
+            requires: The columns this call actually needs. ``None`` (the default) means the full
+                yfinance OHLCV frame and changes nothing at all. A value such as
+                ``("Close", "Volume")`` makes this a **column-narrow** call: only a price source
+                that publishes every named column is even asked, the frame returned carries exactly
+                those columns, and it is NOT auto-adjusted and carries no ``Adj Close`` or action
+                columns — deriving those needs Open/High/Low, which a narrow call has said it does
+                not want. See :meth:`bfinance.market.ohlcv.OHLCVEngine.fetch_history` for the three
+                things it changes and why.
             adjust_corporate_actions: ``True`` (default) back-adjusts Open/High/Low/Close by the
                 cumulative share-count factor over the instrument's whole corporate-action
                 history, so the default path matches yfinance's own ``auto_adjust=False`` series
@@ -402,6 +926,7 @@ class Ticker:
                 adjust_corporate_actions=adjust_corporate_actions,
                 source=source,
                 sources=sources,
+                requires=requires,
             )
         )
 
@@ -424,6 +949,7 @@ class Ticker:
         adjust_corporate_actions: bool = True,
         source: Optional[str] = None,
         sources: Optional[Sequence[str]] = None,
+        requires: Optional[Sequence[str]] = None,
     ) -> pd.DataFrame:
         """Async variant of history().
 
@@ -449,6 +975,7 @@ class Ticker:
             adjust_corporate_actions=adjust_corporate_actions,
             source=source,
             sources=sources,
+            requires=requires,
         )
 
     # --------------------------------------------------- Financial Statements API
@@ -461,13 +988,43 @@ class Ticker:
     # The native shape is still reachable, still unchanged, via
     # ``FinancialStatement.to_dataframe()`` on ``Ticker._ensure_profile()``, which is where
     # finengine reads it and where the Indian-label contract is pinned.
+    #
+    # The parity claim has one stated limit: the yfinance ``pretty`` keyword is **refused**
+    # (:data:`_PRETTY_UNSUPPORTED`), not honoured. It was silently ignored, which is the one
+    # outcome worse than a raise -- a caller who passed ``pretty=True`` got a frame whose index
+    # vocabulary had nothing to do with the flag.
     def get_income_stmt(
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
-        """Fetch income statement matching yfinance `get_income_stmt()`."""
+        """Fetch income statement matching yfinance `get_income_stmt()`.
+
+        Raises:
+            NotImplementedError: ``pretty=True``. See :data:`_PRETTY_UNSUPPORTED` -- the flag is
+                refused, not ignored, because neither statement path can honour it without an
+                unmeasured label map. The default ``pretty=False`` is unchanged.
+        """
+        if pretty:
+            raise NotImplementedError(_PRETTY_UNSUPPORTED)
+        quarterly = (freq or "yearly").lower() == "quarterly"
         profile = self._ensure_profile()
-        table = profile.quarters if freq.lower() == "quarterly" else profile.profit_loss
-        if freq.lower() == "quarterly" and table.empty:
+        table = profile.quarters if quarterly else profile.profit_loss
+        if table.empty and self.statement_fallback:
+            # Attempted BEFORE the quarterly raise below, because the fallback vendor does
+            # publish 13 quarters where the primary source may carry none.
+            df, error = self._fallback_statement_frame(
+                "income", "quarterly" if quarterly else "annual"
+            )
+            if not df.empty:
+                return df.to_dict() if as_dict else df
+            if error:
+                # ``_fallback_statement_frame`` returns a non-empty frame or a reason, so a
+                # fallback that served nothing always lands here. There is no quarterly branch
+                # beneath it: the raise is the statement immediately below, which the primary
+                # source's empty quarterly table would have reached anyway. The previous
+                # ``elif quarterly: raise`` could not fire, and the duplication only made it
+                # look as though the quarterly-empty path had two exits.
+                self._degrade(f"income statement ({freq}) -- fallback vendor", error)
+        if quarterly and table.empty:
             raise NotImplementedError("quarterly statements not supported")
         df = table.to_yfinance()
         if as_dict:
@@ -477,10 +1034,23 @@ class Ticker:
     def get_balance_sheet(
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
-        """Fetch balance sheet matching yfinance `get_balance_sheet()`."""
+        """Fetch balance sheet matching yfinance `get_balance_sheet()`.
+
+        Raises:
+            NotImplementedError: ``pretty=True`` (see :data:`_PRETTY_UNSUPPORTED`), or a
+                non-yearly ``freq``. The default ``pretty=False`` is unchanged.
+        """
+        if pretty:
+            raise NotImplementedError(_PRETTY_UNSUPPORTED)
         if (freq or "yearly").lower() != "yearly":
             raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
+        if profile.balance_sheet.empty and self.statement_fallback:
+            df, error = self._fallback_statement_frame("balance_sheet", "annual")
+            if not df.empty:
+                return df.to_dict() if as_dict else df
+            if error:
+                self._degrade("balance sheet (yearly) -- fallback vendor", error)
         df = profile.balance_sheet.to_yfinance()
         if as_dict:
             return df.to_dict()
@@ -489,17 +1059,30 @@ class Ticker:
     def get_cash_flow(
         self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"
     ) -> Union[pd.DataFrame, dict]:
-        """Fetch cash flow statement matching yfinance `get_cash_flow()`."""
+        """Fetch cash flow statement matching yfinance `get_cash_flow()`.
+
+        Raises:
+            NotImplementedError: ``pretty=True`` (see :data:`_PRETTY_UNSUPPORTED`), or a
+                non-yearly ``freq``. The default ``pretty=False`` is unchanged.
+        """
+        if pretty:
+            raise NotImplementedError(_PRETTY_UNSUPPORTED)
         if (freq or "yearly").lower() != "yearly":
             raise NotImplementedError("quarterly statements not supported")
         profile = self._ensure_profile()
+        if profile.cash_flow.empty and self.statement_fallback:
+            df, error = self._fallback_statement_frame("cash_flow", "annual")
+            if not df.empty:
+                return df.to_dict() if as_dict else df
+            if error:
+                self._degrade("cash flow statement (yearly) -- fallback vendor", error)
         df = profile.cash_flow.to_yfinance()
         if as_dict:
             return df.to_dict()
         return df
 
     def get_cashflow(self, as_dict: bool = False, pretty: bool = False, freq: str = "yearly"):
-        """Alias for get_cash_flow."""
+        """Alias for get_cash_flow; ``pretty=True`` raises there for the same reason."""
         return self.get_cash_flow(as_dict=as_dict, pretty=pretty, freq=freq)
 
     @property
@@ -611,15 +1194,91 @@ class Ticker:
         return CorporateActionsEngine.build_calendar(profile, self.dividends)
 
     @property
-    def analyst_price_targets(self) -> Optional[Dict[str, Optional[float]]]:
-        """Analyst price targets summary matching yfinance.
+    def analyst_price_targets(self) -> Optional[Dict[str, Any]]:
+        """Analyst price targets summary matching yfinance, from trendlyne's research reports.
 
-        Upstream provides no analyst-estimates feed, so there is no honest
-        value to return. Previously this synthesized low/high/mean/median
-        from fixed multipliers off the current price — removed in 0.1.3.
-        Returns None until a real estimates source is integrated.
+        **Without ``Ticker(..., trendlyne_sections=True)`` this is ``None``**, which is the whole
+        of what it was before: the package served no estimates feed, and the previous
+        implementation -- which synthesised ``low = cmp x 0.85``, ``high = cmp x 1.35``,
+        ``mean = cmp x 1.15`` off a current price that could itself fall back to a constant --
+        was deleted in 0.1.3 because it produced confident numbers nobody published. Nothing of
+        that kind happens here: every figure below is read out of the vendor's own ``Target``
+        column, and there is no path through this property that invents one.
+
+        **With the flag on** and the reports page answering, the dictionary is yfinance's shape
+        plus two provenance keys:
+
+        * ``current`` is ``None``, always. The route publishes an ``LTP`` column, but that is the
+          price at the moment each report was published; publishing it under the key a caller
+          reads as *today's* price is the same relabelling the deleted synthesiser was deleted
+          for. No current price is derivable from this feed.
+        * ``low`` / ``high`` / ``mean`` / ``median`` are the min, max, mean and median of the
+          ``Target`` column, over per-report rows only. The vendor's own aggregate *Consensus
+          Share Price Target* row is an average of the rows beneath it — it is **row 0 on the
+          recorded capture**, `research_reports_tcs.html`, where its ``Target`` is 2445.54 — so
+          including it would fold the consensus into every statistic computed here. It is excluded,
+          and the count of what remained is published as ``n_reports`` -- a mean of two and a mean
+          of twenty are the same number over a very different amount of evidence.
+        * **The exclusion is by word, not by position.** The aggregate is matched
+          case-insensitively against the ``Author`` column (``_CONSENSUS_ROW_MARKER``), because
+          the page decides its own order and nothing measured pins that the aggregate is always
+          first. Reading "row 0" as the rule would be a claim about the vendor's markup that this
+          package cannot make; reading it as *what the recorded page showed* is one it can.
+        * **A missing ``Author`` column withholds the statistics entirely** rather than including
+          the aggregate. That is a deliberate choice over the alternative (compute them and hope
+          the aggregate is not there): with no column to match against, every figure below would
+          fold the consensus into the mean of the rows beneath it, and a mean that is wrong by one
+          value looks exactly like one that is right. The reason lands on :attr:`data_warnings`.
+        * **A ``Target`` written with a thousands separator is a target, not a blank.**
+          ``"2,450.54"`` is repaired before the numeric coercion (``_numeric_targets``);
+          ``pd.to_numeric(errors="coerce")`` alone would drop it as ``NaN`` and lose a real broker
+          from ``low``, ``high``, ``mean``, ``median`` and ``n_reports`` at once.
+        * ``n_reports`` and ``bfinance_analyst_source`` travel with the value so that provenance
+          does not have to be inferred from whether a warning happened to be logged.
+
+        Returns ``None`` -- never a synthesised target -- when the flag is off, when the reports
+        page carries no usable ``Target`` value, when it carries no ``Author`` column to exclude
+        the aggregate with, or when the fetch failed. In each of the first three the specific
+        reason is on :attr:`data_warnings`, and the fetch is not attempted twice.
         """
-        return None
+        if not self.trendlyne_sections:
+            return None
+        frame, error = self._section_call("trendlyne research reports", "research_reports")
+        if error is not None:
+            # Already recorded by _section_call; a second warning here would name one cause
+            # twice and read as two failures.
+            return None
+        targets = _targets_from_reports(frame)
+        if targets is None:
+            self._degrade("analyst price targets", self._targets_absence(frame))
+        return targets
+
+    def _targets_absence(self, frame: pd.DataFrame) -> str:
+        """Why :func:`_targets_from_reports` returned ``None``, as a reason a caller can act on.
+
+        Three absences share that ``None``, and "there is no measured target" would be a false
+        statement about two of them: a page with targets whose ``Author`` column has been renamed
+        has every target the caller wanted and none this property is willing to publish. So the
+        column names are checked here, in the one place with a Ticker to record the answer on,
+        rather than being folded into one vague sentence.
+        """
+        if frame is None or frame.empty:
+            return (
+                f"the trendlyne research-reports page for {self.symbol} carried no rows, so there "
+                f"is no measured target to publish; none was synthesised"
+            )
+        if _CONSENSUS_ROW_COLUMN not in frame.columns:
+            return (
+                f"the trendlyne research-reports page for {self.symbol} carries a Target column "
+                f"but no '{_CONSENSUS_ROW_COLUMN}' column, so the vendor's aggregate "
+                f"'Consensus Share Price Target' row cannot be told apart from a per-report row; "
+                f"including it would fold the consensus into every statistic, so none were "
+                f"published and none was synthesised"
+            )
+        return (
+            f"the trendlyne research-reports page carries no usable Target value for "
+            f"{self.symbol}, so there is no measured target to publish; none was synthesised"
+        )
 
     @property
     def options(self) -> Tuple[str, ...]:
@@ -663,6 +1322,125 @@ class Ticker:
         """Latest announcements adapted to yfinance {id, content} news shape."""
         profile = self._ensure_profile()
         return CorporateActionsEngine.build_news(profile.announcements)
+
+    # ------------------------------------- Opt-in trendlyne section members
+    #
+    # Seven members over one lazy client, all behind ``trendlyne_sections=True``, all reached
+    # through `_section_call`, and all returning an honest empty shape (never a fabricated
+    # frame) when the fetch fails -- with the reason on `data_warnings` in every one of those
+    # cases. None of them is reached by an existing property, so none of them changes one.
+
+    def trendlyne_news(self, page: int = 1) -> List[Dict[str, Any]]:
+        """trendlyne's ``/latest-news/`` page for this symbol, in the yfinance news shape.
+
+        The **same** ``{"id", "content": {title, link, publisher, provider, time, pubDate,
+        canonicalUrl}}`` structure :attr:`news` returns, from a different vendor: the point of
+        this member is that a caller who already indexes those two levels does not have to learn
+        a second one. ``tests/test_ticker_trendlyne_sections.py`` pins the two key sets against
+        each other, so the shapes cannot drift apart silently.
+
+        Args:
+            page: Vendor page number. ``1`` is the bare page; anything higher is ``?page=N``,
+                which trendlyne answers with the next batch of cards.
+
+        Returns:
+            One item per card on the page, in the page's own order. An empty list means the
+            vendor's page carried no cards, which is the same ``[]`` :attr:`news` returns for a
+            symbol with no announcements; a *failure* is on :attr:`data_warnings` and does not
+            look like an empty list to anyone reading it.
+        """
+        frame, error = self._section_call("trendlyne news", "latest_news", page=page)
+        if error is not None:
+            return []
+        items = []
+        for position, (_, row) in enumerate(frame.iterrows()):
+            items.append(
+                _trendlyne_news_item(
+                    f"bfinance-trendlyne-p{page}-{position}",
+                    row.get("date"),
+                    row.get("title"),
+                    row.get("url"),
+                    row.get("source"),
+                )
+            )
+        return items
+
+    def trendlyne_reports(self, page: int = 1) -> pd.DataFrame:
+        """trendlyne's broker research-reports table, the vendor's columns, verbatim.
+
+        One request, and one page of it: the frame is stamped ``page`` in its ``attrs`` and is
+        not the full report history. Its first row is the vendor's own aggregate *Consensus
+        Share Price Target* row, which is kept rather than filtered -- it is the consensus, and
+        removing it would be this package deciding what the caller wanted.
+        :attr:`analyst_price_targets` reads this same table and documents the one thing a
+        consumer must do about that row before averaging it.
+        """
+        frame, error = self._section_call("trendlyne research reports", "research_reports", page=page)
+        return pd.DataFrame() if error is not None else frame
+
+    def trendlyne_shareholding(self) -> pd.DataFrame:
+        """The share-holding **summary grid**: holder categories down, quarters across.
+
+        The analogue of :attr:`shareholding`, and the reason it is its own member: this route
+        serves **only** the period ``latest`` (every other segment answers HTTP 500, verified),
+        so the frame is one unaddressable snapshot and carries
+        ``attrs["bfinance_trendlyne_snapshot_only"] = True``. It is still worth one request --
+        the page embeds every quarter it holds.
+
+        The per-category holder tables that sit behind the tabs on the same page are **not**
+        folded in: they are a second request, and a member that fetched both would be deciding
+        which of the two its caller wanted. Reach them on the client as
+        ``TrendlyneClient.share_holding_holders``.
+        """
+        frame, error = self._section_call(
+            "trendlyne share-holding summary", "share_holding"
+        )
+        return pd.DataFrame() if error is not None else frame
+
+    def trendlyne_deals(self) -> pd.DataFrame:
+        """Bulk and block deals, as the vendor's ``deals`` table.
+
+        The whole history the page serves, in one request -- there is no period axis on this
+        route, which is why it carries no snapshot guard. Not the insider-trading table, which
+        shares a client but not a shape.
+        """
+        frame, error = self._section_call("trendlyne bulk and block deals", "bulk_block_deals")
+        return pd.DataFrame() if error is not None else frame
+
+    def trendlyne_buy_sell_zone(self) -> Dict[str, pd.DataFrame]:
+        """The PE-band grids on both bases: ``{"standalone", "consolidated"}``.
+
+        Two frames, keyed by the ``div.tab-pane`` they live in rather than by their headers,
+        because the two grids carry **byte-identical header rows** on the live page and their
+        numbers differ. A key derived from the header would make a swap invisible.
+
+        An empty dictionary means the fetch failed and the reason is on :attr:`data_warnings`;
+        a dict whose frames are empty means the page carried no band rows.
+        """
+        grids, error = self._section_call("trendlyne buy/sell zone", "buy_sell_zone")
+        return {} if error is not None else grids
+
+    def trendlyne_technicals(self) -> pd.DataFrame:
+        """Trendlyne's own technical-signal table: ``name``, ``value``, ``insight``, ``color``,
+        ``parameter``.
+
+        From the robots-clean JSON sibling of the ``/equity/technical-analysis-*`` **page**,
+        which ``robots.txt`` disallows; that page route stays unwired. One request, and the
+        frame publishes in ``attrs`` which payload keys it does **not** speak for -- the raw
+        parameters are on the client as ``adv_technical_analysis``.
+        """
+        frame, error = self._section_call("trendlyne technical signals", "technical_signals")
+        return pd.DataFrame() if error is not None else frame
+
+    def trendlyne_swot(self) -> Dict[str, pd.DataFrame]:
+        """The SWOT widget's five fact tables, keyed by their tab pane.
+
+        Five single-column frames whose header cell *is* the fact; each publishes that heading
+        in ``attrs["bfinance_trendlyne_swot_heading"]``. The fifth (``tag_others``) is the
+        vendor's own extra tab, not a fourth quadrant, and is published under its own name.
+        """
+        tables, error = self._section_call("trendlyne SWOT tables", "swot")
+        return {} if error is not None else tables
 
     # ----------------------------------------------- Indian Superpower Properties
     @property

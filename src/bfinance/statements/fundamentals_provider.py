@@ -81,6 +81,34 @@ the dump actually holds**, never from ``order``; an empty row set is
 read for *ordering* only, intersected with the dump's own keys, so a period the vendor listed but
 never populated cannot become a column.
 
+Which rows belong to which statement
+------------------------------------
+``get-fundamental_results-v2`` ships **one** dump for every table, so the ids in it are not one
+statement. Over the 260 ``_A`` ids of the recorded NTPC annual dump (union of both bases), by
+``parameterMetadata[id]['cat1']``: Balance Sheet 83, Income Statement 75, Financial Ratios 64,
+Cash Flow 8, and 30 ids the vendor categorises as nothing. Reading the same 189 rows for all three
+statements put revenue, margins and ROE on the balance sheet — a frame in which every number is
+individually right and the statement is not.
+
+Membership therefore comes from ``cat1`` and from nowhere else. Two neighbouring structures look
+like they could answer it and cannot, and both have been mistaken for the answer:
+
+``body.order.{root}.{group}``
+    names **periods**, never rows (trap 3 above).
+``body.level_first_dict_map[group]``
+    is the **collapsed level-1 list** the UI shows before a node is expanded: 16/17/13/4/8 ids
+    against 260 in the dump. The vendor's own drill-down, ``body.param_indicator_dict_map``,
+    expands those to 18/24/34/9/25 — which is exactly what its rendered tables contain — so
+    membership taken from the collapsed list would serve a 13-row balance sheet out of 34 real
+    rows: correctly labelled, correctly scaled, 174 rows gone, and nothing said. It is used here to
+    order the rows the way the site renders them, and for nothing else.
+
+Ratios are the one category with no :class:`~bfinance.statements.model.StatementKind`, so those 64
+rows belong to no statement and are excluded from all three — **by category, not by shape**,
+because six of them are money the vendor labels ``"Cr"``. The 30 the vendor leaves uncategorised
+are counted and excluded rather than assigned to a plausible neighbour, and both counts are on
+``attrs``.
+
 No URL is recorded on ``attrs``
 -------------------------------
 The JSON route is addressed by a per-symbol token. No ``attrs`` key here carries a URL, so there
@@ -124,7 +152,6 @@ __all__ = [
     "html_table_headers",
     "html_row_ids",
 ]
-
 HTML_PAYLOAD = "trendlyne_html"
 JSON_PAYLOAD = "trendlyne_json"
 
@@ -225,6 +252,44 @@ def _flatten(column: Any) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _metadata_label(meta: Any, row_id: str) -> str:
+    """The vendor's display label for one row id, or the id when there is none.
+
+    ``parameterMetadata[id]['sstr']`` is the label the site renders, measured byte-identical to
+    the server-rendered page's own label minus the expander arrow (``SR_A`` -> ``"Total Rev.
+    Ann."``). That matters for yfinance parity: a statement indexed by machine ids is not a
+    statement a caller can read, and inventing a friendlier label would be a rename of one
+    vendor's vocabulary into another's with nothing measured behind it. So the vendor's string is
+    used exactly as it comes, and the id is the fallback rather than the reverse.
+
+    ``lstr`` and ``name`` are the second and third choices because they exist on the same record
+    and are the vendor's own words.
+    """
+    if isinstance(meta, Mapping):
+        for key in ("sstr", "lstr", "name"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return row_id
+
+
+def _metadata_unit(meta: Any) -> str:
+    """The vendor's own unit string for one row id, verbatim, or ``""`` when it states none.
+
+    This is the only unit information in the whole payload, and the census over 347 measured keys
+    is why it is carried rather than inferred: ``"Cr"`` 201, ``"%"`` 55, ``"Rs"`` 25, ``"abs"`` 15,
+    ``""`` 6. An id-suffix heuristic gets ``PBV_A`` wrong -- it is a price-to-book **ratio** with no
+    unit at all, so any rule of the form "scale unless the unit says otherwise" multiplies it by
+    1e7. The positive rule reads from here; see
+    :func:`bfinance.statements.yfinance_bridge.result_to_yfinance_frame`.
+    """
+    if isinstance(meta, Mapping):
+        value = meta.get("unit")
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
 def _assemble(
     request: StatementRequest,
     *,
@@ -235,8 +300,11 @@ def _assemble(
     periods: Sequence[str],
     values: Mapping[str, Sequence[Optional[float]]],
     row_labels: Mapping[str, str],
-    units_note: str,
+    row_units: Mapping[str, str] = None,
+    units_note: str = "",
     omitted_rows: int = 0,
+    excluded_rows: Sequence[str] = (),
+    excluded_row_census: Mapping[str, int] | None = None,
 ) -> StatementResult:
     """Fold read rows into a result, dropping what carries no number and refusing what is empty.
 
@@ -252,6 +320,8 @@ def _assemble(
     """
     rows: Dict[str, Tuple[Optional[float], ...]] = {}
     labels: Dict[str, str] = {}
+    row_units_out: Dict[str, str] = {}
+    unit_census: Dict[str, int] = {}
     dropped: List[str] = []
     duplicates = 0
     for metric, cells in values.items():
@@ -269,6 +339,9 @@ def _assemble(
             continue
         rows[metric] = row
         labels[metric] = row_labels.get(metric, metric)
+        unit = (row_units or {}).get(metric, "")
+        row_units_out[metric] = unit
+        unit_census[unit or "(none)"] = unit_census.get(unit or "(none)", 0) + 1
 
     if not rows:
         raise StatementEmptyError(
@@ -284,6 +357,12 @@ def _assemble(
         )
 
     spec = TABLES[spec_name]
+    note = (units_note or "").strip()
+    if row_units_out:
+        census = ", ".join(
+            f"{unit}: {count}" for unit, count in sorted(unit_census.items(), key=lambda kv: -kv[1])
+        )
+        note = f"{note} Units as the vendor states them, per row ({census})."
     return StatementResult(
         request=request,
         provider=provider,
@@ -293,12 +372,15 @@ def _assemble(
         rows=rows,
         row_ids={metric: metric for metric in rows},
         row_labels=labels,
+        row_units=row_units_out,
         identified_by=spec.identified_by,
         identify_note=spec.note,
         duplicate_rows=duplicates,
         dropped_rows=tuple(dropped),
         omitted_rows=int(omitted_rows),
-        units_note=units_note,
+        excluded_rows=tuple(excluded_rows),
+        excluded_row_census=dict(excluded_row_census or {}),
+        units_note=note,
     )
 
 
@@ -597,6 +679,53 @@ _JSON_SUFFIX: Dict[Frequency, str] = {
     Frequency.TTM: "_A",
 }
 
+#: The row partition, and an honest account of what it rests on.
+#:
+#: ``parameterMetadata[id]['cat1']`` is the vendor's own label for the statement a row belongs to,
+#: and it is the only partition in the payload that survives measurement. It is **not a clean
+#: taxonomy**, and the next reader should not have to rediscover that. Census of the recorded NTPC
+#: payload (2026-10-09, 347 metadata keys):
+#:
+#: * ``cat1`` over all 347 keys: Income Statement 130, Balance Sheet 83, Financial Ratios 72,
+#:   Cash Flow 8, and 54 the vendor leaves blank.
+#: * Restricted to the 260 ``_A`` ids of the annual dump (union of both bases): Balance Sheet 83,
+#:   Income Statement 75, Financial Ratios 64, Cash Flow 8, and **30 with no ``cat1`` at all** —
+#:   ``DividendPayoutCP_A``, ``PE_A``, ``PS_A``, ``PBV_A``, ``PriceToBV_A`` and 25 more.
+#: * **Six** rows filed under ``Financial Ratios`` are money the vendor labels ``"Cr"``:
+#:   ``BusinessPerBranches_A``, ``CASHTO_A``, ``EnterpriseValue_A``,
+#:   ``GoodwillOnConsolidation_A``, ``InterestIncomePerBranch_A``, ``NPPerBranches_A``.
+#: * ``cat1`` **contradicts itself** on one pair: ``OPM_A`` is ``Financial Ratios`` and
+#:   ``OPMPCT_A`` is ``Income Statement``, with byte-identical ``cat3``
+#:   (``'Operating Profit Margin Annual'``) and byte-identical ``sstr`` (``'OPM Ann. %'``). The same
+#:   number, filed twice, under two sections.
+#:
+#: So this is a judgement call under imperfect vendor metadata, not a lookup, and it is the least
+#: bad of the three options measured: ``body.order`` names periods (trap 3) and
+#: ``body.level_first_dict_map`` is a collapsed UI list of 16/17/13/4/8 ids against the 260 in the
+#: dump. What it buys is that a balance sheet answers with assets and liabilities and nothing else;
+#: what it costs is the 64 ratio rows and the 30 uncategorised ones, both excluded **by name** on
+#: :attr:`~bfinance.statements.model.StatementResult.excluded_rows` rather than silently.
+_JSON_SECTION: dict[StatementKind, str] = {
+    StatementKind.INCOME: "Income Statement",
+    StatementKind.BALANCE_SHEET: "Balance Sheet",
+    StatementKind.CASH_FLOW: "Cash Flow",
+}
+
+#: The one category with no home. :class:`~bfinance.statements.model.StatementKind` has three
+#: members and ratios are deliberately not a fourth (ratios are not a statement), so these rows
+#: belong to no requested statement and are excluded from all three.
+#:
+#: Excluded **by category, not by shape**, because of the six ``"Cr"`` rows measured above. A rule
+#: of the form "a percentage is not a statement row" would keep those six and drop the rest, which
+#: is exactly backwards, and "a ratio is not money" is the assumption :func:`_metadata_unit` exists
+#: to refuse.
+_JSON_RATIO_CATEGORY = "Financial Ratios"
+
+#: The key an id the vendor categorises as nothing at all is counted under. It is not a category
+#: and never becomes one: the 30 measured above have no measured home, and assigning them to a
+#: plausible neighbour is the confident-nonsense failure this package exists to prevent.
+_JSON_UNCATEGORISED = "(no category stated)"
+
 
 def _body(payload: Any, context: str) -> Mapping[str, Any]:
     """Unwrap trendlyne's ``{"head": …, "body": …}`` envelope, or say precisely what is wrong.
@@ -679,6 +808,87 @@ def _ordered_periods(
     return labels
 
 
+def _partition_rows(
+    metadata: Mapping[str, Any],
+    members: Sequence[str],
+    section: str,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """``members`` split into one section's rows, and the ids left out **per category**.
+
+    Returns ``(rows, excluded)``, where ``excluded`` maps a ``cat1`` value to the sorted ids filed
+    under it. Grouping rather than counting is the point: an exclusion a caller cannot name is an
+    exclusion a caller cannot audit, and the whole reason this partition exists is that rows must
+    not vanish quietly.
+
+    Two different exclusions end up in that dict and must not be read as one. An id filed under
+    **another** statement is excluded from this one — that is the partition working, and the row is
+    an income row on the balance sheet's behalf only if this function is wrong. An id the vendor
+    categorises as nothing is excluded from **all three**, because no measurement says where it
+    belongs; guessing would put ``DividendPayoutCP_A`` on a balance sheet, which is the same
+    confident nonsense as putting ``ROE_A`` there.
+
+    ``cat1`` contradicts itself once, and the contradiction is left standing rather than smoothed.
+    ``OPM_A`` is categorised ``Financial Ratios`` and ``OPMPCT_A`` ``Income Statement``, with
+    byte-identical ``cat3`` (``'Operating Profit Margin Annual'``) and byte-identical ``sstr``
+    (``'OPM Ann. %'``): the same number filed twice, under two sections. This partition keeps the
+    copy the vendor filed as income and drops the ratio copy, which is the only reading of "which
+    one belongs here" that either measurement supports.
+    """
+    rows: list[str] = []
+    excluded: dict[str, list[str]] = {}
+    for row_id in members:
+        record = metadata.get(row_id)
+        category = record.get("cat1") if isinstance(record, Mapping) else None
+        if category == section:
+            rows.append(row_id)
+        else:
+            key = category if isinstance(category, str) and category else _JSON_UNCATEGORISED
+            excluded.setdefault(key, []).append(row_id)
+    return rows, excluded
+
+
+def _excluded_breakdown(excluded: Mapping[str, Sequence[str]]) -> str:
+    """``83 filed as Balance Sheet, 64 filed as Financial Ratios, 30 with no category stated``.
+
+    The uncategorised bucket is worded rather than printed as its key: ``(no category stated)`` in
+    a sentence reads like a value the vendor stated, which is the opposite of what it means.
+    """
+    parts = [
+        f"{len(ids)} filed as {category}"
+        for category, ids in sorted(excluded.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        if category != _JSON_UNCATEGORISED
+    ]
+    uncategorised = len(excluded.get(_JSON_UNCATEGORISED, ()))
+    if uncategorised:
+        parts.append(f"{uncategorised} with no category stated")
+    return ", ".join(parts)
+
+
+def _partition_note(
+    section: str,
+    selected: int,
+    total: int,
+    excluded: Mapping[str, Sequence[str]],
+) -> str:
+    """One sentence naming the partition and every excluded bucket, for ``units_note``.
+
+    On attrs rather than in a log line, because a caller holding a cash flow with 8 rows and a
+    balance sheet with 77 should be able to find out which without re-fetching the payload.
+    """
+    return (
+        f" Row partition read from body.parameterMetadata[id]['cat1'], the vendor's own "
+        f"statement label, over the {total} row id(s) this dump holds for this frequency: "
+        f"{selected} are {section}, and "
+        f"{sum(len(ids) for ids in excluded.values())} are not — "
+        f"{_excluded_breakdown(excluded)}. Ratios are excluded as a category and not as a shape: "
+        f"six of the Financial Ratios rows are money the vendor labels 'Cr' (CASHTO_A, "
+        f"EnterpriseValue_A, GoodwillOnConsolidation_A, BusinessPerBranches_A, "
+        f"InterestIncomePerBranch_A, NPPerBranches_A), so no rule of the form 'a percentage is not "
+        f"a statement row' would do. Ids the vendor states no category for are excluded from all "
+        f"three rather than assigned to a plausible neighbour."
+    )
+
+
 def parse_fundamental_results(
     payload: Any,
     request: StatementRequest,
@@ -757,33 +967,72 @@ def parse_fundamental_results(
     members = {row_id for row_id in ids_present if row_id.endswith(suffix)}
     if request.frequency is Frequency.QUARTERLY:
         members |= {row_id for row_id in UNSUFFIXED_TTM_ROW_IDS if row_id in ids_present}
-    section_ids = [
+
+    metadata = body.get("parameterMetadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+
+    # Which rows are *this statement's*. The payload offers two other orderings and neither can
+    # answer that, which is worth writing down because both have been mistaken for the answer:
+    #   * ``body.order.<root>.<group>`` names **periods**, never rows (trap 3);
+    #   * ``body.level_first_dict_map[group]`` is the **collapsed level-1 list** the UI shows
+    #     before a node is expanded — 16/17/13/4/8 ids against the 260 ``_A`` ids in the dump.
+    #     Its own drill-down, ``body.param_indicator_dict_map[group]``, expands to 18/24/34/9/25,
+    #     which is what the vendor's rendered tables contain, so membership taken from the
+    #     collapsed list alone would serve a 13-row balance sheet out of 34 real rows: correctly
+    #     labelled, correctly scaled, 174 rows gone, and nothing said.
+    # ``parameterMetadata[id]['cat1']`` is the vendor's own section label and does partition the
+    # dump. Membership comes from it alone; ``level_first_dict_map`` puts the rows in the order the
+    # site renders them and for nothing else, so its absence costs ordering, not rows.
+    section = _JSON_SECTION[request.kind]
+    in_section, excluded = _partition_rows(metadata, sorted(members), section)
+
+    # Ordering only. The vendor's own drill-down, param_indicator_dict_map, would be the fuller
+    # list; level_first_dict_map is enough to put the rows in the order the site renders them, and
+    # its absence costs ordering rather than rows, so it is read defensively rather than required.
+    level_first = body.get("level_first_dict_map")
+    level_first = level_first if isinstance(level_first, Mapping) else {}
+    section_hint = [
         entry["indCode"]
-        for entry in body.get("level_first_dict_map", {}).get(group, [])
+        for entry in (level_first.get(group) or [])
         if isinstance(entry, Mapping) and entry.get("indCode")
     ]
-    ordered_ids = [row_id for row_id in section_ids if row_id in members]
-    ordered_ids.extend(sorted(members - set(ordered_ids)))
+    selected = set(in_section)
+    ordered_ids = [row_id for row_id in section_hint if row_id in selected]
+    placed = set(ordered_ids)
+    ordered_ids.extend(row_id for row_id in in_section if row_id not in placed)
 
     if not ordered_ids:
-        advertised = body.get("order", {}).get(order_root, {}).get(group)
+        if not members:
+            advertised = body.get("order", {}).get(order_root, {}).get(group)
+            raise StatementEmptyError(
+                f"{context}: no {request.kind.value} row id carrying the {suffix!r} suffix "
+                f"appears in body.{dump_name}['{request.basis.value}'] across the "
+                f"{len(periods)} period(s) "
+                f"{periods[:4]}{'…' if len(periods) > 4 else ''}. body.order.{order_root}."
+                f"{group!r} advertises "
+                f"{len(advertised) if isinstance(advertised, list) else 'n/a'} period(s) for this "
+                f"statement, and the period list a vendor advertises is not the period set its "
+                f"rows have: every balance-sheet, cash-flow and ratio row id is '_A'-suffixed, "
+                f"and 0 of the 260 '_A' keys appears in the quarterly dump. Reading them across "
+                f"the advertised quarterly columns gives 0 of 13 non-null, every cell. That is an "
+                f"unasked question, not a published absence, and it is refused rather than "
+                f"returned as a frame of nulls."
+            )
         raise StatementEmptyError(
-            f"{context}: no {request.kind.value} row id carrying the {suffix!r} suffix appears in "
-            f"body.{dump_name}['{request.basis.value}'] across the {len(periods)} period(s) "
-            f"{periods[:4]}{'…' if len(periods) > 4 else ''}. body.order.{order_root}.{group!r} "
-            f"advertises "
-            f"{len(advertised) if isinstance(advertised, list) else 'n/a'} period(s) for this "
-            f"statement, and the period list a vendor advertises is not the period set its rows "
-            f"have: every balance-sheet, cash-flow and ratio row id is '_A'-suffixed, and 0 of "
-            f"the 260 '_A' keys appears in the quarterly dump. Reading them across the "
-            f"advertised quarterly columns gives 0 of 13 non-null, every cell. That is an unasked "
-            f"question, not a published absence, and it is refused rather than returned as a "
-            f"frame of nulls."
+            f"{context}: {len(members)} {request.kind.value} row id(s) carrying the {suffix!r} "
+            f"suffix ARE present in body.{dump_name}['{request.basis.value}'] across the "
+            f"{len(periods)} period(s) {periods[:4]}{'…' if len(periods) > 4 else ''}, and "
+            f"body.parameterMetadata files NONE of them as {section!r} — "
+            f"{_excluded_breakdown(excluded)}. So the rows are there and this payload does not say "
+            f"which statement they belong to. Serving the whole dump instead is the defect this "
+            f"partition closes (a balance sheet carrying revenue and ROE), so this is refused "
+            f"rather than returned as a frame of every row the vendor publishes."
         )
 
     values: Dict[str, List[Optional[float]]] = {}
     labels: Dict[str, str] = {}
-    with_number = 0
+    row_units: Dict[str, str] = {}
+    numeric_empty: list[str] = []
     for row_id in ordered_ids:
         cells: List[Optional[float]] = []
         has_number = False
@@ -799,10 +1048,15 @@ def parse_fundamental_results(
                 has_number = has_number or parsed is not None
                 cells.append(parsed)
         if not has_number:
+            # This row IS this statement's -- it is here because cat1 says so -- and the vendor
+            # publishes no number for it in any of these periods. Named rather than skipped, so the
+            # three row-counts on attrs (rows / excluded_rows / dropped_rows) account for every id
+            # the dump holds and none of them disappears silently.
+            numeric_empty.append(row_id)
             continue
-        with_number += 1
         values[row_id] = cells
-        labels[row_id] = row_id
+        labels[row_id] = _metadata_label(metadata.get(row_id), row_id)
+        row_units[row_id] = _metadata_unit(metadata.get(row_id))
 
     if not values:
         # The row set was non-empty (so the ids exist in this dump) and every one of them came
@@ -820,8 +1074,10 @@ def parse_fundamental_results(
         )
 
     units_note = str(body.get("tableInsightCurrency") or "").strip() or _HTML_UNITS_NOTE
+    units_note += _partition_note(section, len(in_section), len(members), excluded)
+    excluded_rows = tuple(sorted(row_id for ids in excluded.values() for row_id in ids))
     spec_name = CAPABILITIES[(request.kind, request.frequency)].tables()["trendlyne-json"]
-    return _assemble(
+    result = _assemble(
         request,
         provider="trendlyne-json",
         payload=JSON_PAYLOAD,
@@ -830,9 +1086,23 @@ def parse_fundamental_results(
         periods=periods,
         values=values,
         row_labels=labels,
+        row_units=row_units,
         units_note=units_note,
-        omitted_rows=max(0, len(members) - with_number),
+        # Every numeric row in this dump that the result does not carry: the ones filed under
+        # another statement, a category with no StatementKind, or no category at all, plus the
+        # ones that are this statement's and came back with no number in any period. The split is
+        # on attrs so no part of it is silent.
+        omitted_rows=len(excluded_rows) + len(numeric_empty),
+        excluded_rows=excluded_rows,
+        excluded_row_census={
+            category: len(ids) for category, ids in sorted(excluded.items())
+        },
     )
+    # The rows filtered out above are named, not skipped: without this the JSON route reports an
+    # empty dropped_rows while dropping rows, which is the one measurement this module exists to
+    # make impossible. _assemble never sees them, so they are carried across the same way the HTML
+    # route carries its DOM-side counts.
+    return _with_duplicate_count(result, 0, numeric_empty)
 
 
 def _cell(row: Any, row_id: str) -> Any:

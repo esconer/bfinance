@@ -204,7 +204,7 @@ class FinancialStatement(BaseModel):
             return {}
         return dict(zip(self.headers, self.rows[metric_name]))
 
-    def to_yfinance(self) -> pd.DataFrame:
+    def to_yfinance(self, *, scalable_rows: Optional[Iterable[str]] = None) -> pd.DataFrame:
         """
         Return the yfinance-shaped copy: ``DatetimeIndex`` columns **newest first**, absolute
         rupees, generic row labels.
@@ -234,6 +234,13 @@ class FinancialStatement(BaseModel):
         The native statement is not mutated, and ``to_dataframe()`` is untouched by any of
         this: the Indian-label Rs-Cr frame is still the contract finengine reads.
 
+        Args:
+            scalable_rows: The exact set of row labels to scale by :data:`CR_TO_RS`, **replacing**
+                the label-derived decision. For a vendor whose labels state no unit — which is
+                every vendor except screener.in — the caller should pass its own measured set, or
+                pass an empty set to scale nothing. ``None`` keeps the screener.in behaviour,
+                which is the default every existing caller depends on.
+
         Raises:
             ParsingError: propagated from :meth:`to_dataframe` for a ragged row.
         """
@@ -242,7 +249,11 @@ class FinancialStatement(BaseModel):
         df = self.to_dataframe(orient="columns")
         # Decided on the screener.in labels, before the rename below hides the unit they
         # carry ("Tax %" -> "Tax Rate"), and keyed by the output label the caller reads.
-        scalable = _rows_to_scale(df.index)
+        scalable = (
+            set(scalable_rows)
+            if scalable_rows is not None
+            else _rows_to_scale(df.index)
+        )
         df = df.rename(index=INDIAN_TO_YFINANCE_LABELS)
         dates, keep, dropped = [], [], []
         for col in df.columns:
@@ -278,6 +289,11 @@ class FinancialStatement(BaseModel):
             # caller put it and the frame does not silently reorder itself.
             df = df.groupby(level=0, sort=False).first()
 
+        # ``scalable`` is the label-derived decision, and a caller who knows better supplies its
+        # own row set. This parameter exists because the decision is vendor-specific: it is read
+        # from screener.in's labels, which is correct there, and a second vendor's labels say
+        # nothing about units. See bfinance.statements.yfinance_bridge for the measured case
+        # (trendlyne's per-share and ratio rows have no marker in the label at all).
         scaled = [label for label in df.index if label in scalable]
         if scaled:
             df.loc[scaled] = df.loc[scaled] * CR_TO_RS

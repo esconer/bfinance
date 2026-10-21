@@ -34,6 +34,8 @@ from bfinance.market.ohlcv import (
     _interval_mismatch_detail,
 )
 
+from conftest import StubCorporateActionsClient
+
 INTERVAL_KEY = "bfinance_bar_interval"
 MISMATCH_KEY = "bfinance_bar_interval_mismatch"
 
@@ -288,8 +290,15 @@ class TestPublishedOnEveryFrame:
         market = ohlcv_mod.__dict__["OHLCVEngine"]  # name kept explicit for clarity
         del market
         monkeypatch.setattr(ohlcv_mod, "bhavcopy_range", _fake_bhavcopy(rows))
-        engine = OHLCVEngine(_Screener())
-        df = await engine.fetch_history(symbol="ITC", ohlc="bhavcopy", actions=False)
+        # The stub is injected and auto_adjust is pinned to False, so this call cannot consult the
+        # corporate-actions feed at all: with the default (True since 2026-09-30) the engine
+        # resolves it whenever EITHER flag asks for it (``actions or auto_adjust``), which built a
+        # REAL client and looked up www.nseindia.com -- answered from a warm ~/.bfinance on a
+        # developer machine, and made for real on a cold CI runner.
+        engine = OHLCVEngine(_Screener(), corporate_actions_client=StubCorporateActionsClient())
+        df = await engine.fetch_history(
+            symbol="ITC", ohlc="bhavcopy", actions=False, auto_adjust=False
+        )
 
         assert df.attrs[INTERVAL_KEY] == "1d"
         assert df.attrs[MISMATCH_KEY] is None

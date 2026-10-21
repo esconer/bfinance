@@ -70,6 +70,13 @@ no source serialises        a source whose recorded duration exceeds ``max_ms`` 
                             and a failing source is asked later rather than first
 =========================  ==============================================================
 
+**A source is never asked for something it cannot publish.** Two rules, in this order: the
+``bases`` column decides the *basis*, and the ``provides`` column decides the *columns*. A row
+that fails either is skipped — recorded, with its reason, and spending nothing. The second rule
+exists because a basis match is not enough: MarketLens publishes ``Close`` and ``Volume`` and no
+Open/High/Low, and its close-only frame is a perfectly good *answer*, so without a declared column
+set a caller asking for bars would be served a frame with none of them and nothing would say so.
+
 Two structural decisions worth knowing about
 ---------------------------------------------
 **Nothing is imported at module level.** Every source is a row of *strings* in
@@ -137,6 +144,7 @@ from .model import (
     PROVENANCE,
     SERVED,
     SKIPPED_BASIS,
+    SKIPPED_COLUMNS,
     SKIPPED_HEALTH,
     Attempt,
     Basis,
@@ -186,6 +194,7 @@ __all__ = [
     "FAILED",
     "SKIPPED_BASIS",
     "SKIPPED_HEALTH",
+    "SKIPPED_COLUMNS",
     "basis_from",
     "cross_basis_note",
     "is_series",

@@ -452,7 +452,14 @@ class CorporateActionsEngine:
             if client is None:
                 from bfinance.nse import corporate_actions as nse_ca
 
-                client = nse_ca.CorporateActionsClient()
+                # The module's shared client, not a fresh one. This used to construct a
+                # CorporateActionsClient per call, which is invisible per symbol and wasteful in a
+                # batch. Sharing is safe because the client holds no loop-bound state: the httpx
+                # client is opened and closed inside _fetch, and the only mutable state is the
+                # pacing clock, which is already process-global under _PACING_LOCK. So the one
+                # instance is event-loop agnostic and thread safe -- the same argument the
+                # existing _DEFAULT_CLIENT memoisation in that module rests on.
+                client = nse_ca._default_client()
             actions = await client.actions_async(symbol, start=start, end=end)
             covers_symbol = not getattr(actions, "empty", True)
             if covers_symbol:

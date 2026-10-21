@@ -528,7 +528,7 @@ def test_history_signature_and_dispatch_are_untouched():
     assert names[1:] == [
         "symbol", "period", "interval", "start", "end", "prepost", "actions", "auto_adjust",
         "back_adjust", "repair", "keepna", "rounding", "timeout", "raise_errors", "ohlc",
-        "adjust_corporate_actions", "mirror", "source", "sources",
+        "adjust_corporate_actions", "mirror", "source", "sources", "requires",
     ], (
         f"the existing parameters must keep their positions and order; the source parameters are "
         f"appended, never inserted: {names}"
@@ -558,3 +558,92 @@ def test_legacy_extractors_are_still_available_for_ticker():
     assert float(dividends.iloc[0]) == pytest.approx(10.0)
     assert str(dividends.index.tz) == "Asia/Kolkata"
     assert corporate_mod.ACTIONS_SOURCE_SCREENER != corporate_mod.ACTIONS_SOURCE_NSE
+
+
+# ------------------------------------------------------------------ 6. the shared client
+
+
+class _IdentityActionsClient(_StubActionsClient):
+    """Stands in for the real client and records *which object* served each request.
+
+    Recording ``self`` rather than a call count is the whole point: a count cannot tell the shared
+    client from a freshly built identical one, and that difference is the defect.
+    """
+
+    def __init__(self, label, **kwargs):
+        super().__init__(**kwargs)
+        self.label = label
+        self.served_by = []
+
+    async def actions_async(self, symbol, start=None, end=None, index="equities"):
+        self.served_by.append(self)
+        return await super().actions_async(symbol, start=start, end=end, index=index)
+
+
+async def test_the_module_default_client_is_the_object_that_actually_answers(bars, monkeypatch):
+    """With no client injected, the shared one is used -- by identity, not by construction count.
+
+    ``Ticker.__init__`` builds ``OHLCVEngine(self.screener_client)`` and never passes a
+    corporate-actions client, so ``client=None`` is the path every ``Ticker.history()`` takes. It
+    used to answer it by constructing a fresh ``CorporateActionsClient()`` per call, which is why
+    the injection point existed but was never reached from the Ticker path.
+
+    The assertion is ``served_by[0] is shared``: the module-level default resolved to *this*
+    object, and this object's ``actions_async`` ran. Counting constructions would pass just as
+    happily against a per-call build, so the per-call constructor is pinned to a distinguishable
+    second object and asserted never to be touched.
+    """
+    shared = _IdentityActionsClient("module-default")
+    per_call = _IdentityActionsClient("constructed-per-call")
+    monkeypatch.setattr(ca, "_DEFAULT_CLIENT", shared)
+    monkeypatch.setattr(ca, "CorporateActionsClient", lambda *a, **k: per_call)
+
+    df = await _history(None)
+
+    assert df.attrs["bfinance_actions_source"] == ACTIONS_SOURCE_NSE, (
+        "the fixture's actions must still resolve from the feed, or this test proves nothing"
+    )
+    assert len(shared.served_by) == 1 and shared.served_by[0] is shared, (
+        f"the object that answered was not the module default: {shared.served_by}"
+    )
+    assert per_call.served_by == [], "a client was constructed per call instead of reusing the default"
+
+
+async def test_two_history_calls_are_served_by_the_same_client_object(bars, monkeypatch):
+    """The reuse is across calls, not merely within one.
+
+    Constructing a fresh client for every ``history()`` was invisible in a single-call test; it
+    only shows up when the same process asks twice, which is exactly what a screener run does.
+    """
+    shared = _IdentityActionsClient("module-default")
+    per_call = _IdentityActionsClient("constructed-per-call")
+    monkeypatch.setattr(ca, "_DEFAULT_CLIENT", shared)
+    monkeypatch.setattr(ca, "CorporateActionsClient", lambda *a, **k: per_call)
+
+    await _history(None)
+    await _history(None)
+
+    assert len(shared.served_by) == 2
+    assert shared.served_by[0] is shared.served_by[1] is shared
+    assert per_call.served_by == []
+
+
+def test_an_explicitly_injected_client_still_wins_over_the_shared_one():
+    """Injecting is still the higher-precedence way to override, and it stays untouched.
+
+    The shared default is a fallback for the ``None`` case only; it must not shadow a client the
+    caller passed in.
+    """
+    import asyncio
+
+    shared = _IdentityActionsClient("module-default")
+    shared.payload = load("nse_reliance_2020_2026.json")
+    injected = _IdentityActionsClient("injected")
+
+    result = asyncio.run(
+        CorporateActionsEngine.resolve_actions_async("RELIANCE", client=injected)
+    )
+
+    assert len(injected.served_by) == 1
+    assert shared.served_by == [], "the shared default must not be consulted when one is injected"
+    assert result.source == ACTIONS_SOURCE_NSE

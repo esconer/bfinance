@@ -30,8 +30,11 @@ a stable type means the reader never has to know that ``""`` means "fine", and t
 there for the branch.
 
 Offline by construction. The bhavcopy reader is stubbed and the corporate-actions client is
-injected, so nothing here reaches the network -- which matters more than usual for this file,
-because the whole subject is a request that reaches *further* back than the archive does.
+injected (:class:`tests.conftest.StubCorporateActionsClient`), so nothing here reaches the
+network -- which matters more than usual for this file, because the whole subject is a request that
+reaches *further* back than the archive does. ``auto_adjust=False`` is also spelled out on every
+call, as it is in ``test_mirror_integration``: the clamp is what is under test here, not the
+adjustment, and the pre-flip call is the one these expectations were written against.
 """
 
 import logging
@@ -40,8 +43,12 @@ import pandas as pd
 import pytest
 
 import bfinance.market.ohlcv as ohlcv_mod
+from bfinance.cache.frame_store import CACHE_REQUESTED_END_ATTR
 from bfinance.market.ohlcv import OHLCVEngine, PriceSourceRouter
+from bfinance.nse.bhavcopy import iter_trading_days
 from bfinance.sources.health import HealthLedger
+
+from conftest import StubCorporateActionsClient
 
 
 # ------------------------------------------------------------------------------ stubs, no network
@@ -92,6 +99,21 @@ def _market_frame(rows):
     return frame.sort_index()
 
 
+def _asked_days(calls) -> set:
+    """Every candidate trading day the archive stub was asked about, across all range calls.
+
+    The proxy the repo uses for "what did this call cost": ``bhavcopy_range`` spends one archive
+    request per candidate day of the span it is handed, so the union of the requested spans is the
+    right way to say "the archive was asked for the whole window" without requiring it to arrive as
+    a single request.
+    """
+    return {
+        day.isoformat()
+        for start, end in calls
+        for day in iter_trading_days(start, end)
+    }
+
+
 @pytest.fixture
 def archive(monkeypatch):
     """Install the bhavcopy stub, and record every (start, end) it was asked for."""
@@ -110,7 +132,19 @@ def archive(monkeypatch):
 
 
 def _engine(price_sources=None):
-    return OHLCVEngine(_Screener(), price_sources=price_sources)
+    # The actions client is injected so the engine is offline by construction. auto_adjust became
+    # True by default on 2026-09-30, and a True default resolves the corporate-actions feed whenever
+    # EITHER flag asks for it (``fetch_actions = actions or auto_adjust`` in fetch_history), so
+    # without it every call below built a REAL client and looked up www.nseindia.com -- which is
+    # invisible on a machine with a warm ``~/.bfinance`` and is a live DNS request on a cold CI
+    # runner. It is the wall behind the explicit ``auto_adjust=False`` on every call here (which is
+    # what restores the pre-flip call): if that default ever moves again, the stub answers with no
+    # rows and the call fails with a typed refusal here rather than reaching the network.
+    return OHLCVEngine(
+        _Screener(),
+        corporate_actions_client=StubCorporateActionsClient(),
+        price_sources=price_sources,
+    )
 
 
 # =========================================================== the flag, on the populated frame
@@ -123,13 +157,30 @@ async def test_period_max_past_the_archive_floor_says_so_on_the_frame(archive):
     request is clamped every single time it is made. The frame it returns has real bars, a correct
     schema and a plausible row count; before this change the ONLY evidence of the clamp was a log
     line a caller never sees. Now the frame carries it.
+
+    The request assertion is stated against the new contract rather than the old one. A clamped
+    window is split now, so "the archive was asked for the clamped span" is only half the story:
+    the first call is still the ONE whole-window range fetch that was always spent (the cold prefix
+    is fetched whole, then sliced on the way into the store), and the union of every range the
+    archive was asked for must cover the whole resolved window. ``calls[-1]`` would be the tail on
+    any warm store, which is why the range under test is the first one and the count is pinned.
     """
     calls = archive()
-    df = await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+    df = await _engine().fetch_history(
+        symbol="RELIANCE", period="max", actions=False, auto_adjust=False
+    )
 
     assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE, (
         "and it is still clamped -- the flag does not replace the clamp, it reports it"
     )
+    assert len(calls) == 1, (
+        "and the first call spans it in ONE range fetch: the cold prefix is the walk that was "
+        "always spent, not one fetch for the prefix and another for the tail"
+    )
+    requested_end = df.attrs[CACHE_REQUESTED_END_ATTR]
+    assert _asked_days(calls) == _asked_days(
+        [(ohlcv_mod.BHAVCOPY_FIRST_DATE, requested_end)]
+    ), "the union of the requested ranges is the whole resolved window"
     assert df.attrs["bfinance_window_truncated"] is True
     detail = df.attrs["bfinance_window_truncated_detail"]
     assert isinstance(detail, str) and detail
@@ -147,17 +198,37 @@ async def test_the_detail_names_the_requested_window_start_not_just_the_floor(ar
     of history, so a sentence that said only "clamped to 2024-01-01" would be true of both and
     useless for either. The requested start date is in the sentence, which is what makes the two
     tellable apart.
+
+    **And they are the same cache key**, which is why this is the strongest place to assert it.
+    Both resolve to ``2024-01-01..today``, so the second call is answered from the prefix the first
+    stored, and the archive is asked only for the tail. The sentence must still be the second
+    request's own: it is republished from the current call, never read off the shared row. That is
+    the coherence the clamped split depends on -- one key, one set of bars, one sentence per caller.
     """
-    archive()
-    five = await _engine().fetch_history(symbol="RELIANCE", period="5y", actions=False)
-    ten = await _engine().fetch_history(symbol="RELIANCE", period="10y", actions=False)
+    calls = archive()
+    five = await _engine().fetch_history(
+        symbol="RELIANCE", period="5y", actions=False, auto_adjust=False
+    )
+    ten = await _engine().fetch_history(
+        symbol="RELIANCE", period="10y", actions=False, auto_adjust=False
+    )
 
     assert five.attrs["bfinance_window_truncated"] is True
     assert ten.attrs["bfinance_window_truncated"] is True
+    assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE, "the first call asked for the clamped span"
+    assert len(calls) == 2, (
+        "the 10y call was answered from the 5y call's stored prefix and asked for the tail alone: "
+        f"{calls}"
+    )
+    assert calls[1][0] > ohlcv_mod.BHAVCOPY_FIRST_DATE, (
+        "a second clamped spelling must not walk the archive floor again"
+    )
+    assert calls[1][1] == calls[0][1], "and it ends where the first call ended"
     five_detail = five.attrs["bfinance_window_truncated_detail"]
     ten_detail = ten.attrs["bfinance_window_truncated_detail"]
     assert five_detail != ten_detail, (
-        "two windows that lose different amounts of history must not share one sentence"
+        "two windows that lose different amounts of history must not share one sentence -- even "
+        "when they share one cache row"
     )
     # 5y is 1825 days back and 10y is 3652, so the two requested starts are five years apart.
     assert "2021" in five_detail, five_detail
@@ -174,7 +245,9 @@ async def test_the_log_line_and_the_attrs_carry_the_same_sentence(archive, caplo
     """
     archive()
     with caplog.at_level(logging.WARNING, logger="bfinance"):
-        df = await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+        df = await _engine().fetch_history(
+            symbol="RELIANCE", period="max", actions=False, auto_adjust=False
+        )
 
     detail = df.attrs["bfinance_window_truncated_detail"]
     logged = [
@@ -247,12 +320,14 @@ async def test_a_window_inside_the_floor_is_not_marked_truncated(archive):
     """
     archive()
     inside = await _engine().fetch_history(
-        symbol="RELIANCE", period="5d", start="2024-10-24", actions=False
+        symbol="RELIANCE", period="5d", start="2024-10-24", actions=False, auto_adjust=False
     )
     assert inside.attrs["bfinance_window_truncated"] is False
     assert inside.attrs["bfinance_window_truncated_detail"] == ""
     # The short default period is inside the floor too, so the common case is not alarming.
-    short = await _engine().fetch_history(symbol="RELIANCE", period="1mo", actions=False)
+    short = await _engine().fetch_history(
+        symbol="RELIANCE", period="1mo", actions=False, auto_adjust=False
+    )
     assert short.attrs["bfinance_window_truncated"] is False
 
 
@@ -305,10 +380,12 @@ async def test_the_cascade_path_clamps_and_reports(archive):
     archive()
     engine = OHLCVEngine(
         _Screener(),
+        corporate_actions_client=StubCorporateActionsClient(),
         price_sources=PriceSourceRouter(fetch=_stub_fetch(), health=HealthLedger()),
     )
     df = await engine.fetch_history(
-        symbol="RELIANCE", period="max", actions=False, sources=["nse-bhavcopy"]
+        symbol="RELIANCE", period="max", actions=False, auto_adjust=False,
+        sources=["nse-bhavcopy"],
     )
 
     assert not df.empty
@@ -321,10 +398,11 @@ async def test_the_cascade_path_reports_no_truncation_inside_the_floor(archive):
     archive()
     engine = OHLCVEngine(
         _Screener(),
+        corporate_actions_client=StubCorporateActionsClient(),
         price_sources=PriceSourceRouter(fetch=_stub_fetch(), health=HealthLedger()),
     )
     df = await engine.fetch_history(
-        symbol="RELIANCE", period="5d", start="2024-10-24", actions=False,
+        symbol="RELIANCE", period="5d", start="2024-10-24", actions=False, auto_adjust=False,
         sources=["nse-bhavcopy"],
     )
     assert df.attrs["bfinance_window_truncated"] is False
@@ -354,12 +432,22 @@ async def test_a_truncated_window_never_contains_a_bar_from_before_the_floor(arc
     the earliest available close backwards -- so that ``len(df)`` matches the request. The check
     is structural: nothing in the frame can predate the floor, and the frame is exactly the rows
     the archive returned, unaltered.
+
+    The split adds its own way to break that: a tail merged into a prefix could carry a row from a
+    different window, or a duplicated boundary day. Pinning that the first call is ONE whole-window
+    range fetch closes both -- the cold prefix is the walk's own frame sliced at the boundary, so
+    there is no second walk whose rows could disagree with it.
     """
-    archive()
+    calls = archive()
     df = await _engine().fetch_history(
         symbol="RELIANCE", period="max", actions=False, auto_adjust=False
     )
 
+    assert calls[0][0] == ohlcv_mod.BHAVCOPY_FIRST_DATE
+    assert len(calls) == 1, (
+        "one whole-window read, so the frame is that walk's own rows -- not a prefix and a tail "
+        "from two walks that could disagree"
+    )
     floor = pd.Timestamp(ohlcv_mod.BHAVCOPY_FIRST_DATE, tz=df.index.tz)
     assert (df.index >= floor).all(), "no bar may predate the archive floor"
     # Exactly the archive's published prints, unscaled and unpadded. The 25-Oct -> 28-Oct step is
@@ -383,6 +471,8 @@ async def test_the_truncation_flag_is_readable_without_touching_the_log(archive,
     """
     archive()
     with caplog.at_level(logging.WARNING, logger="bfinance"):
-        df = await _engine().fetch_history(symbol="RELIANCE", period="max", actions=False)
+        df = await _engine().fetch_history(
+            symbol="RELIANCE", period="max", actions=False, auto_adjust=False
+        )
     assert df.attrs["bfinance_window_truncated"] is True
     assert caplog.text, "the log line is still expected; this asserts it is not the ONLY channel"

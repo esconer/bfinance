@@ -57,6 +57,11 @@ terminal status will crash inside ``response.json()`` with an empty-body decode 
 different problems with different fixes, so they get different types:
 :class:`TrendlyneAccessDeniedError` for the gate, :class:`TrendlyneNotAuthorizedError` for the
 envelope's own ``status != "0"``. See the module docstring of :mod:`bfinance.trendlyne.client`.
+
+Above both of those sits a third status, the only one this package cannot retry past: trendlyne
+sits behind AWS WAF on CloudFront, and a challenged session answers **HTTP 405** with an
+``x-amzn-waf-action`` header (see :class:`TrendlyneWafChallengeError`). It is a per-session budget
+rather than a per-request defect, so it is terminal and typed separately.
 """
 
 from __future__ import annotations
@@ -79,7 +84,9 @@ __all__ = [
     "TrendlyneNotFoundError",
     "TrendlyneRateLimitedError",
     "TrendlyneServerError",
+    "TrendlyneSmartOptionsError",
     "TrendlyneTransportError",
+    "TrendlyneWafChallengeError",
     "TrendlyneSymbolNotFoundError",
     "TrendlyneTokenError",
     "TrendlyneSchemaError",
@@ -207,5 +214,51 @@ class TrendlyneTableNotFoundError(TrendlyneError, ParsingError):
 
     The message lists the signatures that *were* found, which is the first thing to check when
     trendlyne restyles a page.
+    """
+
+
+class TrendlyneSmartOptionsError(TrendlyneError, UpstreamServiceError):
+    """A SmartOptions request was refused **locally** because the opt-in is closed.
+
+    ``smartoptions.trendlyne.com`` is a **second host** with its own
+    ``robots.txt`` — read live on 2026-10-10, whose ``User-agent: *`` group disallows exactly
+    ``*/my-alerts/*`` and ``*/strategy-builder/user/`` with ``Crawl-delay: 1``. Neither rule can
+    match ``/phoenix/api/fno/option/chain/``, so **the chain route is robots-clean** and this class
+    deliberately does **not** subclass :class:`TrendlyneRobotsDisallowedError`: claiming a robots
+    conflict on a path the site permits would be a false statement about a site this package has
+    read. The gate is off because SmartOptions ships as a *secondary* F&O source beside
+    trendlyne.com — a different promise, a different provenance tag
+    ``bfinance_provenance = "smartoptions"``), a different host with its own crawl-delay
+    — and a caller should opt into that rather than inherit it. An operator decision recorded
+    2026-10-10, not a policy conflict.
+
+    Raised **before any socket is opened**, so the default costs the vendor nothing. The message
+    names the flag that opens it (:data:`bfinance.trendlyne.smartoptions.SMART_OPTIONS_FLAG`) and
+    says explicitly that this is *not* a robots refusal, so a reader who knows the robots verdict
+    is not sent looking for a rule that does not exist.
+    """
+
+
+class TrendlyneWafChallengeError(TrendlyneHTTPError, UpstreamServiceError):
+    """trendlyne's AWS WAF challenged this request: HTTP 405, or an ``x-amzn-waf-action`` header.
+
+    **Terminal, and never retried.** A WAF challenge is the edge answering "stop", and the same
+    request sent again earns the same answer plus another request against a budget that is already
+    spent. It gets its own type rather than riding :class:`TrendlyneServerError` because the two
+    send a caller to opposite places: a 5xx means wait and retry, this means the session is over.
+
+    The two forms are the same event seen from different layers. ``x-amzn-waf-action: captcha`` is
+    the header AWS WAF attaches when it interstitials a request, and it can accompany almost any
+    status; **HTTP 405** is what trendlyne's CloudFront answers once the session is already
+    challenged. Either one is terminal here, and neither reaches the retry loop.
+
+    **On the request budget in the message.** The ~130-150 requests per session that the message
+    quotes is a **third-party measurement** of anonymous access, recorded on 2026-10-10 by a
+    reconnaissance pass that ran 22 requests without tripping the challenge, and it is stated as
+    that -- an outside figure this package did not produce -- rather than as a bfinance guarantee.
+    The site's own ``robots.txt`` publishes a ``Crawl-delay`` and 28 ``Disallow`` rules and says
+    nothing about a per-session request count, so the only numbers this package can vouch for are
+    the ones it publishes itself: :data:`bfinance.trendlyne.client.DEFAULT_MIN_REQUEST_INTERVAL_MS`
+    (one request per second, the stated crawl-delay) and the serial pacing that enforces it.
     """
 

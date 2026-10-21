@@ -162,7 +162,7 @@ Buckets:
 | `netIncomeToCommon` | REACHABLE (divergent, needs a decision) | Two candidate legs disagree: P&L `TTM` `Net Profit` = **88,167 Cr**, but `TTM` `EPS in Rs` 55.22 x `sharesOutstanding` 13,509,679,865 = **74,600 Cr**, and yfinance live is `74,727 Cr`. The EPS leg matches; the Net Profit row does not, because the TTM EPS is a pre-bonus share base. Whoever fills this must pick the EPS leg and say why. |
 | `nextFiscalYearEnd` | REACHABLE | Indian FY is calendar-year by statute, so `"Mar 2026"` + 1y = 2027-03-31 = `1806451200`; yfinance live `1806451200`. Exact. |
 | `nonDilutedMarketCap` | NOT REACHABLE -- DOES NOT EXIST FOR INDIA | Live `16,888,525,847,232`. Diluted vs non-diluted share count is a US-GAAP construct; NSE publishes one share count and `screener.in` publishes one. |
-| `numberOfAnalystOpinions` | NOT REACHABLE -- UPSTREAM LIMIT | Broker consensus count; live `26`. `ticker.py` `analyst_price_targets` returns `None` by design, after a synthesised-targets implementation was removed in 0.1.3. |
+| `numberOfAnalystOpinions` | NOT REACHABLE -- UPSTREAM LIMIT, ON THE DEFAULT PATH | Broker consensus count; live `26`. On a default `Ticker(...)`, `ticker.py` `analyst_price_targets` returns `None` by design, after a synthesised-targets implementation was removed in 0.1.3. **That default is no longer the whole answer**: `Ticker(..., trendlyne_sections=True)` derives the targets from trendlyne's research-report `Target` column and publishes the row count it computed them from as **`n_reports`**. It is still not the same field — Yahoo's 26 is a broker-consensus count for a rating distribution, `n_reports` is how many report rows this package averaged — so this row's verdict stands for the default path, and the opt-in is the honest partial reach. See `docs/YFINANCE_MIGRATION_GUIDE.md` section 3.E |
 | `operatingMargins` | REACHABLE (divergent) | P&L `Operating Profit` TTM 183,561 / `Sales` TTM 1,123,055 = **0.16345**. yfinance `0.12331`, which implies an operating income of ~138,477 Cr against our 183,561 Cr -- a definitional gap, not a rounding one. Real value, not parity. |
 | `payoutRatio` | REACHABLE | Trailing 12m dividend sum from `nse/corporate_actions.py` = **11.5**, over `EPS in Rs` TTM **55.22** = **0.20826**. yfinance live `0.2083`. Matches to 4 dp. |
 | `priceEpsCurrentYear` | NOT REACHABLE -- UPSTREAM LIMIT | Forward estimate. Live `18.560545`. |
@@ -334,10 +334,17 @@ second name.
 cannot ever match yfinance, and matching means writing `0.0` -- a fabricated zero, which is
 the exact failure class this repo deletes code over.
 
-**Already refused elsewhere in the package, keep refusing**: `analyst_price_targets` returns
-`None` after the 0.1.3 removal of synthesised targets; `option_chain` returns a zero-row
-frame; `beta`, `forwardPE`, `forwardEps` are declared `"unknown"` in `INFO_VALUE_UNITS`. Those
-are the same decisions, already made.
+**Already refused elsewhere in the package, keep refusing**: `option_chain` returns a zero-row
+frame; `beta`, `forwardPE`, `forwardEps` are declared `"unknown"` in `INFO_VALUE_UNITS`. Those are
+the same decisions, already made.
+
+**And one that is a default, not a refusal: `analyst_price_targets`.** It returns `None` on a
+default `Ticker(...)` after the 0.1.3 removal of synthesised targets — but that is the *off* state
+of an opt-in, not a permanent refusal. `Ticker(..., trendlyne_sections=True)` fills `low` / `high`
+/ `mean` / `median` from trendlyne's research-report `Target` column, plus `n_reports` and
+`bfinance_analyst_source`, and still returns `None` for `current` because that feed carries no
+today's price. So for this file's purpose — an `info` key that must carry a real broker consensus
+count — keep the gap; but do not describe the property as having no upstream feed.
 
 ---
 

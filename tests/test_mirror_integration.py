@@ -40,6 +40,7 @@ import pandas as pd
 import pytest
 
 import bfinance.market.ohlcv as ohlcv_mod
+from bfinance.cache.frame_store import FrameStore, default_frame_store_path
 from bfinance.market.ohlcv import (
     MIRROR_ENV_VAR,
     SOURCE_MIRROR,
@@ -48,7 +49,8 @@ from bfinance.market.ohlcv import (
     OHLCVEngine,
     RealOHLCUnavailableError,
 )
-from bfinance.mirror import Mirror
+from bfinance.mirror import Mirror, default_mirror_path
+from bfinance.utils.symbols import resolve_exchange_and_symbol
 
 from conftest import StubCorporateActionsClient
 
@@ -236,7 +238,30 @@ async def test_default_path_never_constructs_a_mirror(monkeypatch, tmp_path):
 
 
 async def test_default_path_touches_no_disk(monkeypatch, tmp_path):
-    """No file is created, not even an empty one, anywhere under BFINANCE_HOME."""
+    """A plain read leaves the frame cache's own file and nothing else -- no mirror database.
+
+    **This assertion changed on purpose when the default-on frame cache landed, and the change is
+    the feature rather than a concession to it.** It used to read "no file is created, not even an
+    empty one, anywhere under BFINANCE_HOME", which was the right statement while the *mirror* was
+    the only on-disk store the price path could reach: the mirror is opt-in, so a plain read had no
+    reason to touch a disk at all. The price path now has a second on-disk store, and it is
+    default-ON because that is the optimisation: without it, ``history(period="1y")`` pays one
+    archive download per weekday of the window on *every* call; with it, the first call pays that
+    walk once and the second pays only the days published since (measured, offline, on the 1y
+    window: 260 then 0, with the two frames identical). A read of a **closed** window -- one whose
+    end is strictly before today, as this one's is -- is exactly the read that store exists to make
+    free, and the single row it writes to ``$BFINANCE_HOME/frames.db`` *is* the mechanism that makes
+    the second call cost nothing. So "reading history creates no file under BFINANCE_HOME" and "the
+    price path is cached" are mutually exclusive claims, and the second one is the feature: the
+    assertion moves, not the cache. A test that kept the old claim could only be kept green by
+    switching the cache off, i.e. by deleting the win it is here to protect.
+
+    What is *kept* is the property this test was actually written to protect -- the mirror is
+    opt-in, so a plain read must not create the mirror's database -- and what is added is the
+    stricter half: the directory is enumerated against an explicit expected set, so the one
+    permitted artefact is named, and a future third store under ``$BFINANCE_HOME`` still fails here
+    instead of arriving as a file no test ever looked for.
+    """
     _stub_bhavcopy(monkeypatch, {**MIRROR_BARS, **NETWORK_BARS})
 
     await _engine().fetch_history(
@@ -244,8 +269,32 @@ async def test_default_path_touches_no_disk(monkeypatch, tmp_path):
     )
 
     home = tmp_path / "home"
-    assert not home.exists() or list(home.iterdir()) == [], (
+    assert default_frame_store_path().parent == home, (
+        "premise: the home this module's fixture pointed $BFINANCE_HOME at is the directory "
+        "enumerated below"
+    )
+    created = sorted(path.name for path in home.iterdir()) if home.exists() else []
+
+    # The mirror may not appear. This is the assertion this test was written for, and it is still
+    # true: a mirror is only ever there when a test builds one on purpose, as the rest of this file
+    # does.
+    assert default_mirror_path().name not in created, (
         "reading history must not create a mirror database as a side effect"
+    )
+    # And the frame cache's file is the only thing that may: one artefact, named, exactly.
+    assert created == [default_frame_store_path().name], (
+        "a plain read of a closed window may create the frame cache's own file and nothing else; "
+        f"found {created}"
+    )
+    # Which is told apart from an empty file that merely exists: the artefact is this window's row,
+    # i.e. the thing the next identical call is served from rather than a database that was opened.
+    exchange, _ = resolve_exchange_and_symbol("RELIANCE")
+    served = FrameStore().read(
+        symbol="RELIANCE", exchange=exchange, series=None, start=DAY_A, end=DAY_HOLIDAY
+    )
+    assert served.status == "hit", (
+        "the one permitted file must hold the cache row this read wrote; if permitting it here "
+        "also permitted an empty database, the permission would be for the wrong thing"
     )
 
 

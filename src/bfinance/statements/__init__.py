@@ -102,6 +102,14 @@ Two naming and structure decisions worth knowing about
   cell in the offline suite, so the duplication cannot drift.
 * No URL is ever written to ``attrs``: the JSON route is addressed by a per-symbol token, and a
   credential has no business in a frame, a log line or a CSV export.
+
+The three payload names are exported as :data:`SCREENER_PAYLOAD`, :data:`HTML_PAYLOAD` and
+:data:`JSON_PAYLOAD` because they are the contract between :func:`resolve` and any caller that
+wires its own ``fetch``. ``ProviderSpec.payload`` is one of these strings, so a caller holding one
+payload has to compare against them to decide which providers it can answer for -- and
+:func:`~bfinance.statements.cascade.resolve_from_payloads` takes them as keyword names for the
+same reason. They are re-exported from the two provider modules rather than redefined here so
+the registry and a caller's ``fetch`` cannot disagree about what a payload is called.
 """
 
 from .cascade import (
@@ -122,6 +130,8 @@ from .errors import (
     StatementTableError,
 )
 from .fundamentals_provider import (
+    HTML_PAYLOAD,
+    JSON_PAYLOAD,
     classify_html_tables,
     html_row_ids,
     html_table_headers,
@@ -187,6 +197,7 @@ from .registry import (
     table,
     unavailable_reason,
 )
+from .screener_provider import PAYLOAD as SCREENER_PAYLOAD
 from .screener_provider import parse_company_page
 
 __all__ = [
@@ -201,6 +212,10 @@ __all__ = [
     "html_row_ids",
     "html_table_headers",
     "capability_error_message",
+    # payload names -- the contract between `resolve` and a caller supplying its own `fetch`
+    "SCREENER_PAYLOAD",
+    "HTML_PAYLOAD",
+    "JSON_PAYLOAD",
     # model
     "Basis",
     "Frequency",

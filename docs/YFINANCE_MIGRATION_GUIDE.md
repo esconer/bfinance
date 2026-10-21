@@ -59,7 +59,7 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | `ticker.options` | `ticker.options` | `()` for NSE underlyings — identical to live yfinance 1.7.0 (verified 2026-09-04) |
 | `ticker.option_chain(date)` | `ticker.option_chain(date)` | Empty yfinance-shaped chain for NSE (no options feed either side) |
 | `ticker.calendar` | `ticker.calendar` | Earnings/dividend dates where disclosed; no analyst estimates |
-| `ticker.analyst_price_targets` | `None` | No analyst feed upstream (was fabricated pre-0.1.3; now honest) |
+| `ticker.analyst_price_targets` | `None` by default | **Only true with the opt-in off.** `Ticker(...)` default returns `None`, because the package serves no estimates feed on the default path and the old synthesised implementation (`low = cmp x 0.85`, `high = cmp x 1.35`, `mean = cmp x 1.15`) was deleted in 0.1.3 for producing confident numbers nobody published. **Construct with `Ticker(..., trendlyne_sections=True)` and it is a real derivation**: `low`/`high`/`mean`/`median` from trendlyne's research-reports `Target` column, plus `n_reports` and `bfinance_analyst_source="trendlyne_research_reports"`. Two things it deliberately does **not** give you: `current` is always `None` (the page's `LTP` is the price at each report's publication, not today's), and the vendor's own aggregate *"Consensus Share Price Target"* row is excluded from the statistics. See section 3.E |
 | `ticker.valuation_measures` | `ticker.valuation_measures` | `yfinance 1.3.0+` valuation table |
 | `yf.Tickers(list)` | `bf.Tickers(list)` | Multi-ticker container matching `yf.Tickers` |
 | `yf.Sector(name)` / `yf.Industry(name)` | **no equivalent** | **removed in 0.2.0** -- not renamed. Read section 3.D before writing any replacement |
@@ -198,6 +198,53 @@ Four behaviours to plan for, all verified:
   explicitly. It is not an exchange source and it is not in the price cascade. It also sits
   on trendlyne.com, not on an exchange, so "sector" means trendlyne's sector taxonomy,
   which is not Yahoo's and need not agree with it.
+
+---
+
+### E. Analyst price targets: `None` by default, a real derivation behind one flag
+
+The table in section 2 says `ticker.analyst_price_targets` → `None`. **That is true of the
+default `Ticker` and false of the opt-in**, and the distinction matters because the default
+value and "no estimates feed" are not the same statement.
+
+```python
+import bfinance as bf
+
+bf.Ticker("TCS").analyst_price_targets
+# None   <- default. Nothing is fetched; this is a constant, not a failed lookup.
+
+bf.Ticker("TCS", trendlyne_sections=True).analyst_price_targets
+# {'current': None, 'low': ..., 'high': ..., 'mean': ..., 'median': ...,
+#  'n_reports': 20, 'bfinance_analyst_source': 'trendlyne_research_reports'}
+```
+
+`trendlyne_sections=True` is **off by default and additive**: no existing property changes
+behaviour, and a default `Ticker(...)` opens no trendlyne socket. The seven members it adds
+are `trendlyne_news`, `trendlyne_reports`, `trendlyne_shareholding`, `trendlyne_deals`,
+`trendlyne_buy_sell_zone`, `trendlyne_technicals` and `trendlyne_swot`;
+`docs/API_REFERENCE.md` section 2.3.2 documents each one.
+
+Three things about the derived numbers that are **not** yfinance's shape, and are stated here
+because they change what the value means:
+
+* **`current` is always `None`.** trendlyne's research-reports table publishes an `LTP`
+  column, but that is the price at the moment each report was published. Publishing it under
+  a key a caller reads as *today's* price would be exactly the relabelling defect that got
+  the pre-0.1.3 synthesiser deleted. **No current price is derivable from this feed.** If you
+  need one, read `ticker.fast_info.last_price` and attach it yourself.
+* **The vendor's aggregate row is excluded.** The first row of the table is trendlyne's own
+  *"Consensus Share Price Target"*, which is an average of the rows beneath it. Averaging the
+  `Target` column without excluding it folds the consensus into every statistic. The
+  exclusion is on a word match against the `Author` column, not on row position, and the
+  count of what remained ships as `n_reports` — a mean of two and a mean of twenty are the
+  same number over a very different amount of evidence.
+* **`trendlyne_reports()` keeps that aggregate row**, because removing it would be this
+  package deciding what you wanted, and it is the row that carries the consensus. If you
+  average that frame yourself, exclude it.
+
+The value is `None` — never a synthesised number — when the flag is off, when the reports page
+carries no usable `Target`, or when the fetch failed. In the last case the reason is on
+`ticker.data_warnings` and the fetch is not retried.
 
 ---
 
