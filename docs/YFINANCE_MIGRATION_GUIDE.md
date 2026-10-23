@@ -9,9 +9,25 @@ and industry names were removed, not renamed). `docs/RELEASE_0.2.0.md` is the fu
 
 ---
 
-## 1. Zero-Code-Change Drop-in Migration
+## 1. Migrating an existing codebase
 
-`bfinance` is designed with strict **1:1 API signature parity** with `yfinance 1.7.0+`. In 99% of cases, migration requires changing only your import statement:
+`bfinance` implements a **documented subset** of the `yfinance` 1.7.0 `Ticker` API, measured on
+2026-10-23: **44 of 98 public `Ticker` members present with a data path, 14 present-but-empty, 40
+absent by name**. Most call sites move by changing the import; this is **not** a 100% drop-in.
+The measured table is `docs/YFINANCE_PARITY.md`.
+
+Three breaks to check before you start:
+
+1. **`Ticker("X", True)` raises.** The second positional is `session`, so a stray bool is a
+   `NotImplementedError` before any request. Write `Ticker("X", multi_level_index=True)`.
+2. **`Ticker(..., session=...)` raises.** The transport is `httpx`; a `requests`/`httpx` session
+   cannot be honoured. Omit the argument.
+3. **Every Trendlyne-backed yfinance-named member requires `trendlyne_sections=True`.** With the
+   flag off, `recommendations`, `recommendations_summary`, `earnings_estimate`, `revenue_estimate`,
+   `earnings_history`, `growth_estimates` and `insider_transactions` raise `NotImplementedError`
+   naming the flag.
+
+The calls in the example below are unchanged:
 
 ### Before (`yfinance`):
 ```python
@@ -40,9 +56,9 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 
 | `yfinance` Method / Property | `bfinance` Equivalent | Notes & Behavioral Enhancements |
 | :--- | :--- | :--- |
-| `yf.Ticker(symbol)` | `bf.Ticker(symbol)` | Supports `'RELIANCE'`, `'RELIANCE.NS'`, `'500325.BO'` |
-| `ticker.fast_info` | `ticker.fast_info` | Scalar properties (`last_price`, `market_cap`, `year_high`, `year_low`, `shares`, `currency='INR'`, `exchange='NSE'`) |
-| `ticker.info` | `ticker.info` | **76-key** dictionary matching the standard Yahoo schema + Indian extras (`marketCapInCr`, `roce`). Read `bfinance.market.quotes.INFO_VALUE_UNITS` for the unit of every key; the return/yield keys are deliberately mixed-unit |
+| `yf.Ticker(symbol)` | `bf.Ticker(symbol)` | Supports `'RELIANCE'`, `'RELIANCE.NS'`, `'500325.BO'`. **Second positional is `session`, not `multi_level_index`**: `Ticker("X", True)` and `Ticker(..., session=...)` both raise `NotImplementedError` naming `httpx`. Use `Ticker("X", multi_level_index=True)` |
+| `ticker.fast_info` | `ticker.fast_info` | Scalar properties (`last_price`, `market_cap`, `year_high`, `year_low`, `shares`, `currency='INR'`, `exchange='NSE'`); **also a 21-key mapping**, so `dict(t.fast_info)`, `in`, `len()` work |
+| `ticker.info` | `ticker.info` | **76–90 keys depending on the profile** (measured across five profiles; `INFO_VALUE_UNITS` declares 80). Four declared keys are omitted, never `None`, when unsourced: `regularMarketChange`, `lastFiscalYearEnd`, `nextFiscalYearEnd`, `mostRecentQuarter`. Read `bfinance.market.quotes.INFO_VALUE_UNITS` for the unit of every key; the return/yield keys are deliberately mixed-unit |
 | `ticker.history(...)` | `ticker.history(...)` | `auto_adjust` defaults to `True` (yfinance 1.7), so the default columns are `Open`, `High`, `Low`, `Close`, `Volume` (+ `Dividends`, `Stock Splits`). Pass `auto_adjust=False` for the `Adj Close` column |
 | `ticker.get_history_metadata()` | `ticker.get_history_metadata()` | `yfinance 1.7.0` metadata dictionary |
 | `ticker.financials` / `income_stmt` | `ticker.financials` / `income_stmt` | **Upgraded**: 10–13 years Ind AS statements instead of Yahoo's 4-year limit |
@@ -52,18 +68,28 @@ financials = ticker.financials  # Now returns 10+ years instead of 4 years!
 | `ticker.cash_flow` / `cashflow` | `ticker.cash_flow` / `cashflow` | **Upgraded**: 10–13 years cash flow statements (CFO, CFI, CFF) |
 | `ticker.quarterly_cash_flow` | raises `NotImplementedError` | No quarterly-CF source upstream; annual only |
 | `ticker.dividends` | `ticker.dividends` | Per-share amounts match yfinance (≤3%); dates are FY-end (Mar-31), yfinance uses ex-dates |
-| `ticker.splits` | `ticker.splits` | **Always empty, by design — this one diverges from yfinance, which does report splits.** bfinance used to infer a split from growth in the balance sheet's `Equity Capital` row and deleted it: that field is `shares x face value`, so a bonus, a rights issue, a QIP and an ESOP conversion are the same number in the same field. `history()` still gets real split factors, from the NSE filing via `bfinance.nse.corporate_actions.split_ratio` |
-| `ticker.actions` | `ticker.actions` | Dividends + splits merged frame, yfinance-shaped columns |
+| `ticker.splits` | `ticker.splits` | **Real ex-dated Series since 2026-10-23**, from NSE's corporate-actions filings; the factor is the filing's own `SplitRatio`, selected on that ratio rather than the `Action` kind. An empty series can also mean the feed failed, not "no split": `attrs["bfinance_actions_source"] == "none"` is the failure shape, `"nse_corporate_actions"` the answered-empty one |
+| `ticker.actions` | `ticker.actions` | `Dividends` + `Stock Splits` from the **same** NSE feed, one row per declared ex-date. `actions["Dividends"]` is **not** `ticker.dividends` (Screener FY-end basis, different source). Zero rows can also mean a failed feed: `bfinance_actions_source == "none"` (no `bfinance_empty_feed` key — `True` would assert NSE answered with nothing, which was not observed) |
+| `ticker.isin` | `ticker.isin` | `str` or `None`; first from the NSE corporate-actions payload (refused if rows disagree), then from **archived** index memberships. `None` means "not found on this machine", not "no ISIN exists" |
 | `ticker.capital_gains` | `ticker.capital_gains` | Empty like yfinance for Indian equities |
 | `ticker.major_holders` | `ticker.major_holders` | Numeric `Value` column (fraction), yfinance-shaped |
 | `ticker.options` | `ticker.options` | `()` for NSE underlyings — identical to live yfinance 1.7.0 (verified 2026-09-04) |
 | `ticker.option_chain(date)` | `ticker.option_chain(date)` | Empty yfinance-shaped chain for NSE (no options feed either side) |
 | `ticker.calendar` | `ticker.calendar` | Earnings/dividend dates where disclosed; no analyst estimates |
 | `ticker.analyst_price_targets` | `None` by default | **Only true with the opt-in off.** `Ticker(...)` default returns `None`, because the package serves no estimates feed on the default path and the old synthesised implementation (`low = cmp x 0.85`, `high = cmp x 1.35`, `mean = cmp x 1.15`) was deleted in 0.1.3 for producing confident numbers nobody published. **Construct with `Ticker(..., trendlyne_sections=True)` and it is a real derivation**: `low`/`high`/`mean`/`median` from trendlyne's research-reports `Target` column, plus `n_reports` and `bfinance_analyst_source="trendlyne_research_reports"`. Two things it deliberately does **not** give you: `current` is always `None` (the page's `LTP` is the price at each report's publication, not today's), and the vendor's own aggregate *"Consensus Share Price Target"* row is excluded from the statistics. See section 3.E |
-| `ticker.valuation_measures` | `ticker.valuation_measures` | `yfinance 1.3.0+` valuation table |
+| `ticker.valuation_measures` | `ticker.valuation_measures` | `yfinance 1.3.0+` valuation table; `freq`/`periods` accepted and **cannot narrow** (one current snapshot) |
+| `ticker.recommendations` | same name | **Requires `trendlyne_sections=True`**; 6×6 measured. `period` is the vendor's `asofdate`, not yfinance's four relative `0m`/`-1m`/`-2m`/`-3m` rows |
+| `ticker.recommendations_summary` | same name | Requires the flag; last four rows of the **same** frame, no second fetch |
+| `ticker.earnings_estimate` | same name | Requires the flag; index `0q`/`+1q`/`0y`/`+1y` derived from `is_current`/`is_past`. `yearAgoEps` is **`NaN`** where the prior-year row is absent, named in `attrs["bfinance_estimate_note"]` |
+| `ticker.revenue_estimate` | same name | Requires the flag; same index/shape from `REVENUE` rows; `yearAgoRevenue` same `NaN` + note contract |
+| `ticker.earnings_history` | same name | Requires the flag; index is **fiscal period end** (`attrs["bfinance_date_basis"]`), not the announcement date |
+| `ticker.growth_estimates` | same name | Requires the flag; `stock` column only — `industry`/`sector`/`index` absent, not zero |
+| `ticker.insider_transactions` | same name | Requires the flag; **500-row server cap**; vendor columns verbatim |
+| `ticker.get_*` aliases | same names | 17 exact forwarders: 13 `get_*` accessors plus `incomestmt`, `balancesheet`, `quarterly_incomestmt`, `quarterly_balancesheet`. `period=`/`freq=`/`periods=` are accepted and cannot narrow; `as_dict=` is honoured on the three holder accessors |
+| `yf.Search(query)` | `bf.Search(query)` | NSE MarketLens `/api/search`; 7 payload keys passed through verbatim (`id`, `type`, `name`, `ticker`, `description`, `matchScore`, `marketCap`); equities-only; a failure raises |
 | `yf.Tickers(list)` | `bf.Tickers(list)` | Multi-ticker container matching `yf.Tickers` |
 | `yf.Sector(name)` / `yf.Industry(name)` | **no equivalent** | **removed in 0.2.0** -- not renamed. Read section 3.D before writing any replacement |
-| `yf.download(...)` | `bf.download(...)` | Concurrent batch downloader with `group_by='column'` and `group_by='ticker'` |
+| `yf.download(...)` | `bf.download(...)` | Concurrent batch downloader with `group_by='column'` and `group_by='ticker'`. `timeout` reaches the wire; a non-`None` `session` raises `NotImplementedError` naming `httpx`; `ignore_tz=False` raises (only `True`/`None` can produce a frame); `progress=True` emits one `INFO` line per finished symbol |
 
 ---
 
@@ -297,5 +323,6 @@ date, so it is dropped by name and the decision is published in
 
 Deliberate extras (never silent): `freq="quarterly"` on income uses real quarterly
 P&L; the native ₹Cr statement is reached through `FinancialStatement.to_dataframe()`,
-not through the accessors; `Ticker("X", True)` bool
-second positional is treated as yfinance's `multi_level_index`.
+not through the accessors. The old shim that read `Ticker("X", True)` as
+`multi_level_index=True` is **gone**: the second positional is now `session`, so a bool there raises
+`NotImplementedError`. Write `Ticker("X", multi_level_index=True)`.

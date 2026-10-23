@@ -11,36 +11,6 @@ from bfinance.ticker import Ticker
 from bfinance.utils.symbols import normalize_symbol
 
 
-def _apply_ticker_bool_shim() -> None:
-    """Bool 2nd positional is multi_level_index, never cache_ttl_hours.
-
-    yfinance 1.7.0 ``Ticker("X", True)`` raises (2nd positional is
-    ``session``); bfinance's 2nd positional is ``cache_ttl_hours``, so a
-    bare bool would silently become a TTL. Treat it as multi_level_index
-    instead (stored; single-ticker history stays flat like yfinance).
-    Lives here because Ticker itself is out of scope for this change; the
-    patch mutates the shared class object so every import path sees it.
-    """
-    if getattr(Ticker.__init__, "__bfinance_mli_shim__", False):
-        return
-
-    orig_init = Ticker.__init__
-
-    def __init__(self, ticker, cache_ttl_hours=24.0, *args, **kwargs):
-        mli = kwargs.pop("multi_level_index", None)
-        if isinstance(cache_ttl_hours, bool):
-            mli = cache_ttl_hours if mli is None else mli
-            cache_ttl_hours = 24.0
-        orig_init(self, ticker, *args, cache_ttl_hours=cache_ttl_hours, **kwargs)
-        self.multi_level_index = True if mli is None else bool(mli)
-
-    __init__.__bfinance_mli_shim__ = True
-    Ticker.__init__ = __init__
-
-
-_apply_ticker_bool_shim()
-
-
 class Tickers:
     """
     Multi-ticker collection manager matching yfinance 1.7.0 `yf.Tickers`.
@@ -85,9 +55,9 @@ class Tickers:
         else:
             self.symbols = [str(t).strip() for t in tickers if str(t).strip()]
 
-        # Keyword-passed so it survives `_apply_ticker_bool_shim`'s
-        # `(ticker, cache_ttl_hours=24.0, *args, **kwargs)` wrapper untouched -- that shim only
-        # pops `multi_level_index` and re-passes everything else through as keywords.
+        # Keyword-passed because only ``ticker`` is positional on
+        # :class:`~bfinance.ticker.Ticker`: ``session`` is the second positional and every
+        # parameter after it is keyword-only.
         self.tickers: Dict[str, Ticker] = {
             normalize_symbol(sym): Ticker(
                 sym,
@@ -122,6 +92,44 @@ class Tickers:
         exactly what they mean on :meth:`bfinance.ticker.Ticker.history` and on
         :func:`bfinance.download`, and are applied to every symbol in the group. Naming neither is
         the default. See :meth:`bfinance.market.ohlcv.OHLCVEngine.fetch_history` for the contract.
+        """
+        kwargs.setdefault("multi_level_index", self.multi_level_index)
+        return download(
+            tickers=self.symbols,
+            period=period,
+            interval=interval,
+            start=start,
+            end=end,
+            actions=actions,
+            auto_adjust=auto_adjust,
+            group_by=group_by,
+            threads=threads,
+            source=source,
+            sources=sources,
+            **kwargs,
+        )
+
+    def download(
+        self,
+        period: str = "1mo",
+        interval: str = "1d",
+        start: Optional[Union[str, datetime]] = None,
+        end: Optional[Union[str, datetime]] = None,
+        actions: bool = True,
+        auto_adjust: bool = True,
+        group_by: str = "column",
+        threads: bool = True,
+        source: Optional[str] = None,
+        sources: Optional[Sequence[str]] = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """
+        Download historical OHLCV data for all tickers in the group.
+
+        yfinance 1.7.0 spells the same operation both ``Tickers.history`` and ``Tickers.download``;
+        this is the second spelling, forwarding to :func:`bfinance.download` exactly as
+        :meth:`history` does -- including ``actions=True``, which is yfinance's default here and
+        is the one place this differs from :func:`bfinance.download`'s own ``actions=False``.
         """
         kwargs.setdefault("multi_level_index", self.multi_level_index)
         return download(

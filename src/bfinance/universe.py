@@ -174,6 +174,8 @@ __all__ = [
     "list_indices",
     # ---- parsing ----
     "parse_constituents",
+    # ---- read-only archive lookups ----
+    "isin_from_archive",
     # ---- the local archive ----
     "Coverage",
     "RecordResult",
@@ -1251,3 +1253,75 @@ def _run_covering(runs: list[dict[str, Any]], day: str) -> Optional[dict[str, An
 def default_archive() -> UniverseArchive:
     """The archive at the default location."""
     return UniverseArchive()
+
+
+def isin_from_archive(
+    symbol: str,
+    *,
+    root: Optional[os.PathLike | str] = None,
+) -> Optional[str]:
+    """ISIN for ``symbol`` from index memberships already recorded on disk. Read-only.
+
+    This is the fallback for a symbol the corporate-actions feed does not cover: it reads the
+    snapshots :class:`UniverseArchive` has already written and returns the ``isin`` the recorded
+    membership carries. It **opens no socket, issues no request, and never creates or repairs the
+    archive** — a missing archive is an empty answer, not a reason to fetch. That matters because
+    ``UniverseArchive.__init__`` does create its directories, so this helper deliberately does not
+    instantiate it.
+
+    **Coverage: archived indices only.** The answer exists only for a symbol that has appeared in
+    the membership of a catalogued index that this process (or a previous one) actually recorded.
+    ``None`` therefore means "not present in any membership recorded on disk", **not** "no ISIN
+    exists": an SME name, a delisted scrip, a stock outside every catalogued index, and a name that
+    left before accumulation began all return ``None`` however often they are asked. Callers must
+    disclose that coverage rather than present ``None`` as an upstream fact.
+
+    When two snapshots disagree, the **most recently retrieved observation wins** (ties broken by
+    snapshot filename, so the answer is deterministic). An ISIN is not immutable — a demerger or a
+    capital restructuring assigns a new one — so the newest retrieval is the only evidence about
+    which value is current; this never averages, guesses, or falls back to a name match.
+
+    Args:
+        symbol: NSE symbol. A ``.NS`` suffix is accepted and stripped, matching the rest of the
+            package, because callers routinely hold yfinance-shaped tickers.
+        root: Archive root to read (the directory holding ``snapshots/``), for tests and for an
+            archive that is not at the default location. Defaults to ``$BFINANCE_HOME/universe``,
+            or ``~/.bfinance/universe`` when that variable is unset.
+    """
+    wanted = str(symbol or "").strip().upper()
+    if wanted.endswith(".NS"):
+        wanted = wanted[: -len(".NS")]
+    if not wanted:
+        return None
+
+    archive_root = Path(root) if root is not None else Path(
+        os.environ.get("BFINANCE_HOME") or os.path.join(os.path.expanduser("~"), ".bfinance")
+    ) / "universe"
+    snapshots = archive_root / "snapshots"
+    if not snapshots.is_dir():
+        return None
+
+    newest: Optional[tuple[str, str, str]] = None
+    for path in sorted(snapshots.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A half-written snapshot is not evidence. Skipping it leaves the answer None rather
+            # than handing back a value read from a truncated file.
+            continue
+        members = payload.get("members")
+        if not isinstance(members, list):
+            continue
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            if str(member.get("symbol") or "").strip().upper() != wanted:
+                continue
+            isin = _blank_to_none(member.get("isin"))
+            if isin is None:
+                continue
+            candidate = (str(payload.get("first_retrieved_utc") or ""), path.name, isin)
+            if newest is None or candidate > newest:
+                newest = candidate
+            break
+    return newest[2] if newest is not None else None

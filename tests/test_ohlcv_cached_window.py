@@ -405,9 +405,10 @@ async def test_the_warm_prefix_frame_publishes_the_tails_provenance(
     """
     F2, pinned as a contract: the composite frame's provenance and age are the LIVE TAIL's.
 
-    On the warm-prefix branch the returned frame is ``stored prefix (a replay) + live tail``, and it
-    is handed to a third ``get_or_fetch`` whose window reaches today. The store refuses to hold that
-    window and answers ``"miss"``, so the five published keys are the ones a live read publishes --
+    On the warm-prefix branch the returned frame is ``stored prefix (a replay) + live tail``, and the
+    five published keys are built from the window read that fetched that tail -- there is no third
+    ``get_or_fetch`` re-publishing them. That same window reaches today. The store refuses to hold
+    it and answers ``"miss"``, so the five published keys are the ones a live read publishes --
     and here that is a COMPOSITE claim: ``miss`` and ``fetched_at`` describe the tail that came off
     the wire on this call, not the year of bars behind it. The prefix is not lost and is not
     re-dated: its row, under ``start..boundary``, still carries the instant the walk that wrote it

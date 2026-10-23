@@ -12,7 +12,7 @@ import pandas as pd
 logger = logging.getLogger("bfinance")
 
 from bfinance.cache.sqlite_cache import SQLiteCache
-from bfinance.market.corporate import CorporateActionsEngine
+from bfinance.market.corporate import ACTIONS_SOURCE_NONE, ACTIONS_SOURCE_NSE, CorporateActionsEngine, YF_TZ
 from bfinance.market.derivatives import DerivativesEngine
 from bfinance.market.fast_info import FastInfo
 from bfinance.market.ohlcv import OHLCVEngine
@@ -247,6 +247,219 @@ def _targets_from_reports(frame: pd.DataFrame) -> Optional[Dict[str, Any]]:
     }
 
 
+#: yfinance's estimate index, in its own order. The labels are relative to the vendor's
+#: ``is_current`` row, not to a calendar: ``0q``/``0y`` *are* that row and ``+1q``/``+1y`` the
+#: next one the vendor publishes. See :func:`_estimate_table`.
+_ESTIMATE_INDEX: Tuple[str, ...] = ("0q", "+1q", "0y", "+1y")
+
+#: The estimate columns every statement publishes. The two after these differ by statement --
+#: ``yearAgoEps`` on ``EPS`` and ``yearAgoRevenue`` on ``REVENUE`` -- because a rupee-per-share
+#: figure and a rupee revenue total are not interchangeable and one column name would conflate them.
+_ESTIMATE_COLUMNS: Tuple[str, ...] = ("numberOfAnalysts", "avg", "low", "high")
+
+#: ``Ticker.recommendations``' column names: yfinance's on the right, the vendor section's on the
+#: left. A rename rather than a rebuild, so no count is re-derived from another count.
+_RECOMMENDATION_COLUMNS: Dict[str, str] = {
+    "as_of": "period",
+    "strong_buy": "strongBuy",
+    "buy": "buy",
+    "hold": "hold",
+    "sell": "sell",
+    "strong_sell": "strongSell",
+}
+
+
+def _float_or_nan(value: Any) -> float:
+    """``value`` as a float, or ``NaN`` when it is absent or not a number. **Never** ``0.0``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return float("nan") if pd.isna(number) else number
+
+
+def _bool_column(frame: pd.DataFrame, name: str, default: bool) -> pd.Series:
+    """``name`` as nullable booleans, with an absent cell read as ``default``.
+
+    The vendor sends JSON booleans and the recorded page parses to ``bool`` -- but its own parser
+    documents a row that is neither a print nor a forecast as carrying ``None``, and a column that
+    mixes the two is ``object``. ``astype("boolean")`` accepts both; ``astype(bool)`` would raise
+    on the ``None``.
+    """
+    return frame[name].astype("boolean").fillna(default)
+
+
+def _estimate_table(
+    frame: pd.DataFrame, statement: str, year_ago_column: str
+) -> Tuple[pd.DataFrame, Optional[str]]:
+    """yfinance's ``0q/+1q/0y/+1y`` estimate grid from one statement's rows. Returns ``(frame, note)``.
+
+    Pure, so the placement rule can be pinned against the recorded page without a Ticker.
+
+    **The labels are placed from the vendor's flags, never from a period string.** ``0q``/``0y`` is
+    the single ``is_current`` row of the ``QUARTER``/``ANNUAL`` block. ``+1q``/``+1y`` is the
+    *earliest* ``is_past == False`` row of the same period type whose ``period_end`` is later than
+    the anchor's -- a published date, so no part of the vendor's fiscal calendar
+    (``Q2FY27``, ``FY27``) has to be re-implemented to compare one label with another.
+
+    ``yearAgo`` is the **published** ``actual`` of the row whose ``period_end`` is exactly one year
+    before the estimate's. Where that row is not in the frame the cell is ``NaN`` and ``note``
+    names it: ``growth_pct`` is a growth rate, not a prior-year figure, and back-solving one from
+    the other would publish a number nobody published.
+
+    ``growth`` is a **fraction**, not the vendor's percent. The vendor publishes ``growth_pct`` as
+    a percentage -- the recorded page prints ``4.68`` for 4.68% -- while yfinance's column of the
+    same name carries Yahoo's unscaled ``raw`` value, a decimal fraction (``0.0468``;
+    ``yfinance/scrapers/analysis.py:41``). The cell is therefore divided by 100, so one column
+    name means one unit to a drop-in caller.
+
+    A block without exactly one ``is_current`` row yields no labels for that period type and a
+    sentence in ``note`` saying so, rather than a guessed order.
+    """
+    columns = list(_ESTIMATE_COLUMNS) + [year_ago_column, "growth"]
+    rows = frame[frame["statement"] == statement] if not frame.empty else frame
+    picked: Dict[str, Any] = {}
+    absent: List[str] = []
+    withheld: List[str] = []
+
+    for period_type, (now_label, next_label) in (
+        ("QUARTER", ("0q", "+1q")),
+        ("ANNUAL", ("0y", "+1y")),
+    ):
+        block = rows[rows["period_type"] == period_type].copy()
+        block["_period_end"] = pd.to_datetime(block["period_end"], errors="coerce")
+        current = block[
+            _bool_column(block, "is_current", False) & block["_period_end"].notna()
+        ]
+        if len(current) != 1:
+            withheld.append(
+                f"the vendor marks {len(current)} {period_type.lower()} row(s) is_current, not "
+                f"one, so {now_label}/{next_label} cannot be placed without guessing an order"
+            )
+            continue
+        anchor = current.iloc[0]
+        picked[now_label] = anchor
+        forward = block[
+            (~_bool_column(block, "is_past", True))
+            & (block["_period_end"] > anchor["_period_end"])
+        ].sort_values("_period_end", kind="stable")
+        if forward.empty:
+            withheld.append(
+                f"{next_label} has no {period_type.lower()} row after {now_label} "
+                f"({anchor['period']}) that the vendor marks is_past=False"
+            )
+        else:
+            picked[next_label] = forward.iloc[0]
+
+    records: Dict[str, Dict[str, Any]] = {}
+    for label, row in picked.items():
+        record = {
+            "numberOfAnalysts": _float_or_nan(row.get("analysts")),
+            "avg": _float_or_nan(row.get("average")),
+            "low": _float_or_nan(row.get("low")),
+            "high": _float_or_nan(row.get("high")),
+            # Percent -> fraction: yfinance's identically-named column is Yahoo's raw fraction.
+            "growth": _float_or_nan(row.get("growth_pct")) / 100.0,
+        }
+        prior_end = pd.Timestamp(row["_period_end"]) - pd.DateOffset(years=1)
+        prior = rows[
+            (rows["period_type"] == row["period_type"])
+            & (pd.to_datetime(rows["period_end"], errors="coerce") == prior_end)
+        ]
+        if len(prior) == 1 and pd.notna(prior.iloc[0]["actual"]):
+            record[year_ago_column] = float(prior.iloc[0]["actual"])
+        else:
+            record[year_ago_column] = float("nan")
+            absent.append(
+                f"{year_ago_column} for {label} ({row['period']}, period end "
+                f"{pd.Timestamp(row['_period_end']).date()})"
+            )
+        records[label] = record
+
+    labels = [label for label in _ESTIMATE_INDEX if label in records]
+    table = pd.DataFrame.from_dict(records, orient="index", columns=columns, dtype=float)
+    table = table.reindex(labels)
+    table.index = pd.Index(labels, name="period")
+
+    parts: List[str] = []
+    if absent:
+        parts.append(
+            "Absent cells: "
+            + "; ".join(absent)
+            + ". The vendor publishes no same-period-prior-year row for them, so no value was "
+            "derived -- in particular none was back-filled from growth_pct, which is a growth "
+            "rate and not a prior-year figure. The cells that are present are the vendor's own "
+            "published prior-year 'actual'."
+        )
+    if withheld:
+        parts.append("Index labels withheld: " + "; ".join(withheld) + ".")
+    return table, (" ".join(parts) or None)
+
+
+def _earnings_history_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """yfinance's ``earnings_history`` from the ``EPS`` quarter rows that are reported prints.
+
+    A print is a row the vendor marks ``is_past`` **and** for which it publishes an ``actual``.
+    A forward row is not one even when the ``actual`` cell is filled: on the recorded page
+    ``Q2FY27`` carries ``actual == average`` with ``surprise_pct == 0.0`` and ``is_past == False``,
+    which is the vendor's provisional cell, not a reported quarter.
+
+    ``epsDifference`` is ``epsActual - epsEstimate``: the one derived column, arithmetic over two
+    published figures and defined that way by yfinance. ``surprisePercent`` is the vendor's own
+    ``SURPRISES`` field divided by 100: the vendor publishes a percentage (``-5.83``) while
+    yfinance's column carries Yahoo's unscaled ``raw`` value, a decimal fraction (``-0.0583``;
+    ``yfinance/scrapers/analysis.py:127``). Recomputing it here would publish this package's
+    rounding as the vendor's number, so the only change made to it is the unit conversion.
+    """
+    columns = ["epsEstimate", "epsActual", "epsDifference", "surprisePercent"]
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    eps = frame[
+        (frame["statement"] == "EPS")
+        & (frame["period_type"] == "QUARTER")
+        & (frame["actual"].notna())
+        & _bool_column(frame, "is_past", False)
+    ].copy()
+    eps["_period_end"] = pd.to_datetime(eps["period_end"], errors="coerce")
+    eps = eps.dropna(subset=["_period_end"]).sort_values("_period_end", kind="stable")
+    table = pd.DataFrame(
+        {
+            "epsEstimate": pd.to_numeric(eps["average"], errors="coerce").to_numpy(dtype=float),
+            "epsActual": pd.to_numeric(eps["actual"], errors="coerce").to_numpy(dtype=float),
+        },
+        index=pd.DatetimeIndex(eps["_period_end"], name="quarter"),
+    )
+    table["epsDifference"] = table["epsActual"] - table["epsEstimate"]
+    # Percent -> fraction: yfinance's `surprisePercent` is Yahoo's raw fraction, unscaled.
+    table["surprisePercent"] = (
+        pd.to_numeric(eps["surprise_pct"], errors="coerce").to_numpy(dtype=float) / 100.0
+    )
+    return table[columns]
+
+
+def _section_derived_frame(
+    frame: pd.DataFrame, source: pd.DataFrame, note: str
+) -> pd.DataFrame:
+    """Stamp a frame derived from a vendor section with that section's own provenance.
+
+    The D5 keys -- ``bfinance_provenance``, ``bfinance_symbol``,
+    ``bfinance_trendlyne_snapshot_only``, ``bfinance_trendlyne_source``,
+    ``bfinance_trendlyne_retrieved_at`` -- describe the *page*, and a frame whose columns were
+    renamed or selected is still that page's answer. Copying them wholesale is what keeps a
+    derived frame from being unlabelled; the measured count is the one key that must change,
+    because it must count the rows the caller now holds.
+
+    Args:
+        frame: The derived frame.
+        source: The section frame it was built from.
+        note: One sentence saying what the derivation did and did not publish.
+    """
+    frame.attrs = dict(source.attrs)
+    frame.attrs["bfinance_trendlyne_rows"] = len(frame)
+    frame.attrs["bfinance_trendlyne_note"] = note
+    return frame
+
+
 #: The two columns :meth:`QuoteEngine.build_info_dict` reads off a history frame -- and the
 #: COMPLETE list of what ``Ticker.info`` needs from a price series.
 #:
@@ -288,16 +501,46 @@ class Ticker:
     def __init__(
         self,
         ticker: str,
+        session: Optional[Any] = None,
+        *,
         cache_ttl_hours: float = 24.0,
         timeout: float = 15.0,
         proxy: Optional[str] = None,
-        session: Optional[Any] = None,
         raise_errors: bool = False,
         statement_fallback: bool = False,
         trendlyne_sections: bool = False,
+        multi_level_index: bool = True,
+        cache: Optional[SQLiteCache] = None,
+        screener_client: Optional[ScreenerClient] = None,
     ):
+        """Args:
+            session: yfinance's second positional, and therefore the object a drop-in caller's
+                ``Ticker(symbol, session)`` binds. **Refused when not ``None``** rather than
+                accepted and ignored: bfinance's transport is httpx and every client owns its own
+                connection pool, pacing and cache, so a caller-supplied ``requests.Session`` or
+                ``httpx.Client`` is honoured nowhere and silently dropping it would be a lie.
+            multi_level_index: stored for yfinance parity. It is keyword-only here because the
+                second positional is ``session``, exactly as in yfinance 1.7.0; a bare bool in
+                that position is a session and raises above.
+            cache: a pre-built cache used verbatim in place of the :class:`SQLiteCache` this
+                constructor would build from ``cache_ttl_hours``. ``None`` -- the default -- keeps
+                the historical construction.
+            screener_client: a pre-built client used verbatim in place of the one this
+                constructor would build. ``None`` -- the default -- keeps the historical
+                construction. Together with ``cache`` this is the seam a batch caller uses to
+                share one cache and one client across symbols instead of opening one per Ticker.
+        """
         if not isinstance(ticker, str) or not ticker.strip():
             raise ValueError("ticker must be a non-empty string")
+        if session is not None:
+            raise NotImplementedError(
+                "Ticker(session=...): the argument cannot be honoured. bfinance does not accept "
+                "a caller-supplied HTTP session -- its transport is httpx, and every client owns "
+                "its own connection pool, pacing and cache, so a requests.Session or httpx.Client "
+                "passed here would never be used. Omit it (session=None) to use the pacing this "
+                "package already applies. yfinance's second positional is `session`, so mirroring "
+                "it here means a stray bool fails loudly instead of being read as cache_ttl_hours."
+            )
         self.ticker = ticker.strip()
         self.exchange, self.symbol = resolve_exchange_and_symbol(self.ticker)
         self.raise_errors = raise_errors
@@ -318,6 +561,10 @@ class Ticker:
         #: caller who wants the sections need not open the statements fallback. See
         #: :meth:`_section_client` for how the client is reached without importing it.
         self.trendlyne_sections = bool(trendlyne_sections)
+        #: yfinance's flat-vs-MultiIndex switch, stored for parity and addressable only by keyword
+        #: because the second positional is ``session``. A single-ticker :meth:`history` stays
+        #: flat either way, as it does in yfinance 1.7.0.
+        self.multi_level_index = bool(multi_level_index)
         # The section client's own transport configuration. The constructor took these and used
         # them only for the screener client; forwarding them is what makes
         # ``Ticker("TCS", timeout=3.0, proxy=...)`` mean the same thing on the opt-in surface.
@@ -327,10 +574,14 @@ class Ticker:
         # record and the pacing slot are shared across the seven members. ``None`` until then --
         # and for a default Ticker, forever.
         self._section_client_instance: Optional[Any] = None
-        self.cache = SQLiteCache(default_ttl_hours=cache_ttl_hours) if cache_ttl_hours > 0 else None
-        self.screener_client = ScreenerClient(
-            timeout=timeout, cache_ttl_hours=cache_ttl_hours, proxy=proxy, cache=self.cache
-        )
+        if cache is None:
+            cache = SQLiteCache(default_ttl_hours=cache_ttl_hours) if cache_ttl_hours > 0 else None
+        self.cache = cache
+        if screener_client is None:
+            screener_client = ScreenerClient(
+                timeout=timeout, cache_ttl_hours=cache_ttl_hours, proxy=proxy, cache=self.cache
+            )
+        self.screener_client = screener_client
         self.ohlcv_engine = OHLCVEngine(self.screener_client)
 
         # Lazy caches
@@ -353,6 +604,17 @@ class Ticker:
         # and populated only by the opt-in statement fallback, so the default path opens no
         # socket. See `_fundamentals_payload`.
         self._fundamentals_payloads: Dict[str, Any] = {}
+        # The symbol page's six sections, fetched once through `_stock_page_section` and shared by
+        # the six yfinance-named consensus members. `None` until one of them is called, and
+        # forever on a default Ticker: nothing here is reachable with `trendlyne_sections=False`.
+        self._stock_page_sections: Optional[Dict[str, pd.DataFrame]] = None
+        # The insider/SAST table, fetched once. A separate route from the symbol page, so a
+        # separate cache -- and `None` again means "not asked for".
+        self._insider_transactions: Optional[pd.DataFrame] = None
+        # NSE's parsed corporate-actions frame, shared by `isin`, `splits` and `actions`. None
+        # until one of them is called: the default path (and `dividends`, which reads the
+        # Screener.in profile instead) never fetches it.
+        self._actions_events: Optional[pd.DataFrame] = None
 
     # --------------------------------------------------- Observability
     def _degrade(self, what: str, cause: str) -> None:
@@ -687,6 +949,91 @@ class Ticker:
             self._degrade(what, cause)
             return None, cause
 
+    def _stock_page_section(
+        self, section: str, what: str
+    ) -> Tuple[pd.DataFrame, Optional[str]]:
+        """One of the six symbol-page sections, from a page this Ticker fetches at most once.
+
+        The six sections are parsed out of the **same document** as the OHLC token
+        (:meth:`bfinance.trendlyne.client.TrendlyneClient.stock_page_snapshot_async`), so they cost
+        zero requests after any trendlyne OHLC/token call and one page fetch on a cold client. The
+        memo is on the Ticker rather than only in the client so the six members below share one
+        snapshot: calling the client six times would be free in requests but would re-copy six
+        frames and re-measure the delta each time.
+
+        Returns ``(frame, error)`` on :meth:`_section_call`'s contract -- ``error`` is ``None``
+        only when the page answered. A section the page could not *parse* is not an error here:
+        it comes back as an empty frame **with its columns** and its own status attrs, which is
+        what keeps it distinguishable from a member this package does not ship.
+
+        Raises:
+            KeyError: ``section`` is not one of the six. A misspelt section name is a bug in this
+                module rather than a vendor change, and must not be reported as one.
+        """
+        if self._stock_page_sections is None:
+            frames, error = self._section_call(what, "stock_page_snapshot")
+            if error is not None:
+                return pd.DataFrame(), error
+            self._stock_page_sections = frames
+        if section not in self._stock_page_sections:
+            raise KeyError(
+                f"{section!r} is not one of the symbol page's sections "
+                f"({sorted(self._stock_page_sections)!r}); this package serves six."
+            )
+        return self._stock_page_sections[section], None
+
+    def _corporate_actions_events(self) -> Tuple[pd.DataFrame, Optional[str]]:
+        """NSE's parsed corporate-actions frame for this symbol, fetched once. ``(frame, error)``.
+
+        ``error`` is ``None`` **only** when the feed answered, the same contract
+        :meth:`_section_call` publishes and for the same reason: "NSE has no action on record for
+        this symbol" and "the feed did not answer" both leave an empty frame behind them, and only
+        one of them is a fact about the company. A typed failure is recorded through
+        :meth:`_degrade` and the **vendor's own empty shape** is returned -- the parsed frame, whose
+        ``ISIN`` and ``SplitRatio`` columns are what :attr:`isin` and :attr:`splits` read -- so no
+        reader has to special-case a hole.
+
+        The frame is memoised **on success only**, matching :meth:`_ensure_profile`: caching a
+        failure would latch one transient block for the life of the object. The first of
+        :attr:`isin`, :attr:`splits` and :attr:`actions` therefore pays one corporate-actions
+        request and the other two pay none.
+
+        **The client carries this Ticker's transport settings.** It is constructed per call from
+        the ``timeout`` and ``proxy`` this Ticker was built with, rather than read from the
+        module-global ``_default_client()``: that object has a 30 s timeout and takes a proxy
+        from the environment only, so ``Ticker(timeout=3, proxy=...)`` would wait 30 s and blame
+        NSE for a request the caller had already bounded. The class is stateless per call and
+        safe to build again.
+
+        :attr:`dividends` does **not** read this frame. It is the Screener.in profile
+        approximation, which is a different source with a different date basis; a caller who has
+        read ``dividends`` has not filled this memo and does not pay for it either.
+
+        Imported lazily because ``bfinance.nse`` must not be executed by a default ``Ticker`` --
+        the same reason
+        :meth:`bfinance.market.corporate.CorporateActionsEngine.resolve_actions_async` imports it
+        inside its own body.
+        """
+        if self._actions_events is not None:
+            return self._actions_events, None
+        from bfinance.nse import corporate_actions as nse
+
+        # The Ticker's own timeout/proxy, not the process-global client's defaults. These two
+        # attributes are the constructor's `timeout`/`proxy` (named for their first consumer).
+        client = nse.CorporateActionsClient(
+            timeout=self._section_timeout, proxy=self._section_proxy
+        )
+        try:
+            events = self._run_async(client.corporate_actions_async(self.symbol))
+        except BFinanceError as e:
+            if self.raise_errors:
+                raise
+            cause = f"{type(e).__name__}: {e}"
+            self._degrade("corporate actions", cause)
+            return nse.parse_corporate_actions([]), cause
+        self._actions_events = events
+        return events, None
+
     async def get_profile_async(self, force_refresh: bool = False) -> CompanyProfile:
         """Async variant of profile getter."""
         if self._profile is None or force_refresh:
@@ -714,14 +1061,38 @@ class Ticker:
         """
         FastInfo container matching yfinance 0.2+ `ticker.fast_info`.
         Provides quick scalar attributes (last_price, market_cap, 52w high/low).
+
+        **When :attr:`info` has already run, this costs no history request.** ``info`` memoises
+        the 1y frame it fetched (``_history_for_metadata``, the same frame
+        :attr:`history_metadata` reads) precisely so a second member does not repeat it, and this
+        property now uses it instead of fetching its own. Measured with the counting OHLCV stub:
+        ``t.info`` then ``t.fast_info`` used to cost 1 + 1 = 2 history requests; it costs 1 + 0 = 1,
+        a delta of **-1 request** for ``fast_info``. The reused frame is the one ``info`` asked
+        for -- daily, ``period="1y"``, ``requires=INFO_HISTORY_COLUMNS`` so ``Close`` and
+        ``Volume`` are present -- and it is passed through untouched: ``FastInfo``'s
+        history-derived fields are arithmetic over those two columns, so nothing is shrunk,
+        reindexed or re-fetched to make it fit.
+
+        With no memoised frame -- ``fast_info`` read first, or ``info``'s fetch failed -- this
+        makes the **same request** ``info`` makes, ``period="1y"`` with
+        ``requires=INFO_HISTORY_COLUMNS``, rather than a plain ``history(period="1y")``. The
+        narrow request is what selects the **as-traded** series; the plain call is auto-adjusted
+        by default, so using it here made ``fifty_day_average``,
+        ``two_hundred_day_average`` and ``year_change`` depend on whether ``info`` had run first
+        -- by a split factor, not by rounding, whenever a split or bonus fell inside the window.
+        It never depends on ``info`` having been called; the reuse is an optimisation on one
+        ordering, and both orderings now compute from one price basis.
         """
         if self._fast_info is None or self._profile_degraded:
             profile = self._ensure_profile()
             latest_p = profile.ratios.current_price
-            hist = None
+            hist = self._history_for_metadata
             try:
-                # One cached 1y frame feeds prev-close + 50/200d averages; no extra fan-out.
-                hist = self.history(period="1y")
+                if hist is None:
+                    # Nothing memoised: make exactly the request `info` would have made, so the
+                    # price basis does not depend on member ordering. `requires=` selects the
+                    # as-traded frame; without it this call defaults to auto_adjust=True.
+                    hist = self.history(period="1y", requires=INFO_HISTORY_COLUMNS)
                 if (not latest_p or latest_p <= 0) and not hist.empty and "Close" in hist.columns:
                     latest_p = float(hist["Close"].iloc[-1])
             except (BFinanceError, RuntimeError) as e:
@@ -744,7 +1115,14 @@ class Ticker:
     @property
     def info(self) -> Dict[str, Any]:
         """
-        Unified 76-key metrics dictionary matching yfinance `ticker.info`.
+        Unified metrics dictionary matching yfinance `ticker.info`.
+
+        The key count is **profile-dependent**: measured 2026-10-23 across five profiles at
+        76, 80, 89, 90 and 90 keys. ``INFO_VALUE_UNITS`` declares 80 keys; ``build_info_dict``
+        also injects up to 10 raw screener top-ratio labels, and four declared keys
+        (``regularMarketChange``, ``lastFiscalYearEnd``, ``nextFiscalYearEnd``,
+        ``mostRecentQuarter``) are omitted, never ``None``, when their source is absent.
+        Test availability with ``key in info`` rather than against a fixed length.
         """
         if self._info is None or self._profile_degraded:
             profile = self._ensure_profile()
@@ -1155,36 +1533,153 @@ class Ticker:
     @property
     def splits(self) -> pd.Series:
         """
-        Historical stock splits and bonus issues series -- **empty for every symbol, today.**
+        Historical stock splits and bonus issues from NSE's own filings, indexed by ex-date.
 
-        This property is not broken and is not unreachable; it is deliberately an honest absence.
-        :meth:`bfinance.market.corporate.CorporateActionsEngine.extract_splits` returns an empty
-        Series by construction because it used to INFER splits from growth in the balance sheet's
-        ``Equity Capital`` row, and that inference was deleted: ``Equity Capital`` is
-        ``shares issued x face value``, so a 1:1 bonus, a rights issue, a QIP and an ESOP
-        conversion are the same number in the same field, and no threshold separates them.
-        Measured, a capital raise at a company with no share-count event produced a fabricated
-        ``{2026-03-31: 5.26}`` split that rescaled every earlier bar by 1/5.26 while the frame's
-        provenance flags still claimed a complete adjustment.
+        This is :func:`bfinance.nse.corporate_actions.splits_from_actions` applied to the
+        corporate-actions feed's parsed frame: the factor is the filing's own ``SplitRatio``,
+        which :func:`~bfinance.nse.corporate_actions.split_ratio` read out of the published
+        subject when the frame was parsed. Nothing is recomputed here. In yfinance's convention a
+        ``Bonus 1:1`` is ``2.0`` and a ``Rs 10 -> Rs 2`` face-value sub-division is ``5.0``; the
+        index is ``Asia/Kolkata``-aware and named ``Date``, matching :attr:`dividends`' basis.
 
-        Splits are a *declared* fact, not an inferred one, and the real source for price
-        adjustment is :func:`bfinance.nse.corporate_actions.split_ratio`, which reads the ratio out
-        of the NSE filing. That path already supplies the factor ``history()`` uses; this property
-        is the Screener.in-profile surface only. Downstream an empty series reads as ``0.0``, which
-        :meth:`bfinance.market.corporate.CorporateActionsEngine.merge_actions_into_history`
-        documents as "not known", not "none happened".
+        **Selection is on the ratio, not on the event kind.** A composite subject
+        ("Interim Dividend - Rs 1.50 Per Share / Face Value Split - From Rs 10 To Rs 5") is filed
+        as a dividend while declaring a real ``2.0`` factor, and yfinance publishes that factor for
+        the same date; filtering on ``Action`` would drop it. A plain dividend row declares no
+        ratio, so it can never contribute one.
+
+        **Cost.** The first of :attr:`splits`, :attr:`actions` and :attr:`isin` pays **one**
+        corporate-actions request and the other two read the memoised events frame
+        (:meth:`_corporate_actions_events`). This is not :attr:`dividends`' route, so a caller who
+        has already read ``dividends`` still pays it -- and the two series do not share a source or
+        a date basis (that property is the Screener.in fiscal-year-end approximation).
+
+        An empty Series means the feed published no split or bonus for this symbol, **or** that the
+        feed could not be read; the second is named on :attr:`data_warnings` and in
+        ``attrs["bfinance_actions_source"] == "none"``. ``attrs["bfinance_empty_feed"]`` is never
+        set here: ``True`` would assert that NSE answered with nothing, and a failed request
+        observed nothing either way. :attr:`actions` follows the same rule, so the absent key plus
+        ``bfinance_actions_source`` are what distinguish absence from failure. It is never a
+        fabricated factor: the equity-capital inference that used to populate this property is
+        deleted, and
+        :meth:`bfinance.market.corporate.CorporateActionsEngine.extract_splits` documents why it
+        cannot be tuned back in.
         """
-        profile = self._ensure_profile()
-        return CorporateActionsEngine.extract_splits(profile)
+        from bfinance.nse import corporate_actions as nse
+
+        events, error = self._corporate_actions_events()
+        series = nse.splits_from_actions(events)
+        # `splits_from_actions` is a pure frame reader and does not invent a market timezone. The
+        # series it mirrors, `dividends`, is localised to Asia/Kolkata by
+        # CorporateActionsEngine._tz_dated, so localise here too and only when the index is naive.
+        if isinstance(series.index, pd.DatetimeIndex) and series.index.tz is None:
+            series.index = series.index.tz_localize(YF_TZ)
+        series.attrs["bfinance_provenance"] = (
+            events.attrs.get("bfinance_provenance") if error is None else ACTIONS_SOURCE_NONE
+        )
+        series.attrs["bfinance_symbol"] = self.symbol
+        series.attrs["bfinance_actions_source"] = (
+            ACTIONS_SOURCE_NSE if error is None else ACTIONS_SOURCE_NONE
+        )
+        if error is not None:
+            series.attrs["bfinance_actions_source_detail"] = error
+        return series
+
+    @property
+    def isin(self) -> Optional[str]:
+        """
+        The instrument's ISIN, or ``None`` -- never ``""`` and never a guess.
+
+        **First source: the NSE corporate-actions payload.** Every row of that feed carries an
+        ``isin``, and :func:`bfinance.nse.corporate_actions.isin_from_actions` returns it only when
+        the frame's non-blank values agree. A frame carrying two different ISINs (a market-wide
+        pull, a mis-joined frame) is refused rather than answered from its first or most common
+        row: a plausible wrong identifier is worse than none.
+
+        **Fallback: recorded index memberships.** When the feed has no row for this symbol -- it
+        indexes equities, not ETFs -- :func:`bfinance.universe.isin_from_archive` reads the
+        snapshots the universe archive has already written. **Coverage is archived indices only**:
+        a symbol outside every catalogued index, a delisted scrip, or one whose index was never
+        recorded on this machine returns ``None`` however often it is asked. ``None`` here therefore
+        means *not found in what is on disk*, **not** "no ISIN exists". That fallback opens no
+        socket and creates no directory.
+
+        **Cost.** The first of :attr:`isin`, :attr:`splits` and :attr:`actions` pays **one**
+        corporate-actions request; the other two read the memoised events frame. A failed feed still
+        falls back to the archive, which is free.
+        """
+        from bfinance.nse import corporate_actions as nse
+        from bfinance.universe import isin_from_archive
+
+        events, error = self._corporate_actions_events()
+        if error is None:
+            found = nse.isin_from_actions(events)
+            if found is not None:
+                return found
+        return isin_from_archive(self.symbol)
 
     @property
     def actions(self) -> pd.DataFrame:
-        """Combined dividends/splits DataFrame matching yfinance `ticker.actions`."""
-        return CorporateActionsEngine.build_actions(self.dividends, self.splits)
+        """
+        Dividends and stock splits on one ex-dated frame, in yfinance's ``actions`` shape.
+
+        Both columns come from the **same** feed -- NSE's corporate-actions filings, through
+        :func:`bfinance.nse.corporate_actions.actions_frame` -- so the frame is internally
+        consistent: one row per declared ex-date, ``Dividends`` in unadjusted rupees and
+        ``Stock Splits`` the share-count factor. A frame built by concatenating two series from two
+        sources would date the dividend by one convention and the split by another and look
+        perfectly ordinary while doing it, which is why this property does not do that.
+
+        That also means ``actions["Dividends"]`` is **not** :attr:`dividends`. The latter is the
+        Screener.in fiscal-year-end approximation retained behind its own name; this frame is the
+        same NSE feed :meth:`history` already uses for its ``Dividends``/``Stock Splits`` columns.
+        ``attrs["bfinance_actions_source"]`` names the feed on every frame, and
+        ``bfinance_actions_source_detail`` carries the request's own description.
+
+        **Cost.** The first of :attr:`splits`, :attr:`actions` and :attr:`isin` pays **one**
+        corporate-actions request; the other two read the memoised events frame. Zero rows means
+        the feed published no action for the symbol -- or that it could not be read, which is on
+        :attr:`data_warnings` and leaves ``bfinance_actions_source == "none"``.
+        ``bfinance_empty_feed`` is **not** set: ``True`` would assert that NSE answered with
+        nothing, which a failed request did not observe. Like :attr:`splits`, this property leaves
+        the key absent on both paths and lets ``bfinance_actions_source`` say which happened.
+        """
+        from bfinance.nse import corporate_actions as nse
+
+        events, error = self._corporate_actions_events()
+        if error is not None:
+            frame = nse.empty_actions_frame(self.symbol)
+            # `empty_actions_frame` stamps the *shape's* provenance even when nothing answered,
+            # and its `bfinance_empty_feed=True` asserts NSE answered with nothing. Override the
+            # first and drop the second: a failed feed is "not observed", the same as `splits`.
+            frame.attrs["bfinance_provenance"] = ACTIONS_SOURCE_NONE
+            frame.attrs["bfinance_actions_source"] = ACTIONS_SOURCE_NONE
+            frame.attrs["bfinance_actions_source_detail"] = error
+            frame.attrs.pop("bfinance_empty_feed", None)
+            return frame
+        frame = nse.actions_frame(
+            events,
+            symbol=self.symbol,
+            url=events.attrs.get("bfinance_source_url") or "",
+        )
+        frame.attrs["bfinance_actions_source"] = ACTIONS_SOURCE_NSE
+        frame.attrs["bfinance_actions_source_detail"] = (
+            f"NSE corporate-actions feed, {len(events)} event row(s) "
+            f"{dict(events.attrs.get('bfinance_action_counts') or {})}"
+        )
+        return frame
 
     @property
     def capital_gains(self) -> pd.Series:
-        """Capital gains series matching yfinance (empty for Indian equities)."""
+        """Capital-gains distributions, always empty: Indian equities do not pay them.
+
+        yfinance's ``capital_gains`` reports a US fund's capital-gain distributions. An Indian
+        listed equity has no such concept -- a holder's gain arises on sale, not as a distribution
+        by the issuer -- and no NSE or Screener route publishes one, so the empty Series is the
+        truthful answer for this market rather than an unimplemented feature. It is returned
+        instead of raising so a drop-in caller's ``.empty`` check behaves exactly as it does for a
+        US fund that distributed nothing.
+        """
         return CorporateActionsEngine.build_capital_gains()
 
     @property
@@ -1441,6 +1936,282 @@ class Ticker:
         """
         tables, error = self._section_call("trendlyne SWOT tables", "swot")
         return {} if error is not None else tables
+
+    # ------------------------- yfinance-named members over the same symbol page
+    #
+    # Six names yfinance publishes, served from the six sections above rather than from a route
+    # of their own. Every one of them is gated on ``trendlyne_sections`` through
+    # `_stock_page_section` -> `_section_call`, so the flag-off refusal is one code path rather
+    # than six copies of it, and every failure lands on `data_warnings` through `_degrade`.
+
+    @property
+    def recommendations(self) -> pd.DataFrame:
+        """Analyst recommendation counts, in yfinance's columns, one row per vendor snapshot.
+
+        Columns ``period``, ``strongBuy``, ``buy``, ``hold``, ``sell``, ``strongSell``. ``period``
+        is the vendor's own ``asofdate`` (``YYYY-MM-DD``): yfinance labels its four rows
+        ``0m``/``-1m``/``-2m``/``-3m``, but this source publishes **six dated** snapshots, so
+        re-labelling them into a relative string would discard the date and add a month index the
+        vendor never stated. The counts are the vendor's, unboxed from its
+        ``{"value": n, "class": ...}`` colour wrapper by the parser. On the recorded page each
+        row's five counts sum to the vendor's own ``analysts`` field; that is its arithmetic, and
+        none of it is repeated here.
+
+        :attr:`recommendations_summary` is the last four rows of this frame, not a second fetch.
+        The vendor's remaining fields (``no_opinion``, ``reco_value``, its prose) are on
+        ``TrendlyneClient.stock_page_snapshot()["recommendations"]``; they are not yfinance columns
+        and are not invented as ones here.
+
+        Costs no request of its own once the symbol page has been read for any reason -- the
+        section is parsed out of the same document as the OHLC token. On a cold client the first
+        of these six members pays that one page fetch.
+        """
+        columns = list(_RECOMMENDATION_COLUMNS.values())
+        section, error = self._stock_page_section(
+            "recommendations", "trendlyne analyst recommendations"
+        )
+        if error is not None:
+            return pd.DataFrame(columns=columns)
+        frame = section.rename(columns=_RECOMMENDATION_COLUMNS)[columns].copy()
+        counts = [column for column in columns if column != "period"]
+        frame[counts] = frame[counts].apply(pd.to_numeric, errors="coerce").astype(float)
+        return _section_derived_frame(
+            frame,
+            section,
+            "The vendor's dated recommendation snapshots, renamed to yfinance's columns; "
+            "'period' is the vendor's asofdate, not a relative month label.",
+        )
+
+    @property
+    def recommendations_summary(self) -> pd.DataFrame:
+        """The four most recent rows of :attr:`recommendations`, and **no** second fetch.
+
+        yfinance serves four monthly rows here and four on :attr:`recommendations`; this source
+        publishes six, so the summary is the most recent four of the same frame. Nothing is
+        re-requested and nothing is recomputed -- a caller can check that by reading the two
+        frames' ``bfinance_trendlyne_rows`` (6 and 4) and their shared provenance.
+        """
+        frame = self.recommendations
+        summary = frame.tail(4).copy()
+        summary.attrs = dict(frame.attrs)
+        # The copied count still says 6; a caller holding four rows must read four.
+        summary.attrs["bfinance_trendlyne_rows"] = len(summary)
+        return summary
+
+    @property
+    def earnings_estimate(self) -> pd.DataFrame:
+        """Consensus EPS estimates, in yfinance's ``0q/+1q/0y/+1y`` grid.
+
+        Columns ``numberOfAnalysts``, ``avg``, ``low``, ``high``, ``yearAgoEps``, ``growth``.
+
+        **How the four labels are placed.** ``0q``/``0y`` are the rows the vendor marks
+        ``is_current`` in the ``QUARTER``/``ANNUAL`` ``EPS`` blocks -- exactly one of each on the
+        recorded page, so the anchor is the vendor's own flag rather than a comparison against
+        today's date. ``+1q``/``+1y`` are the **earliest** row of the same period type that the
+        vendor marks ``is_past == False`` and whose ``period_end`` is later than the anchor's. That
+        is a date ordering, not a parsed period label: comparing ``FY27`` with ``Q2FY27`` would
+        mean re-implementing the vendor's fiscal calendar, while ``period_end`` is published.
+
+        **``yearAgoEps`` is a published figure, never a derived one.** It is the ``actual`` of the
+        row whose ``period_end`` is exactly one year earlier -- a print the vendor published, not
+        ``avg / (1 + growth_pct)``. Where that row is absent from the frame the cell is ``NaN`` and
+        ``attrs["bfinance_estimate_note"]`` names exactly which cells are absent; nothing is
+        back-filled from ``growth_pct``, which is a growth rate rather than a prior-year figure.
+
+        ``avg``/``low``/``high``/``numberOfAnalysts`` are carried verbatim from the same rows.
+        ``growth`` is the vendor's ``growth_pct`` -- a **percentage** (``4.68`` on the recorded
+        page) -- divided by 100, because yfinance's column of that name carries Yahoo's unscaled
+        ``raw`` value, a decimal fraction (``0.0468``; ``yfinance/scrapers/analysis.py:41``). The
+        conversion is recorded in ``attrs["bfinance_trendlyne_note"]`` too.
+
+        Costs no request of its own once the symbol page has been read; see
+        :attr:`recommendations` for the cold-client cost and :attr:`revenue_estimate` for the
+        revenue series.
+        """
+        columns = list(_ESTIMATE_COLUMNS) + ["yearAgoEps", "growth"]
+        section, error = self._stock_page_section(
+            "consensus", "trendlyne consensus estimates"
+        )
+        if error is not None:
+            return pd.DataFrame(columns=columns)
+        table, note = _estimate_table(section, "EPS", "yearAgoEps")
+        table = _section_derived_frame(
+            table,
+            section,
+            "0q/0y are the vendor's is_current rows and +1q/+1y the earliest non-past row after "
+            "each; yearAgoEps is a published prior-year actual, never derived from growth_pct; "
+            "growth is the vendor's growth_pct percent divided by 100 to match yfinance's "
+            "fraction.",
+        )
+        if note is not None:
+            table.attrs["bfinance_estimate_note"] = note
+        return table
+
+    @property
+    def revenue_estimate(self) -> pd.DataFrame:
+        """Consensus revenue estimates, in yfinance's ``0q/+1q/0y/+1y`` grid.
+
+        Same index, same shape and the same placement rule as :attr:`earnings_estimate` -- the
+        anchors come from ``is_current`` and the forward rows from ``is_past == False`` plus
+        ``period_end``, never from a period label -- applied to the vendor's ``REVENUE`` rows.
+        Columns ``numberOfAnalysts``, ``avg``, ``low``, ``high``, ``yearAgoRevenue``, ``growth``.
+
+        ``yearAgoRevenue`` is the published ``actual`` of the same-period-prior-year row and is
+        ``NaN`` where that row is not in the frame, with ``attrs["bfinance_estimate_note"]`` naming
+        exactly which cells are absent. It is never solved out of ``growth_pct``.
+
+        ``growth`` is the vendor's ``growth_pct`` percentage (``0.27`` means 0.27%) divided by 100
+        to match yfinance's fraction-valued column of the same name (Yahoo's unscaled ``raw``;
+        ``yfinance/scrapers/analysis.py:41``). Revenue itself is **not** scaled: the vendor
+        publishes it in the same unit as its statements, unconverted.
+
+        Costs no request of its own once the symbol page has been read.
+        """
+        columns = list(_ESTIMATE_COLUMNS) + ["yearAgoRevenue", "growth"]
+        section, error = self._stock_page_section(
+            "consensus", "trendlyne consensus estimates"
+        )
+        if error is not None:
+            return pd.DataFrame(columns=columns)
+        table, note = _estimate_table(section, "REVENUE", "yearAgoRevenue")
+        table = _section_derived_frame(
+            table,
+            section,
+            "0q/0y are the vendor's is_current rows and +1q/+1y the earliest non-past row after "
+            "each; yearAgoRevenue is a published prior-year actual, never derived from growth_pct; "
+            "growth is the vendor's growth_pct percent divided by 100 to match yfinance's "
+            "fraction.",
+        )
+        if note is not None:
+            table.attrs["bfinance_estimate_note"] = note
+        return table
+
+    @property
+    def earnings_history(self) -> pd.DataFrame:
+        """Reported quarterly EPS against the consensus estimate, with the vendor's surprise.
+
+        Columns ``epsEstimate``, ``epsActual``, ``epsDifference``, ``surprisePercent``. The index
+        is the **fiscal period end**, and ``attrs["bfinance_date_basis"] = "fiscal_period_end"`
+        says so: the consensus frame carries no announcement date, and a period end silently read
+        as a reporting date would be off by weeks on every row. The index is named ``quarter``,
+        yfinance's name for it.
+
+        A row is a print when the vendor marks it ``is_past`` **and** publishes an ``actual``. A
+        forward row is not one even when its ``actual`` cell is filled -- the recorded page's
+        ``Q2FY27`` carries ``actual == avg`` and ``surprise_pct == 0.0`` with ``is_past == False``,
+        which is a provisional cell, not a reported quarter.
+
+        ``epsDifference`` is ``epsActual - epsEstimate``: the one derived column, arithmetic over
+        two published figures and defined that way by yfinance. ``surprisePercent`` is the
+        vendor's own ``surprise_pct`` -- a **percentage** (``-5.83``) -- divided by 100 to match
+        yfinance's fraction-valued column of the same name (Yahoo's unscaled ``raw``;
+        ``yfinance/scrapers/analysis.py:127``); it is **not** re-derived from the difference,
+        because this package's rounding is not the vendor's number.
+
+        Costs no request of its own once the symbol page has been read.
+        """
+        columns = ["epsEstimate", "epsActual", "epsDifference", "surprisePercent"]
+        section, error = self._stock_page_section(
+            "consensus", "trendlyne consensus estimates"
+        )
+        if error is not None:
+            return pd.DataFrame(columns=columns)
+        table = _earnings_history_table(section)
+        table = _section_derived_frame(
+            table,
+            section,
+            "Reported EPS quarters only (is_past and a published actual); index is the fiscal "
+            "period end, see bfinance_date_basis; surprisePercent is the vendor's own "
+            "surprise_pct percent divided by 100 to match yfinance's fraction.",
+        )
+        table.attrs["bfinance_date_basis"] = "fiscal_period_end"
+        return table
+
+    @property
+    def growth_estimates(self) -> pd.DataFrame:
+        """Per-period EPS growth from the vendor's published ``growth_pct`` field.
+
+        Index ``period`` -- the vendor's own labels (``Q2FY27``, ``FY27``) in its row order -- and
+        one column, ``stock``. The vendor publishes ``growth_pct`` as a **percentage** (``4.68``
+        means 4.68%); the column is that cell divided by 100, matching yfinance's fraction-valued
+        column of the same name (Yahoo's unscaled ``raw``; ``yfinance/scrapers/analysis.py:160``).
+
+        **``industry``, ``sector`` and ``index`` are not published by this source, so they are
+        absent, not zero.** yfinance's version compares the stock's growth with its industry,
+        sector and index; this vendor publishes the stock's own figure only, and a comparative
+        series would have to be invented. An absent column is the honest shape for a comparison
+        nobody made.
+
+        Only the ``EPS`` rows are served because ``stock`` is an earnings-growth column: the vendor
+        also publishes a ``growth_pct`` on its ``REVENUE`` rows, and folding the two together would
+        put a revenue growth rate and an EPS growth rate behind one period label with nothing to
+        tell them apart. The revenue series is :attr:`revenue_estimate`'s ``growth`` column.
+
+        Costs no request of its own once the symbol page has been read.
+        """
+        section, error = self._stock_page_section(
+            "consensus", "trendlyne consensus estimates"
+        )
+        if error is not None:
+            return pd.DataFrame(columns=["stock"])
+        eps = section[section["statement"] == "EPS"] if not section.empty else section
+        table = pd.DataFrame(
+            {
+                # Percent -> fraction: yfinance's `stock` column is Yahoo's raw fraction.
+                "stock": (
+                    pd.to_numeric(eps["growth_pct"], errors="coerce").to_numpy(dtype=float)
+                    / 100.0
+                )
+            },
+            index=pd.Index(eps["period"].astype(str).to_numpy(), name="period"),
+        )
+        return _section_derived_frame(
+            table,
+            section,
+            "The vendor's own growth_pct on its EPS estimate rows, divided by 100 to match "
+            "yfinance's fraction; industry/sector/index growth is not published by this source, "
+            "so those columns are absent rather than zero.",
+        )
+
+    @property
+    def insider_transactions(self) -> pd.DataFrame:
+        """Insider and SAST trades, as the vendor's table, verbatim.
+
+        The columns are the page's own: ``Client Name``, ``Client Category``, ``Action*``,
+        ``Reported To/By Exchange``, ``Quantity``, ``Post Transaction Holding``, ``Traded %``,
+        ``Avg. Price``, ``Value``, ``Period``, ``Regulation (Insider/SAST)``, ``Security Type``,
+        ``Mode``. Nothing is renamed, aggregated or coerced -- in particular the counts are the
+        page's formatted strings (``"566,000"``), not numbers this package invented by parsing
+        them.
+
+        **The route is capped and its history is finite.** The vendor serves this list in a single
+        page with no period axis, capped server-side at exactly **500 rows**
+        (``bfinance.trendlyne.client.INSIDER_ROW_CAP``); the recorded 500-row pull covered
+        **2020-02-12 to 2025-06-16**, so "2020 to present" is the route's observed span and the
+        newest disclosure was already months stale when it was measured. A frame holding exactly
+        500 rows is therefore **truncated**, and ``attrs["bfinance_trendlyne_insider_rows"]`` plus
+        the client's note say so; a frame below the cap is not described as complete either,
+        because nothing measured says it is.
+
+        There is no ``insider_roster_holders`` and no ``insider_purchases``: a roster is an
+        aggregation of these rows into "current holding" and the route publishes no position or
+        title field to aggregate, so both would be derivation presented as disclosure.
+
+        One request on first access, zero after -- the frame is memoised for this Ticker's life.
+        A **failure** is not memoised: it is recorded on :attr:`data_warnings`, the member returns
+        an empty frame, and the next access retries the route instead of latching one transient
+        block for the life of the object.
+        """
+        if self._insider_transactions is None:
+            frame, error = self._section_call(
+                "trendlyne insider/SAST trades", "insider_trading"
+            )
+            if error is not None:
+                return pd.DataFrame()
+            self._insider_transactions = frame
+        frame = self._insider_transactions.copy()
+        frame.attrs = dict(self._insider_transactions.attrs)
+        return frame
 
     # ----------------------------------------------- Indian Superpower Properties
     @property
@@ -1751,6 +2522,133 @@ class Ticker:
         df.attrs["bfinance_profit_loss_error"] = pnl_error
         df.attrs["bfinance_debt_cr"] = debt_cr
         return df
+
+    # --------------------------------------------------- yfinance method spellings
+    #
+    # yfinance 1.7.0 exposes each member below twice: as a property/method and as a thin
+    # ``get_*`` wrapper over it (``yfinance/base.py:234-488``), so a drop-in caller may have
+    # copied either spelling. Every one here is a **one-line forwarder** to the member of the
+    # same name -- no re-implementation, no extra request, no copy, no derivation. The target is
+    # the whole implementation, and ``tests/test_ticker_alias_layer.py`` pins that by walking
+    # each alias's bytecode and failing if its body reaches for anything but its target.
+    #
+    # Three yfinance keywords cannot narrow anything on this surface. They are accepted so the
+    # signature is yfinance's, and each affected docstring says so rather than leaving a caller
+    # to infer why the answer did not change:
+    #
+    # * ``period`` on the four corporate-action series. Here they are built from the screener
+    #   profile's whole action history, not from a windowed price frame, so ``"max"`` and
+    #   ``"1y"`` return the same series.
+    # * ``freq``/``periods`` on :meth:`get_valuation_measures`. This package serves one current
+    #   snapshot (``Metric``/``Value``), not yfinance's period grid, so there is no axis to cap.
+    #
+    # The ``as_dict`` keyword IS honoured wherever yfinance has it (``get_major_holders`` and
+    # the two holder tables): it is the value's own ``to_dict()``, not a second derivation.
+
+    def get_info(self) -> Dict[str, Any]:
+        """Alias for :attr:`info` matching yfinance ``get_info()``."""
+        return self.info
+
+    def get_fast_info(self) -> FastInfo:
+        """Alias for :attr:`fast_info` matching yfinance ``get_fast_info()``."""
+        return self.fast_info
+
+    def get_calendar(self) -> Dict[str, Any]:
+        """Alias for :attr:`calendar` matching yfinance ``get_calendar()``."""
+        return self.calendar
+
+    def get_news(self, count: int = 10) -> List[Dict[str, Any]]:
+        """Alias for :attr:`news` matching yfinance ``get_news(count=10)``.
+
+        ``count`` caps the number of items, as yfinance's own ``snippetCount`` does; the items
+        themselves are :attr:`news`, unfiltered and uncopied beyond the slice.
+        """
+        return self.news[:count]
+
+    def get_dividends(self, period: str = "max") -> pd.Series:
+        """Alias for :attr:`dividends` matching yfinance ``get_dividends(period="max")``.
+
+        ``period`` is accepted for signature parity and cannot narrow the series: it is the
+        profile's whole dividend history, so every period returns the same one.
+        """
+        return self.dividends
+
+    def get_splits(self, period: str = "max") -> pd.Series:
+        """Alias for :attr:`splits` matching yfinance ``get_splits(period="max")``.
+
+        ``period`` is accepted for signature parity and cannot narrow the series, for the same
+        reason as :meth:`get_dividends`: the NSE corporate-actions feed is asked for the symbol's
+        whole declared history, so every period returns the same one. See :attr:`splits` for the
+        source and for why an empty result is not "no split happened".
+        """
+        return self.splits
+
+    def get_actions(self, period: str = "max") -> pd.DataFrame:
+        """Alias for :attr:`actions` matching yfinance ``get_actions(period="max")``.
+
+        ``period`` is accepted for signature parity and cannot narrow the frame, for the same
+        reason as :meth:`get_dividends`.
+        """
+        return self.actions
+
+    def get_capital_gains(self, period: str = "max") -> pd.Series:
+        """Alias for :attr:`capital_gains` matching ``get_capital_gains(period="max")``.
+
+        ``period`` is accepted for signature parity and cannot narrow the series, for the same
+        reason as :meth:`get_dividends`.
+        """
+        return self.capital_gains
+
+    def get_major_holders(self, as_dict: bool = False) -> Union[pd.DataFrame, dict]:
+        """Alias for :attr:`major_holders` matching yfinance
+        ``get_major_holders(as_dict=False)``."""
+        data = self.major_holders
+        return data.to_dict() if as_dict else data
+
+    def get_institutional_holders(self, as_dict: bool = False) -> Union[pd.DataFrame, dict]:
+        """Alias for :attr:`institutional_holders` matching yfinance, ``as_dict`` included."""
+        data = self.institutional_holders
+        return data.to_dict() if as_dict else data
+
+    def get_mutualfund_holders(self, as_dict: bool = False) -> Union[pd.DataFrame, dict]:
+        """Alias for :attr:`mutualfund_holders` matching yfinance, ``as_dict`` included."""
+        data = self.mutualfund_holders
+        return data.to_dict() if as_dict else data
+
+    def get_analyst_price_targets(self) -> Optional[Dict[str, Any]]:
+        """Alias for :attr:`analyst_price_targets` matching yfinance
+        ``get_analyst_price_targets()``."""
+        return self.analyst_price_targets
+
+    def get_valuation_measures(
+        self, freq: str = "quarterly", periods: Optional[int] = 5
+    ) -> pd.DataFrame:
+        """Alias for :attr:`valuation_measures` matching yfinance ``get_valuation_measures()``.
+
+        ``freq`` and ``periods`` are accepted for signature parity and cannot narrow anything:
+        the frame this package serves is one current snapshot, not yfinance's period grid.
+        """
+        return self.valuation_measures
+
+    @property
+    def incomestmt(self) -> pd.DataFrame:
+        """Alias for :attr:`income_stmt` matching yfinance 1.7.0's spelling."""
+        return self.income_stmt
+
+    @property
+    def balancesheet(self) -> pd.DataFrame:
+        """Alias for :attr:`balance_sheet` matching yfinance 1.7.0's spelling."""
+        return self.balance_sheet
+
+    @property
+    def quarterly_incomestmt(self) -> pd.DataFrame:
+        """Alias for :attr:`quarterly_income_stmt` matching yfinance 1.7.0's spelling."""
+        return self.quarterly_income_stmt
+
+    @property
+    def quarterly_balancesheet(self) -> pd.DataFrame:
+        """Alias for :attr:`quarterly_balance_sheet` matching yfinance 1.7.0's spelling."""
+        return self.quarterly_balance_sheet
 
     # ----------------------------------------------- Document & Financial Exporters
     def to_excel(self, filepath: str) -> str:

@@ -852,6 +852,14 @@ def parse_corporate_actions(
         ex_date = _ex_date(row.get("exDate"))
         if ex_date is None:
             undated += 1
+        # An absent ``isin`` must be ``None``, not its repr. ``str(None)`` is the truthy string
+        # "None", which would read as a real identifier and join to nothing -- the exact fabricated
+        # value :func:`isin_from_actions` exists to refuse. The ``"-"`` sentinel is the feed's other
+        # way of saying "no value" (it is what ``exDate``/``recDate`` use) and is absence too.
+        raw_isin = row.get("isin")
+        isin = None if raw_isin is None else str(raw_isin).strip()
+        if not isin or isin == ABSENT:
+            isin = None
         records.append(
             {
                 "Date": ex_date,
@@ -870,7 +878,7 @@ def parse_corporate_actions(
                 "FaceValue": face_value,
                 "Series": (str(row.get("series")) or "").strip() or None,
                 "Company": (str(row.get("comp")) or "").strip() or None,
-                "ISIN": (str(row.get("isin")) or "").strip() or None,
+                "ISIN": isin,
             }
         )
 
@@ -939,7 +947,12 @@ def actions_frame(
                 # Two dividends on one ex-date are two cash payments; the frame has one slot per
                 # date, so they sum.
                 slot["Dividends"] += float(value)
-            if action in PRICE_AFFECTING_ACTIONS and ratio is not None and not pd.isna(ratio):
+            if ratio is not None and not pd.isna(ratio):
+                # Selection is on ``SplitRatio`` alone, not on ``Action``: a composite subject
+                # ("Interim Dividend ... / Face Value Split ...") is classified ``dividend``
+                # while carrying a real factor, and yfinance publishes that factor for the same
+                # date. The ratio column is the discriminator; a row that declares no split
+                # leaves it None, so a plain dividend can never contribute one.
                 # split_ratio() has already multiplied a composite subject's bonus and
                 # sub-division factors into one number, so this assigns rather than accumulates.
                 # Two *separate* feed rows on one date do multiply, which is the only correct
@@ -980,6 +993,88 @@ def empty_actions_frame(symbol: Optional[str] = None, url: str = "") -> pd.DataF
     frame = actions_frame(None, symbol=symbol, url=url)
     frame.attrs["bfinance_empty_feed"] = True
     return frame
+
+
+# ------------------------------------------------------------------ frame readers
+#
+# Readers of the parsed events frame (the :func:`parse_corporate_actions` output), not of the
+# yfinance-shaped :func:`actions_frame`: ``ISIN`` and ``SplitRatio`` live on the events frame, and
+# both accessors below are pure functions of it. No I/O, no cache, no request -- a caller that
+# already holds the frame pays nothing to read it again.
+
+
+def isin_from_actions(frame: pd.DataFrame) -> Optional[str]:
+    """The ISIN carried by an already-parsed corporate-actions frame, or ``None``.
+
+    The feed publishes ``isin`` on **every** row and :func:`parse_corporate_actions` carries it into
+    the ``ISIN`` column, so this is a read, not a derivation: no company-name match, no second
+    page, no identifier arithmetic. Verified on the recordings in
+    ``tests/fixtures/corporate_actions/`` — all 10 RELIANCE rows read ``INE002A01018`` and all 31
+    ITC rows read ``INE154A01025``.
+
+    Returns ``None`` — never ``""``, never a guess — for an empty frame, a frame without an
+    ``ISIN`` column, a frame whose ISIN cells are all blank, and a frame whose rows **disagree**.
+    The last case is the one worth refusing: a frame carrying two different ISINs is a market-wide
+    pull or a mis-joined frame, and picking the first or the most common row would hand back a
+    plausible, wrong identifier. Partial coverage is then the caller's to disclose; the archived
+    index fallback is :func:`bfinance.universe.isin_from_archive`.
+    """
+    if frame is None or getattr(frame, "empty", True):
+        return None
+    if "ISIN" not in getattr(frame, "columns", ()):
+        return None
+    found = {
+        str(value).strip()
+        for value in frame["ISIN"]
+        if value is not None and not pd.isna(value) and str(value).strip()
+    }
+    return found.pop() if len(found) == 1 else None
+
+
+def splits_from_actions(frame: pd.DataFrame) -> pd.Series:
+    """Split factors from an already-parsed corporate-actions frame, indexed by ex-date.
+
+    Returns a float ``Series`` named ``"Stock Splits"`` in the yfinance convention: the factor a
+    holder's share count is multiplied by, so ``Bonus 1:1`` is ``2.0`` and a ``Rs 10 -> Rs 2``
+    face-value sub-division is ``5.0``. The factor is read from the frame's ``SplitRatio`` column,
+    which :func:`split_ratio` derived from the published subject when the frame was parsed —
+    nothing is recomputed here and no request is made.
+
+    Selection is on ``SplitRatio``, **not** on ``Action``. A composite subject is both events at
+    once (``Interim Dividend - Rs 1.50/- Per Share / Face Value Split - From Rs 10/- Per Share To
+    Rs 5/- Per Share``), so it is classified :data:`DIVIDEND` while carrying a real ``2.0`` factor,
+    and yfinance publishes that factor for the same date. Filtering by ``Action`` would drop it.
+    The ratio column is the honest discriminator, and a row that declares no split leaves it
+    ``None`` — which is why a plain dividend row can never contribute a factor.
+
+    Empty in, empty out: with no split rows the result is an empty float Series whose index is a
+    ``DatetimeIndex`` named ``Date``, so ``.empty`` and date arithmetic both behave. An undated
+    event is excluded (a ``NaT`` has no place in a time series, matching :func:`actions_frame`),
+    and two rows sharing one ex-date are **multiplied**, because two issuances by one issuer on
+    one date compound and a duplicate index would make every downstream reindex ambiguous.
+
+    The frame is expected to describe **one symbol** — the shape
+    :func:`parse_corporate_actions` returns when it is given a ``symbol=``. A market-wide pull has
+    no per-symbol axis, so filtering it down to the symbol is the caller's job; this function will
+    not guess which of several issuers a same-date factor belongs to.
+    """
+    empty = pd.Series(
+        dtype=float, name="Stock Splits", index=pd.DatetimeIndex([], name="Date")
+    )
+    if frame is None or getattr(frame, "empty", True):
+        return empty
+    if "SplitRatio" not in getattr(frame, "columns", ()):
+        return empty
+    ratios = pd.to_numeric(frame["SplitRatio"], errors="coerce")
+    keep = ratios.notna()
+    if isinstance(frame.index, pd.DatetimeIndex):
+        keep = keep & frame.index.notna()
+    dated = ratios[keep].astype(float)
+    if dated.empty:
+        return empty
+    series = dated.groupby(level=0).prod().sort_index().astype(float)
+    series.name = "Stock Splits"
+    return series
 
 
 def unexplained_price_jumps(

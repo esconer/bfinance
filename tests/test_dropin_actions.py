@@ -7,11 +7,13 @@ Conventions recorded here (see src/bfinance/market/corporate.py):
 - yfinance dividends indexed by EX-DATE; bfinance by FISCAL YEAR-END
   (Mar-31 Asia/Kolkata). Amounts compared within 5% for last 4 payouts.
 - Splits: yfinance represents a 1:1 bonus as a 2.0 split ratio. bfinance's
-  `Ticker.splits` is EMPTY for every symbol, by construction, and this file asserts
-  that DIVERGENCE rather than parity. It used to assert parity -- reading
-  `b.index[-1]` off a series that is empty by construction, so it could only fail on
-  IndexError. The equity-capital inference that used to populate it was deleted; see
-  `test_splits_is_empty_by_design_and_yfinance_still_has_them`.
+  `Ticker.splits` now reads the NSE corporate-actions filings -- the same feed
+  `Ticker.actions` uses -- so the factor is the filing's own `SplitRatio` and the
+  index is the declared ex-date. `CorporateActionsEngine.extract_splits` is still
+  empty by construction: the deleted equity-capital inference is not coming back,
+  and `test_extract_splits_is_unconditional...` keeps it that way.
+- `Ticker.actions` is built from that one feed rather than by concatenating
+  `dividends` and `splits`, so its `Dividends` column is NOT `Ticker.dividends`.
 - yfinance capital_gains is EMPTY for Indian equities; bfinance matches.
 - yfinance options == () for NSE underlyings (even RELIANCE.NS, an F&O
   stock); option_chain() empty, dated expiry raises ValueError.
@@ -67,58 +69,50 @@ def test_dividends_last4_amounts_and_conventions():
         assert (ts.date() - b_date).days > 3, "expected convention gap (ex-date vs FY-end)"
 
 
-def test_splits_is_empty_by_design_and_yfinance_still_has_them():
+def test_splits_come_from_the_nse_filings_not_an_equity_capital_inference():
     """
-    ``Ticker.splits`` is EMPTY for every symbol, and that is the deliberate current behaviour.
+    ``Ticker.splits`` is NSE's declared ex-date and factor, read from the filings feed.
 
-    It used to be asserted the other way round: this test read ``b.index[-1]`` off the bfinance
-    series and compared the ratio to yfinance's, on the understanding that bfinance inferred a
-    split from growth in the balance sheet's ``Equity Capital`` row. That inference was deleted
-    from :meth:`CorporateActionsEngine.extract_splits`, whose own docstring is kept precisely so
-    it is not re-added -- so this test indexed an always-empty Series and could only ever fail on
-    ``IndexError``. It is rewritten to pin what the code now does, and WHY.
+    It used to be asserted the other way round: this test read ``b.index[-1]`` off a bfinance
+    series that was empty by construction, on the understanding that bfinance inferred a split
+    from growth in the balance sheet's ``Equity Capital`` row. That inference was deleted from
+    :meth:`CorporateActionsEngine.extract_splits` -- because ``Equity Capital`` is ``shares issued
+    x face value``, so a 1:1 bonus, a rights issue, a QIP and an ESOP conversion are the *same
+    number in the same field* -- and the property now takes the filing's own ``SplitRatio`` from
+    :func:`bfinance.nse.corporate_actions.splits_from_actions`. It is the same feed
+    ``Ticker.actions`` and ``history``'s ``Stock Splits`` column use.
 
-    The reason, in one line: ``Equity Capital`` is ``shares issued x face value``, so a 1:1 bonus,
-    a rights issue, a QIP and an ESOP conversion are *the same number in the same field*, and no
-    threshold separates them. The signal is not noisy, it is ambiguous. The measured cost of
-    keeping it: equity capital 4505 -> 23700 Cr at a company that has never had a share-count event
-    produced ``{2026-03-31: 5.26}`` as a "split", which rescaled every earlier bar by 1/5.26
-    (10.0 -> 1.901141) while the frame's provenance flags reported real bars and a complete
-    adjustment. That is the historical "Vodafone Idea reports four fabricated splits, never having
-    had one" bug.
-
-    So the assertion is DIVERGENCE, deliberately: yfinance has real splits and bfinance does not.
-    Asserting equality here would be asserting the fabrication back into existence.
+    yfinance is the independent statement of the same events, so the shared dates must agree on
+    the factor. Dates only one side lists are printed rather than asserted: the two sources cover
+    different scopes (the feed is NSE-only; yfinance may carry a longer or differently normalised
+    history), and inventing a rule for those would be asserting parity nobody measured.
     """
     y = yf.Ticker(RELIANCE).splits
     b = Ticker(RELIANCE).splits
 
-    # The shape contract is still bfinance's, and is unchanged by the deletion.
     assert isinstance(b, pd.Series) and b.name == "Stock Splits"
-    assert b.empty, (
-        "Ticker.splits is no longer empty. extract_splits returns an empty Series BY CONSTRUCTION, "
-        "so a populated one means the equity-capital inference has been re-added. Read "
-        "market/corporate.py:extract_splits before changing anything here."
+    assert isinstance(b.index, pd.DatetimeIndex) and b.index.name == "Date"
+    assert str(b.index.tz) == "Asia/Kolkata", f"bf index tz={b.index.tz}"
+    assert b.dtype == float
+    assert (b > 0).all(), "a split factor is a positive share-count multiplier"
+    assert b.attrs["bfinance_actions_source"] == "nse_corporate_actions", (
+        "the property must read the NSE filings feed; extract_splits returns an empty Series by "
+        "construction, so a populated series that claims another source is a re-added inference"
     )
-    # An empty Series carries a plain RangeIndex, so there is no tz to check -- and that is
-    # correct rather than a defect: `extract_splits` returns `pd.Series(dtype=float, name=...)`
-    # with no index to localise. Asserted as "not a DatetimeIndex" rather than as a specific
-    # empty index type, so it states the fact without pinning an incidental pandas default.
-    assert not isinstance(b.index, pd.DatetimeIndex), (
-        f"an empty split series has no dates to localise; got {type(b.index).__name__}"
-    )
+    assert b.attrs["bfinance_symbol"] == "RELIANCE"
 
-    # The other half of the divergence, stated so a future reader cannot mistake it for a gap:
-    # yfinance publishes the declared event and we do not, on this surface.
-    assert len(y) > 0, (
-        "yfinance now reports no splits for RELIANCE.NS; if it stopped, this test's divergence "
-        "claim needs re-measuring against the live feed."
-    )
-    print(f"yfinance splits: {len(y)} declared event(s); bfinance splits: {len(b)} by design")
-    print(
-        "bfinance takes split ratios from the NSE filing "
-        "(bfinance.nse.corporate_actions.split_ratio), not from an inferred balance-sheet ratio."
-    )
+    common = b.index.intersection(y.index)
+    print(f"yfinance splits: {y.to_dict()}")
+    print(f"bfinance splits: {b.to_dict()} (NSE ex-dates, filing factors)")
+    print(f"dates only yfinance: {sorted(set(y.index) - set(b.index))}")
+    print(f"dates only bfinance: {sorted(set(b.index) - set(y.index))}")
+    if not b.empty and not y.empty:
+        assert len(common) > 0, "two histories of the same symbol share no ex-date"
+    for ts in common:
+        assert float(b.loc[ts]) == pytest.approx(float(y.loc[ts])), (
+            f"{ts.date()}: bfinance {b.loc[ts]} vs yfinance {y.loc[ts]}"
+        )
+
 
 
 def test_extract_splits_is_unconditional_so_no_balance_sheet_can_re_add_the_inference():
@@ -128,15 +122,15 @@ def test_extract_splits_is_unconditional_so_no_balance_sheet_can_re_add_the_infe
     ``extract_splits(profile)`` takes a profile and returns an empty Series **without reading it**.
     That is asserted structurally -- over a profile carrying the exact signal the deleted inference
     keyed on -- rather than asserted as "it happened to be empty today", which would be equally true
-    of a property that is simply broken.
+    of a property that is simply broken. ``Ticker.splits`` now reads the NSE filings instead of this
+    engine, and this control is what keeps the engine from being re-wired to the balance sheet.
 
     The signal is ``Equity Capital``, a row of the BALANCE SHEET, not a ``TopRatios`` field: the
     deleted code divided consecutive periods of it and wrote a split at ``ratio >= 1.5``. So the
     control builds a real :class:`FinancialStatement` carrying the measured capital raise,
     4505 -> 23700 Cr -- a ratio of 5.2608, which cleared that cliff by more than three times --
     and requires the answer to still be empty. Nothing is mutated and no network is spent, so the
-    control is deterministic. If the inference is ever pasted back, this goes red; if the property
-    is ever wired to a real source, the first test is the one that must change deliberately.
+    control is deterministic. If the inference is ever pasted back, this goes red.
     """
     raise_cr = FinancialStatement(
         headers=["Mar 2025", "Mar 2026"],
@@ -164,18 +158,24 @@ def test_extract_splits_is_unconditional_so_no_balance_sheet_can_re_add_the_infe
 
 
 def test_actions_shape_contract():
-    """yfinance actions columns/shape contract vs engine builder."""
+    """yfinance actions columns/shape contract vs the property and the engine builder."""
     ya = yf.Ticker(RELIANCE).actions
+    b = Ticker(RELIANCE).actions
     assert list(ya.columns) == ["Dividends", "Stock Splits"]
-    b = CorporateActionsEngine.build_actions(
-        Ticker(RELIANCE).dividends, Ticker(RELIANCE).splits
-    )
     assert list(b.columns) == ACTIONS_COLUMNS == list(ya.columns)
     assert b["Dividends"].dtype == float and b["Stock Splits"].dtype == float
     assert isinstance(b.index, pd.DatetimeIndex) and b.index.name == "Date"
-    print(f"yfinance actions shape={ya.shape}; bfinance engine shape={b.shape}")
-    if not hasattr(Ticker, "actions"):
-        _needsmain("ticker.py: add `actions` property via CorporateActionsEngine.build_actions()")
+    assert str(b.index.tz) == "Asia/Kolkata", f"bf index tz={b.index.tz}"
+    assert b.attrs["bfinance_actions_source"] == "nse_corporate_actions"
+    print(f"yfinance actions shape={ya.shape}; bfinance actions shape={b.shape}")
+    # The engine builder is still the shape anchor for a caller who already holds two series, but
+    # it is not the property's route: Ticker.actions reads one feed so both columns share a date
+    # basis, and its Dividends column is deliberately not Ticker.dividends.
+    engine = CorporateActionsEngine.build_actions(
+        Ticker(RELIANCE).dividends, Ticker(RELIANCE).splits
+    )
+    assert list(engine.columns) == ACTIONS_COLUMNS
+    print("engine build_actions shape unchanged; Ticker.actions reads one feed instead")
 
 
 def test_capital_gains_empty_parity():
@@ -195,8 +195,18 @@ def test_etf_dividend_empty_parity():
     y = yf.Ticker(ETF).dividends
     b = Ticker(ETF).dividends
     assert len(y) == 0 and len(b) == 0, f"yf={len(y)} bf={len(b)}"
-    assert len(yf.Ticker(ETF).splits) == 0 and len(Ticker(ETF).splits) == 0
-    print(f"{ETF}: dividends/splits empty on both sides (quoteType={Ticker(ETF).info.get('quoteType')})")
+    y_splits = yf.Ticker(ETF).splits
+    b_splits = Ticker(ETF).splits
+    assert len(y_splits) == 0 and len(b_splits) == 0
+    # Emptiness now comes from the NSE feed having no row for an ETF, so the Series keeps the
+    # indexed, localised shape a populated one would have -- not the RangeIndex the deleted
+    # inference left behind.
+    assert isinstance(b_splits.index, pd.DatetimeIndex)
+    assert str(b_splits.index.tz) == "Asia/Kolkata"
+    print(
+        f"{ETF}: dividends/splits empty on both sides "
+        f"(quoteType={Ticker(ETF).info.get('quoteType')})"
+    )
 
 
 def test_holders_shape_and_float_parity():

@@ -511,7 +511,9 @@ def test_info_and_fast_info_are_unchanged_when_history_succeeds():
 
     assert info["marketCap"] == pytest.approx(_MCAP_RS)
     assert info["currentPrice"] == pytest.approx(250.0)
-    assert t.ohlcv_engine.calls == 2, "one 1y frame per member, as before this change"
+    # `fast_info` reuses the 1y frame `info` memoised, so the pair costs one history request,
+    # not one each: previously 2, now 1. See `Ticker.fast_info`'s docstring.
+    assert t.ohlcv_engine.calls == 1, "info's frame is reused by fast_info"
 
     assert fi.last_price == pytest.approx(250.0)
     assert fi.year_high == pytest.approx(300.0)

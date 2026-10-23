@@ -302,7 +302,10 @@ lint the docs' claims against source).
 
 - **The consensus/forecaster JSON route** — `/equity/consensus-estimates/json-data/1372/` is a 404; the
   page is client-rendered; the research-reports table carries per-report targets. Consensus targets are
-  derived from that table instead of guessing an endpoint.
+  derived from that table instead of guessing an endpoint. **Corrected 2026-10-23:** consensus is not
+  unreachable — the **stock page's `consensus` section is parsed and shipped**, and the
+  `recommendations` / `recommendations_summary` / `earnings_estimate` / `revenue_estimate` /
+  `earnings_history` / `growth_estimates` members read it. The JSON route stays out; the section does not.
 - **`/equity/delivery-analysis/`** — client-rendered, no clean JSON found today. Out.
 - **`holding-overtime` per-holder routes** — discovered but not measured this pass; a follow-up.
 - **Any second trendlyne client copy** — all new code extends `trendlyne/client.py` +

@@ -2,12 +2,12 @@
 
 <p align="center">
   <b>The High-Performance Python SDK for Indian Equities (NSE & BSE)</b><br>
-  <i>A 1:1 drop-in replacement for <code>yfinance</code> (1.7.0+ compatible) supercharged with 10-year audited Ind AS financials, concalls with streamable audio MP3s, institutional stock screeners, multi-tab Excel models, and native AI/LLM data feeds.</i>
+  <i>An Indian-equity alternative to <code>yfinance</code> implementing a measured subset of its 1.7.0 <code>Ticker</code> API, supercharged with 10-year audited Ind AS financials, concalls with streamable audio MP3s, institutional stock screeners, multi-tab Excel models, and native AI/LLM data feeds.</i>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue?style=flat-square" alt="Python Versions">
-  <img src="https://img.shields.io/badge/yfinance%20Parity-1.7.0%20Compatible-green?style=flat-square" alt="yfinance 1.7.0 Compatible">
+  <img src="https://img.shields.io/badge/yfinance%20API-1.7.0%20Subset-green?style=flat-square" alt="yfinance 1.7.0 API subset">
   <img src="https://img.shields.io/badge/Coverage-NSE%20%26%20BSE-orange?style=flat-square" alt="NSE and BSE">
   <img src="https://img.shields.io/badge/Tests-54%2F54%20Passing-brightgreen?style=flat-square" alt="Tests Passing">
   <img src="https://img.shields.io/badge/License-MIT-purple?style=flat-square" alt="MIT License">
@@ -19,11 +19,11 @@
 
 Standard financial libraries like `yfinance` often fail Indian equity investors: Yahoo Finance truncates Indian financial statements to just **4–5 years**, frequently experiences **missing fundamental data**, lacks **conference calls and shareholding patterns**, and breaks with upstream API changes.
 
-`bfinance` solves this completely. It gives you the **exact same API as `yfinance` 1.7.0+** so your existing code, charting tools, and backtesters work with **zero code changes**, while giving you access to deep Indian corporate data:
+`bfinance` solves this for Indian equities. It implements a **measured subset of the `yfinance` 1.7.0 `Ticker` API** — 44 of 98 members carry a real data path, 14 are present-but-empty, and 40 are refused by name — so a migrating caller knows exactly what moves without a code change and what does not, while getting access to deep Indian corporate data. The measured table and the concrete breaks are in [`docs/YFINANCE_PARITY.md`](docs/YFINANCE_PARITY.md):
 
 | Dimension | `yfinance` (Standard) | `bfinance` (Supercharged) |
 | :--- | :---: | :---: |
-| **API Syntax Parity** | 1.7.0+ Standard | **100% Drop-in Equivalent** (`yf.Ticker` $\leftrightarrow$ `bf.Ticker`) |
+| **API Syntax** | 1.7.0+ Standard | **Measured subset** — 44 present, 14 present-but-empty, 40 refused ([`docs/YFINANCE_PARITY.md`](docs/YFINANCE_PARITY.md)); not a 100% drop-in |
 | **Financial Statements Depth** | 4 to 5 Years (Standard Yahoo) | **10 to 13+ Years** (Audited Ind AS Statements) |
 | **Quarterly Statement History**| 4 to 5 Quarters | **12 to 16+ Historical Quarters** |
 | **Institutional Shareholding** | Basic / Often Empty | **12Q Quarterly & 11Y Annual Trends** (Promoter, FII, DII, Govt, Public) |
@@ -50,9 +50,11 @@ uv add bfinance
 
 ---
 
-## ⚡ 30-Second Quickstart (Zero-Change Migration from `yfinance`)
+## ⚡ 30-Second Quickstart (Migrating from `yfinance`)
 
-Simply replace `import yfinance as yf` with `import bfinance as yf`:
+Replace `import yfinance as yf` with `import bfinance as yf`. The members used below behave the
+same way; this is a subset, not a drop-in — read the breaks in
+[`docs/YFINANCE_PARITY.md`](docs/YFINANCE_PARITY.md) §8 before switching an existing codebase:
 
 ```python
 import bfinance as yf
@@ -60,7 +62,7 @@ import bfinance as yf
 # 1. Initialize any NSE or BSE ticker (supports RELIANCE, RELIANCE.NS, 500325.BO)
 ticker = yf.Ticker("RELIANCE")
 
-# 2. Exact yfinance 1.7.0 APIs work out of the box!
+# 2. yfinance 1.7.0-shaped APIs used here work out of the box
 print("Live CMP:", ticker.fast_info.last_price)
 print("Market Cap:", ticker.fast_info.market_cap)
 

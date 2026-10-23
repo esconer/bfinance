@@ -162,10 +162,12 @@ class CorporateActionsEngine:
         """
         Split / bonus series from a Screener.in profile: **always empty, by construction.**
 
-        Returned rather than deleted because :mod:`bfinance.ticker` calls this directly for
-        ``Ticker.splits``. It used to infer splits from growth in the balance sheet's
-        ``Equity Capital`` row, with no split filing required, and that inference is deleted. This
-        docstring is here so that it is not re-added.
+        Returned rather than deleted because :meth:`build_actions_frame` (the Screener fallback
+        path) still calls it. ``Ticker.splits`` no longer does: it reads NSE's corporate-actions
+        filings through :func:`bfinance.nse.corporate_actions.splits_from_actions`. This used to
+        infer splits from growth in the balance sheet's ``Equity Capital`` row, with no split
+        filing required, and that inference is deleted. This docstring is here so that it is not
+        re-added.
 
         Why the inference cannot be tuned, only removed
         -------------------------------------------------
@@ -384,8 +386,9 @@ class CorporateActionsEngine:
     # ------------------------------------------------------------ NSE-backed resolution
     #
     # Everything below supersedes the two extractors above for the Adj Close path. The extractors
-    # stay because ``bfinance.ticker`` calls them directly for ``Ticker.dividends`` /
-    # ``Ticker.splits``, which is outside this change.
+    # stay because ``build_actions_frame`` (the Screener fallback) still calls them, and because
+    # ``Ticker.dividends`` reads ``extract_dividends`` directly; ``Ticker.splits`` no longer reads
+    # ``extract_splits`` -- it reads NSE's filings through ``splits_from_actions``.
 
     @classmethod
     def from_actions_frame(

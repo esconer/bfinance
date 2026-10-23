@@ -52,6 +52,7 @@ performs.
 from .ticker import Ticker
 from .tickers import Tickers
 from .screens import Screen, screens
+from .search import Search
 from .download import download
 from .screener.client import ScreenerClient
 from .market.fast_info import FastInfo
@@ -83,6 +84,7 @@ __all__ = [
     "Tickers",
     "Screen",
     "screens",
+    "Search",
     "ratios",
     "download",
     "FastInfo",

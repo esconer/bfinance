@@ -3,12 +3,15 @@ High-throughput multi-ticker concurrent batch downloader matching yfinance downl
 """
 
 import asyncio
+import inspect
 import logging
 from typing import List, Optional, Sequence, Union
 from datetime import datetime
 import pandas as pd
 
+from bfinance.cache.sqlite_cache import SQLiteCache
 from bfinance.market.ohlcv import OHLCVEngine, resolve_price_source_names
+from bfinance.screener.client import ScreenerClient
 from bfinance.ticker import Ticker
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,26 @@ def _all_nan_frame(columns: Sequence[str]) -> pd.DataFrame:
     return frame
 
 
+def _accepts_seam(cls) -> bool:
+    """Whether ``cls`` takes the batch's shared cache/client as ``cache=`` / ``screener_client=``.
+
+    ``Ticker.__init__`` declares both, so the shipped path always passes them -- that is the whole
+    of what makes an N-symbol batch open one cache and one client instead of N of each. A handler
+    that replaces the module-level ``Ticker`` name with a stand-in written before that seam
+    existed declares ``(symbol, proxy=None)`` and nothing else, and a stand-in must not be able to
+    turn every symbol into a failed symbol.
+
+    The question is asked of the signature rather than answered by a ``TypeError`` retry, because
+    a retry would also swallow a genuine ``TypeError`` raised *inside* a constructor. ``bind``
+    accepts a ``**kwargs`` constructor as well, so a newer stand-in is never missed.
+    """
+    try:
+        inspect.signature(cls).bind("", proxy=None, cache=None, screener_client=None)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 async def _download_single(
     symbol: str,
     period: str,
@@ -64,8 +87,18 @@ async def _download_single(
     raise_errors: bool = False,
     source: Optional[str] = None,
     sources: Optional[Sequence[str]] = None,
+    timeout: int = 10,
+    cache: Optional[SQLiteCache] = None,
+    screener_client: Optional[ScreenerClient] = None,
 ) -> pd.DataFrame:
-    t = Ticker(symbol, proxy=proxy)
+    # The batch builds ONE cache and ONE client and hands them to every symbol here; ``None`` --
+    # what a direct caller of this helper gets -- keeps the historical per-Ticker construction.
+    # Before the seam existed every Ticker built its own SQLiteCache and its own httpx client, so
+    # a batch paid a schema check and a new connection pool per symbol for data that is shared.
+    if _accepts_seam(Ticker):
+        t = Ticker(symbol, proxy=proxy, cache=cache, screener_client=screener_client)
+    else:
+        t = Ticker(symbol, proxy=proxy)
     try:
         return await t.history_async(
             period=period,
@@ -79,6 +112,9 @@ async def _download_single(
             prepost=prepost,
             repair=repair,
             rounding=rounding,
+            # `download(timeout=...)` used to be accepted and dropped here, so every symbol ran
+            # on history_async's own default of 10 whatever the caller asked for.
+            timeout=timeout,
             source=source,
             sources=sources,
         )
@@ -110,29 +146,61 @@ async def _download_batch_async(
     raise_errors: bool = False,
     source: Optional[str] = None,
     sources: Optional[Sequence[str]] = None,
+    timeout: int = 10,
+    progress: bool = True,
 ) -> pd.DataFrame:
+    # One cache and one client for the whole batch. Both used to be built inside every
+    # `Ticker.__init__`, so an N-symbol batch opened N SQLite connections (each running the
+    # schema check against `~/.bfinance/cache.db`) and N HTTP clients (each with its own
+    # connection pool, pacing slot and retry state) to ask N questions of the same vendors.
+    # `Ticker` grew the `cache=`/`screener_client=` seam for exactly this, and passing them is
+    # what keeps the per-symbol cost a Ticker object rather than a transport.
+    #
+    # `SQLiteCache()`'s own default TTL (24h) is the value a per-symbol Ticker passed when it
+    # built one, so this is the same cache with the same lifetime -- shared, not duplicated.
+    # The client takes `timeout` because `download(timeout=...)` is a statement about this
+    # batch's requests, and this is the object that makes them.
+    cache = SQLiteCache()
+    screener_client = ScreenerClient(timeout=timeout, cache=cache, proxy=proxy)
+
     sem = asyncio.Semaphore(max_concurrency)
+    total = len(tickers)
+    finished = 0
 
     async def _worker(sym: str):
+        nonlocal finished
         async with sem:
-            df = await _download_single(
-                sym,
-                period=period,
-                interval=interval,
-                start=start,
-                end=end,
-                actions=actions,
-                auto_adjust=auto_adjust,
-                back_adjust=back_adjust,
-                keepna=keepna,
-                prepost=prepost,
-                repair=repair,
-                rounding=rounding,
-                proxy=proxy,
-                raise_errors=raise_errors,
-                source=source,
-                sources=sources,
-            )
+            try:
+                df = await _download_single(
+                    sym,
+                    period=period,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                    actions=actions,
+                    auto_adjust=auto_adjust,
+                    back_adjust=back_adjust,
+                    keepna=keepna,
+                    prepost=prepost,
+                    repair=repair,
+                    rounding=rounding,
+                    proxy=proxy,
+                    raise_errors=raise_errors,
+                    source=source,
+                    sources=sources,
+                    timeout=timeout,
+                    cache=cache,
+                    screener_client=screener_client,
+                )
+            finally:
+                # `progress=False` must be silent, and `True` must produce something a caller can
+                # see. yfinance draws a tqdm bar on stderr; a library must not write to a caller's
+                # terminal, so the signal this package can honour is one INFO line per finished
+                # symbol, in completion order. Counted after the answer (or the failure) so the
+                # line is progress rather than a promise.
+                finished += 1
+                if progress:
+                    logger.info("download: %d/%d %s", finished, total, sym)
             return sym, df
 
     tasks = [_worker(sym) for sym in tickers]
@@ -271,6 +339,18 @@ def download(
         end: End date string (YYYY-MM-DD) or datetime.
         actions: Download dividend + stock splits data (default False).
         threads: How many threads/connections to use for mass downloading (default True).
+        ignore_tz: ``True`` is honoured -- the returned frame's index is tz-naive, which is the
+            only index this package produces and what yfinance 1.7.0 returns in this environment.
+            ``False`` raises :class:`NotImplementedError`: preserving the per-bar timezone is not
+            something the batch path can do, and returning a frame that quietly dropped it is the
+            answer this parameter exists to stop. ``None`` -- the default -- is the established
+            tz-naive index.
+        progress: Report progress, one ``INFO`` line per finished symbol on the
+            ``bfinance.download`` logger, in completion order (``download: 2/5 TCS``).
+            ``False`` silences it. yfinance draws a tqdm bar on stderr; a library must not write
+            to a caller's terminal, so the log line is the form this package can honestly honour.
+            It was previously accepted and never read, which made ``progress=True`` and
+            ``progress=False`` the same call.
         group_by: Group by 'column' (default) or 'ticker'.
         auto_adjust: Adjust all OHLC automatically. Defaults to ``True``, matching
             yfinance 1.7: the four price columns are scaled by ``Adj Close / Close`` and
@@ -302,7 +382,16 @@ def download(
             other non-answer. Pass ``raise_errors=True`` to get the exception instead.
         rounding: Round values to 2 decimal places (default False).
         multi_level_index: Always return a MultiIndex DataFrame (default True).
+        timeout: Per-request timeout in seconds (default 10). It is passed to the per-symbol
+            history call (``Ticker.history_async(timeout=...)``) and to the **one** HTTP client the
+            batch builds, so it reaches the requests rather than only the signature. It used to be
+            accepted and dropped, which meant every symbol ran on ``history_async``'s own default
+            of 10 and ``download(timeout=3)`` still waited ten seconds.
         proxy: Optional HTTP/HTTPS/SOCKS5 proxy URL string.
+        session: yfinance's ``session`` parameter. **Refused when not ``None``**, for the reason
+            :class:`bfinance.ticker.Ticker` gives for the same argument: the transport is
+            ``httpx``, every client owns its own connection pool, pacing and cache, so a
+            ``requests.Session`` or ``httpx.Client`` passed here would never be used.
         raise_errors: Re-raise upstream failures instead of returning an empty frame
             (default False, matching yfinance's lenient default).
         source / sources: **one** price source, or an **ordered list to fail over through**,
@@ -348,6 +437,13 @@ def download(
         ``inspect.signature(yfinance.download)`` in this env. bfinance's only intentional
         pass-through was ``raise_errors``, which is now a named parameter -- nothing else was
         ever forwarded: ``**kwargs`` reached no callee.
+
+        ``timeout``, ``session``, ``ignore_tz`` and ``progress`` are the same defect one layer in:
+        all four were named parameters that no line of this function, or of anything it called,
+        read. ``timeout`` now reaches the per-symbol history call and the batch's shared client;
+        ``session`` is refused when not ``None``; ``ignore_tz=False`` is refused because the frame
+        is always tz-naive, while ``True`` is honoured; and ``progress`` emits one ``INFO`` line
+        per finished symbol instead of nothing at all.
     """
     # An unsupported keyword is a caller bug, not a runtime condition. Refusing it is the only
     # outcome that makes the mistake findable at the call site instead of in a log file.
@@ -358,6 +454,27 @@ def download(
             f"accepts no arbitrary keyword arguments: everything it honours is a named parameter "
             f"(read them off the signature, or inspect.signature(bfinance.download)), and anything "
             f"else would be silently discarded -- which is how raise_errors went missing for years."
+        )
+
+    # Two yfinance-parity arguments this function cannot honour, refused here for the same reason
+    # an unknown keyword is: a caller who passes one and gets a frame back has been told their
+    # choice was applied when it was not. Refused before a Ticker is constructed, so neither
+    # refusal costs a request (the ordering test_download_rejects_before_doing_any_work pins).
+    if session is not None:
+        raise NotImplementedError(
+            "download(session=...): the argument cannot be honoured. bfinance does not accept a "
+            "caller-supplied HTTP session -- its transport is httpx, and every client owns its own "
+            "connection pool, pacing and cache, so a requests.Session or httpx.Client passed here "
+            "would never be used. Omit it (session=None) to use the pacing this package already "
+            "applies."
+        )
+    if ignore_tz is False:
+        raise NotImplementedError(
+            "download(ignore_tz=False): the argument cannot be honoured. bfinance's batch frame "
+            "always carries a tz-naive DatetimeIndex (the same index yfinance 1.7.0 returns in "
+            "this environment), so the timezone-preserving frame that False asks for cannot be "
+            "produced. Omit it (ignore_tz=None), or pass ignore_tz=True for the tz-naive index "
+            "this package already returns."
         )
 
     if isinstance(tickers, str):
@@ -394,6 +511,8 @@ def download(
         raise_errors=raise_errors,
         source=price_names[0] if len(price_names) == 1 else None,
         sources=list(price_names) if price_names else None,
+        timeout=timeout,
+        progress=progress,
     )
 
     try:

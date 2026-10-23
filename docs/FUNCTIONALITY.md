@@ -10,15 +10,19 @@ Live-verified 2026-10-11 against screener.in, trendlyne.com and the NSE.
 
 ## 1. What it is
 
-`bfinance` is a Python SDK for **Indian equities (NSE/BSE)** built as a **drop-in replacement for
-`yfinance`**. `import bfinance as yf` gets you the yfinance-shaped API; the difference is that the data
-is Indian, the fiscal years are real, and the vendor gaps are named instead of faked.
+`bfinance` is a Python SDK for **Indian equities (NSE/BSE)** and an alternative to `yfinance`
+implementing a **documented subset** of its 1.7.0 `Ticker` API — measured on 2026-10-23: 44 of
+`yfinance`'s 98 public members present with a data path, 14 present-but-empty, 40 absent by name.
+`import bfinance as yf` gets you the yfinance-shaped members tabulated below; the difference is that
+the data is Indian, the fiscal years are real, and the vendor gaps are named instead of faked. It is
+**not** a 100% drop-in; the measured table and the concrete breaks are in
+[`docs/YFINANCE_PARITY.md`](YFINANCE_PARITY.md).
 
 ```python
 import bfinance
 
 t = bfinance.Ticker("TCS")
-t.info                 # 76 keys, yfinance-shaped
+t.info                 # 76–90 keys depending on the profile, yfinance-shaped
 t.history(period="1y") # DataFrame, Asia/Kolkata tz
 t.get_income_stmt()    # 14 periods x 12 rows
 ```
@@ -51,17 +55,18 @@ These match yfinance's names and return shapes. (`src/bfinance/ticker.py`)
 
 | Member | Returns | Notes |
 |---|---|---|
-| `info` | `dict` (76 keys) | Screener-derived company profile. |
-| `fast_info` | `FastInfo` | 16 scalar properties + `to_dict()`. |
+| `info` | `dict` (76–90 keys, profile-dependent) | Screener-derived company profile. Four declared keys are omitted, never `None`, when unsourced. |
+| `fast_info` | `FastInfo` | 21-key mapping (`dict()`, `in`, `len()` work) plus scalar attributes. |
 | `history(period, interval, start, end, auto_adjust, …)` | `DataFrame`, tz `Asia/Kolkata` | `history_async()` also available. |
-| `get_income_stmt(as_dict, pretty, freq)` | `DataFrame` | 10 fiscal years, Rs Cr. |
+| `get_income_stmt(as_dict, pretty, freq)` | `DataFrame` | 10–13 fiscal years, absolute ₹, yfinance generic labels. |
 | `get_balance_sheet(...)` | `DataFrame` | |
 | `get_cash_flow(...)` / `get_cashflow(...)` | `DataFrame` | |
-| `financials`, `income_stmt`, `quarterly_financials`, `quarterly_income_stmt`, `balance_sheet`, `quarterly_balance_sheet`, `cashflow`, `cash_flow`, `quarterly_cashflow`, `quarterly_cash_flow` | `DataFrame` | Property aliases. |
-| `ttm_income_stmt`, `ttm_cash_flow` | `DataFrame` | Raise `NotImplementedError`. |
-| `dividends` | `Series` | From the real ex-dated NSE feed. |
-| `splits` | `Series` | **Always empty** — see §8. |
-| `actions` | `DataFrame` | Columns `Dividends`, `Stock Splits`. |
+| `financials`, `income_stmt`, `quarterly_financials`, `quarterly_income_stmt`, `balance_sheet`, `cashflow`, `cash_flow` | `DataFrame` | Property aliases. |
+| `quarterly_balance_sheet`, `quarterly_balancesheet`, `quarterly_cash_flow`, `quarterly_cashflow` | raises `NotImplementedError` | No quarterly balance-sheet or cash-flow source upstream; annual only. |
+| `ttm_income_stmt`, `ttm_cash_flow` | raises `NotImplementedError` | No trailing-twelve-month statement source; annual only. |
+| `dividends` | `Series` | Screener **fiscal-year-end** basis, not yfinance's ex-dates. |
+| `splits` | `Series`, tz-aware | **Real**: ex-dated NSE corporate actions, factor = the filing's `SplitRatio`. An empty series can also mean the feed failed — `attrs["bfinance_actions_source"] == "none"`. |
+| `actions` | `DataFrame` | Columns `Dividends`, `Stock Splits`; both from the **same** NSE feed, not `dividends` + `splits`. |
 | `capital_gains` | `Series` | Empty by design. |
 | `calendar` | `dict` (8 keys) | Earnings + ex-dividend dates. |
 | `analyst_price_targets` | `dict` or `None` | See §3.3. |
@@ -72,6 +77,25 @@ These match yfinance's names and return shapes. (`src/bfinance/ticker.py`)
 | `news` | `list[dict]` | Screener announcements, yfinance `{id, content}` shape. |
 | `history_metadata` / `get_history_metadata()` | `dict` (22 keys) | |
 | `valuation_measures` | `DataFrame` | `Value` column is `object` dtype on purpose (`None` must not become `NaN`). |
+| `recommendations` | `DataFrame` (6×6 measured) | `trendlyne_sections=True` **required**; `period` is the vendor's `asofdate`, not yfinance's relative `0m`/`-1m` rows. |
+| `recommendations_summary` | `DataFrame` (4×6 measured) | Requires the flag; last four rows of the **same** frame, no second fetch. |
+| `earnings_estimate` | `DataFrame` (4×6 measured) | Requires the flag; index `0q`/`+1q`/`0y`/`+1y` derived from `is_current`/`is_past`; `yearAgoEps` is `NaN` where unpublished, with `attrs["bfinance_estimate_note"]` naming the cells. |
+| `revenue_estimate` | `DataFrame` (4×6 measured) | Requires the flag; same index/shape from the vendor's `REVENUE` rows; same `NaN` + note contract for `yearAgoRevenue`. |
+| `earnings_history` | `DataFrame` (3×4 measured) | Requires the flag; index is **fiscal period end** (`attrs["bfinance_date_basis"] = "fiscal_period_end"`), not the announcement date. |
+| `growth_estimates` | `DataFrame` (9×1 measured) | Requires the flag; `stock` column only — `industry`/`sector`/`index` are absent, not zero. |
+| `insider_transactions` | `DataFrame` (174×13 measured) | Requires the flag; **500-row server cap**, vendor columns verbatim. |
+| `isin` | `str` or `None` | NSE `ISIN`; refuses a frame whose rows disagree; falls back to **archived** index memberships. `None` means "not found on this machine", not "no ISIN exists". |
+
+**Aliases.** Seventeen names are exact forwarders with no new request: thirteen `get_*` accessors —
+`get_info`, `get_fast_info`, `get_calendar`, `get_news`, `get_dividends`, `get_splits`, `get_actions`,
+`get_capital_gains`, `get_major_holders`, `get_institutional_holders`, `get_mutualfund_holders`,
+`get_analyst_price_targets`, `get_valuation_measures` — plus the yfinance 1.7 statement spellings
+`incomestmt`, `balancesheet`, `quarterly_incomestmt`, `quarterly_balancesheet`. `period=` on the four
+corporate-action accessors and `freq=`/`periods=` on `get_valuation_measures` are accepted for
+signature parity and **cannot narrow** the result; `as_dict=` is honoured on the three holder accessors.
+
+**Flag off is a raise, not an empty frame.** Every member above marked "requires the flag" raises
+`NotImplementedError` naming `trendlyne_sections=True` before a socket exists.
 
 ### 3.2 Indian-superpower members
 
@@ -194,7 +218,10 @@ delivery, intraday), **trendlyne** (sections, technicals, reports), **smartoptio
 
 ## 7. Known limits (by design)
 
-- `splits` is always empty; `ttm_*` raise; `institutional_holders`/`mutualfund_holders` are `(0,0)`.
+- `splits` is **no longer always empty** (real ex-dated NSE filings since 2026-10-23, selected on
+  `SplitRatio`); an empty series can also mean the feed failed, so check
+  `attrs["bfinance_actions_source"] == "none"`. `ttm_*` raise;
+  `institutional_holders`/`mutualfund_holders` are `(0,0)`.
 - `analyst_price_targets['current']` is always `None`.
 - Mutual funds are a separate namespace with no OHLC route.
 - `historical` for Trendlyne is symbol-dependent; it is neither "truncated at listing" nor a fixed window.

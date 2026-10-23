@@ -1,11 +1,51 @@
 """
 FastInfo container matching yfinance 0.2+ FastInfo interface.
 Provides fast, lightweight scalar properties without heavy scraping.
+
+It is also a read-only mapping (``keys``/``items``/``values``/``get``/``in``/``len``), which
+is what makes ``dict(ticker.fast_info)`` work as it does in yfinance 1.7.0. The mapping and
+``to_dict()`` are the same set of keys, by construction: both are driven by ``_FAST_INFO_KEYS``
+below, and ``__getitem__`` refuses a key that is not in it.
 """
 
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from bfinance.models.company import CompanyProfile
-from bfinance.market.quotes import moving_average, previous_close_from_history, resolve_exchange
+from bfinance.market.quotes import (
+    average_volume,
+    fractional_change_from_history,
+    moving_average,
+    previous_close_from_history,
+    resolve_exchange,
+)
+
+
+#: The mapping's keys, in ``to_dict()`` order, and the single source of truth for it.
+#: A property that is not listed here is not part of the mapping -- that is the declared
+#: contract, not an omission -- and ``__getitem__`` raises ``KeyError`` for it rather than
+#: exposing a name ``keys()`` never promised.
+_FAST_INFO_KEYS = (
+    "currency",
+    "exchange",
+    "timezone",
+    "quote_type",
+    "last_price",
+    "regular_market_price",
+    "last_volume",
+    "previous_close",
+    "regular_market_previous_close",
+    "open",
+    "day_high",
+    "day_low",
+    "year_high",
+    "year_low",
+    "market_cap",
+    "shares",
+    "fifty_day_average",
+    "two_hundred_day_average",
+    "ten_day_average_volume",
+    "three_month_average_volume",
+    "year_change",
+)
 
 
 class FastInfo:
@@ -79,6 +119,11 @@ class FastInfo:
         return previous_close_from_history(self._history)
 
     @property
+    def regular_market_previous_close(self) -> Optional[float]:
+        """yfinance's name for :attr:`previous_close`; same number, same source."""
+        return self.previous_close
+
+    @property
     def open(self) -> Optional[float]:
         return None  # intraday unavailable from EOD history
 
@@ -119,28 +164,67 @@ class FastInfo:
             return None
         return moving_average(self._history, 200)
 
+    @property
+    def ten_day_average_volume(self) -> Optional[int]:
+        """Mean of the last 10 daily Volume bars; None when the frame has fewer than 10.
+
+        yfinance's ``ten_day_average_volume``, computed off the already-fetched frame (no
+        extra request). The window is a bar count and is not shortened on a short frame.
+        """
+        return average_volume(self._history, 10)
+
+    @property
+    def three_month_average_volume(self) -> Optional[int]:
+        """Mean of the last 63 daily Volume bars; None when the frame has fewer than 63.
+
+        ``3mo`` is 63 **trading** bars here, not 63 calendar days: the frame is daily OHLCV
+        and bars are what it actually contains.
+        """
+        return average_volume(self._history, 63)
+
+    @property
+    def year_change(self) -> Optional[float]:
+        """Fractional change from the **earliest close in the supplied frame** to the latest.
+
+        Same basis as yfinance 1.7.0 (measured in ``scrapers/quote.py:474-476``:
+        ``(Close[-1] - Close[0]) / Close[0]``), so on the ~1y / ~247-bar frame ``Ticker``
+        supplies it covers that frame's first to last close. It is deliberately **not**
+        called a 52-week change: the window is whatever frame the constructor was handed, and
+        a short frame yields None rather than a number pretending to be annual.
+        """
+        return fractional_change_from_history(self._history)
+
     def to_dict(self) -> dict:
-        return {
-            "currency": self.currency,
-            "exchange": self.exchange,
-            "timezone": self.timezone,
-            "quote_type": self.quote_type,
-            "last_price": self.last_price,
-            "regular_market_price": self.regular_market_price,
-            "last_volume": self.last_volume,
-            "previous_close": self.previous_close,
-            "open": self.open,
-            "day_high": self.day_high,
-            "day_low": self.day_low,
-            "year_high": self.year_high,
-            "year_low": self.year_low,
-            "market_cap": self.market_cap,
-            "shares": self.shares,
-            "fifty_day_average": self.fifty_day_average,
-            "two_hundred_day_average": self.two_hundred_day_average,
-        }
+        """The mapping as a plain dict. Keys are exactly ``_FAST_INFO_KEYS``."""
+        return {key: self[key] for key in _FAST_INFO_KEYS}
+
+    # ------------------------------------------------------------- read-only mapping
+    def keys(self):
+        """Exactly the keys :meth:`to_dict` returns, in its order."""
+        return self.to_dict().keys()
+
+    def values(self):
+        return self.to_dict().values()
+
+    def items(self):
+        return self.to_dict().items()
+
+    def get(self, key: str, default=None):
+        """``self[key]`` for a declared key, `default` for anything else (mapping semantics)."""
+        return self.to_dict().get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return key in _FAST_INFO_KEYS
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_FAST_INFO_KEYS)
+
+    def __len__(self) -> int:
+        return len(_FAST_INFO_KEYS)
 
     def __getitem__(self, key: str):
+        if key not in _FAST_INFO_KEYS:
+            raise KeyError(key)
         return getattr(self, key)
 
     def __repr__(self) -> str:

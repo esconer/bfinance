@@ -9,6 +9,34 @@ would carry a fabricated value or a permanent `None` is a cost, not a parity win
 question for each of the 102 keys is not "can we make the count match" but "can we produce a
 number that is true".
 
+> **Update 2026-10-23 — read this before the 2026-09-30 counts below.**
+> The body of this report is the 2026-09-30 measurement of `RELIANCE.NS`; it is kept as the
+> record of that measurement. Four things have changed, and every stale sentence below is
+> superseded by this block:
+>
+> 1. **`INFO_VALUE_UNITS` is now 80 keys**, not 76. Four keys from this report's reachable
+>    list were added and are declared with units: `regularMarketChange`, `lastFiscalYearEnd`,
+>    `nextFiscalYearEnd`, `mostRecentQuarter`. All four are **conditional** — omitted, never
+>    `None`, when their source is absent. The returned dict now measures **76–90 keys**
+>    depending on the profile (five profiles measured 2026-10-23: 76, 80, 89, 90, 90).
+> 2. **`Ticker.splits` is real**, not always empty: an ex-dated Series from NSE's
+>    corporate-actions filings, factor = the filing's `SplitRatio`, selected on that ratio and
+>    not on the `Action` kind. An empty series can also mean the feed failed —
+>    `attrs["bfinance_actions_source"] == "none"`.
+> 3. **`Ticker.actions` and `Ticker.isin` are real.** `actions` carries `Dividends` and
+>    `Stock Splits` from that same NSE feed; `actions["Dividends"]` is **not** `Ticker.dividends`
+>    (Screener FY-end basis). `isin` returns `str` or `None`, refuses a frame whose rows
+>    disagree, and falls back to archived index memberships.
+> 4. **The six corporate-action `info` keys stay deliberately excluded**: `dividendRate`,
+>    `exDividendDate`, `lastDividendValue`, `lastDividendDate`, `lastSplitDate`,
+>    `lastSplitFactor`. Adding them would put one corporate-actions request on the most-called,
+>    batch-used entry point. The same values are reachable through `splits` / `actions` / `isin`
+>    and the NSE feed directly. Measured 2026-10-23: none of the six is in the returned `info`
+>    dict and none is declared in `INFO_VALUE_UNITS`.
+>
+> `docs/YFINANCE_PARITY.md` is the current measured surface; this file remains the key-by-key
+> audit of the gap.
+
 ---
 
 ## 1. The counts, live, both sides

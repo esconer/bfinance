@@ -423,9 +423,12 @@ class MarketLensClient:
     async def search_async(self, query: str, limit: int = 10) -> pd.DataFrame:
         """Resolve a free-text query to NSE symbols.
 
-        ``GET /api/search?q=`` returns ``ticker``, ``name``, ``description``, ``matchScore`` and
-        ``marketCap``. Requires a non-empty query; returns an empty frame rather than raising when
-        nothing matches, since a fuzzy miss is an expected outcome here.
+        ``GET /api/search?q=`` returned **seven** payload keys when measured on 2026-10-23:
+        ``id``, ``type``, ``name``, ``ticker``, ``description``, ``matchScore`` and ``marketCap``.
+        They are passed through verbatim; the frame has those seven columns on a hit and the five
+        original columns (``ticker``, ``name``, ``description``, ``matchScore``, ``marketCap``) on
+        an empty answer. Requires a non-empty query; returns an empty frame rather than raising
+        when nothing matches, since a fuzzy miss is an expected outcome here.
 
         Note: an equities-only index appears to back this endpoint — ``q=nifty`` returned zero
         results on 2026-09-26 despite NIFTYBEES existing.

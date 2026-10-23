@@ -18,9 +18,9 @@ except ImportError:  # pragma: no cover - depends on whether that module is inst
 
 logger = logging.getLogger("bfinance")
 
-# The cache-status constant, not the literal: ``bfinance_cache_status`` is what tells a replayed
-# frame from a live fetch, and the module that publishes it is the one place that spells it.
-from bfinance.cache.frame_store import CACHE_STATUS_ATTR
+# The cache-status constants, not the literals: ``bfinance_cache_status`` is what tells a replayed
+# frame from a live fetch, and the module that publishes it is the one place that spells them.
+from bfinance.cache.frame_store import CACHE_STATUS_ATTR, DISABLED_STATUS
 from bfinance.market.corporate import (
     ACTIONS_SOURCE_NONE,
     ACTIONS_SOURCE_NSE,
@@ -212,6 +212,19 @@ def _select_symbol_rows(market: pd.DataFrame, symbol: str) -> pd.DataFrame:
     once and filtered here rather than issuing one request per symbol. Tolerates a symbol
     column (``SYMBOL``/``TICKER``/...) or a symbol level on a MultiIndex; a frame carrying no
     symbol key at all is already scoped to a single instrument and is returned unchanged.
+
+    **The probe, and why the normalisation still runs after it.** Measured here on a 939,861-row
+    range frame with a pandas-3 ``str`` symbol column, the unguarded
+    ``astype(str).str.strip().str.upper().eq(symbol)`` costs 515.7 ms, of which ``.str.upper()``
+    is 238.6 ms and ``.str.strip()`` 195.0 ms -- both fold every row, although an NSE symbol
+    column is upper-case and unpadded by construction. Comparing the column against the symbol
+    costs 61.4 ms, so the probe runs first and a hit returns immediately (61.6 ms end to end,
+    8.4x faster). A hit is a strict subset of what the normalisation would have matched -- a raw
+    value equal to the already-normalised symbol needs neither stripping nor case folding -- so
+    returning early cannot change the answer. A **miss is not an answer**: ``"  RELIANCE  "``
+    and ``"Reliance"`` are exactly what the probe is blind to, so a miss falls through to the
+    normalisation (643.0 ms on that frame) instead of returning the empty frame the probe alone
+    would produce. The slower miss is deliberate and only paid where the answer is a miss anyway.
     """
     if isinstance(market.index, pd.MultiIndex):
         for level in market.index.names:
@@ -221,7 +234,24 @@ def _select_symbol_rows(market: pd.DataFrame, symbol: str) -> pd.DataFrame:
     key = next((c for c in market.columns if str(c).strip().upper() in _SYMBOL_KEYS), None)
     if key is None:
         return market
-    return market.loc[market[key].astype(str).str.strip().str.upper().eq(symbol)]
+    column = market[key]
+    # Both probes compare against the symbol, never against a re-cased copy of the column: a
+    # column-wide `.str.upper()` is the 238.6 ms this probe exists to avoid.
+    target = str(symbol).strip().upper()
+    # Only an already-normalised `symbol` makes a raw hit a hit for the normalisation too; a
+    # lower-case or padded argument keeps the original path exactly, over-match impossible.
+    if target == symbol:
+        hit = column.eq(target)
+        if hit.any():
+            return market.loc[hit]
+        # A vendor that lower-cases its symbols is the one shape the as-is probe misses and a
+        # second scalar comparison still catches, without folding the whole column.
+        lowered = target.lower()
+        if lowered != target:
+            hit = column.eq(lowered)
+            if hit.any():
+                return market.loc[hit]
+    return market.loc[column.astype(str).str.strip().str.upper().eq(symbol)]
 
 
 def _dividend_adjustment_factor(df: pd.DataFrame) -> pd.Series:
@@ -3410,35 +3440,41 @@ class OHLCVEngine:
             if rows is None:  # pragma: no cover - get_or_fetch calls its fetcher before answering
                 return None
 
-        # Published, not restated -- and on the warm-prefix branch that makes the claim a composite.
+        # Published here, from the frame the first pass already read -- not by handing the merged
+        # frame back to the wrapper. That second call spent a store read and a store write asking
+        # "may this window be kept?", and both answers were already known: its end reaches today, so
+        # ``_may_serve`` refuses it in both directions and there is no row behind it. Its only
+        # product was these five keys, and the wrapper's own publish step is still what writes them
+        # (imported below), so the vocabulary, the formats and the uncovered-day calendar stay in
+        # the one module that owns them rather than being restated here.
         #
-        # ``rows`` is the merged frame: the stored prefix (a replay, fetched on an earlier call)
-        # plus the live tail (fetched seconds ago). Its window reaches today, so the store refuses
-        # the write and answers ``"miss"`` on the way past; this call is what publishes the five
-        # keys, and it publishes them for the merged frame. So ``miss`` and ``fetched_at`` describe
-        # the LIVE TAIL only: a live read did happen on this call, but it covered
-        # ``boundary+1..end``, not the window the key names. The prefix's own dating is not lost,
-        # and is deliberately not restated here -- read the store under the prefix key
-        # (``start..boundary``) and its row carries the ``fetched_at`` of the walk that wrote it.
-        # This is the consequence of ``PriceCache`` owning the five keys: a second set of keys here
-        # would be a second vocabulary for one frame, and there is no composite status word in that
-        # vocabulary (``hit``/``null``/``miss``/``expired``/``corrupt`` plus ``disabled``).
+        # On the warm-prefix branch this makes the claim a composite. ``rows`` is the stored prefix
+        # (a replay, fetched on an earlier call) plus the live tail (fetched seconds ago), so
+        # ``miss`` and ``fetched_at`` describe the LIVE TAIL only: a live read did happen on this
+        # call, but it covered ``boundary+1..end``, not the window the key names. The prefix's own
+        # dating is not lost, and is deliberately not restated here -- read the store under the
+        # prefix key (``start..boundary``) and its row carries the ``fetched_at`` of the walk that
+        # wrote it. The vocabulary has no word for "one live tail plus one replay"
+        # (``hit``/``null``/``miss``/``expired``/``corrupt`` plus ``disabled``), and inventing one
+        # would be a second vocabulary for the five keys ``PriceCache`` owns.
         #
         # What is NOT composite is the liveness triad. ``coverage_end``, ``requested_end`` and
-        # ``uncovered_days`` are recomputed by the wrapper for the full requested window from the
-        # merged frame's own index, so "the data ends here" and "these candidate days are absent"
-        # describe the frame the caller holds, prefix and tail together. Only the provenance/age
-        # pair is the tail's. The refusal is also what stops a row planted under this key from ever
-        # being served as today's frame.
-        return await asyncio.to_thread(
-            cache.get_or_fetch,
-            lambda: rows,
-            symbol=clean_symbol,
-            exchange=exchange,
-            series=None,
-            start=start_iso,
-            end=end_iso,
+        # ``uncovered_days`` are computed for the full requested window from the merged frame's own
+        # index, so "the data ends here" and "these candidate days are absent" describe the frame
+        # the caller holds, prefix and tail together. Only the provenance/age pair is the tail's.
+        #
+        # The status is the one the second pass would have computed: ``miss``, because this path is
+        # only reached for a window that reaches today and the store refuses those by its own rule
+        # -- unless the store itself is switched off, which the prefix's own label already recorded
+        # and which must stay ``disabled`` rather than be relabelled a miss.
+        from bfinance.market.price_cache import _live_frame  # lazy: see _price_cache_or_default
+
+        status = (
+            DISABLED_STATUS
+            if prefix.attrs.get(CACHE_STATUS_ATTR) == DISABLED_STATUS
+            else "miss"
         )
+        return _live_frame(lambda: rows, status=status, start=start_iso, end=end_iso)
 
     @staticmethod
     def _tidy_bars(

@@ -546,12 +546,10 @@ def test_a_failed_fetch_is_not_cached(empty_ticker, monkeypatch):
 def test_tickers_forwards_the_flag_to_every_ticker():
     """``Tickers([...]).tickers["NTPC"].financials`` could never fall back without it.
 
-    The keyword reaches the real constructor through ``_apply_ticker_bool_shim``'s
-    ``(ticker, cache_ttl_hours=24.0, *args, **kwargs)`` wrapper, which pops only
-    ``multi_level_index`` and re-passes everything else as keywords. Asserted on the constructed
-    objects, not on the call.
+    The keyword reaches the real constructor as a keyword, which is what the constructor's
+    signature requires: only ``ticker`` is positional there and ``session`` is the second
+    positional. Asserted on the constructed objects, not on the call.
     """
-    import bfinance.tickers  # noqa: F401  -- applies the shim
     from bfinance.tickers import Tickers
 
     collection = Tickers(["NTPC", "RELIANCE"], statement_fallback=True)
@@ -563,19 +561,18 @@ def test_tickers_forwards_the_flag_to_every_ticker():
 
 def test_tickers_default_is_unchanged():
     """The flag is off by default, so a collection opens no second-vendor socket unless asked."""
-    import bfinance.tickers  # noqa: F401  -- applies the shim
     from bfinance.tickers import Tickers
 
     collection = Tickers("NTPC,RELIANCE")
     assert all(t.statement_fallback is False for t in collection.tickers.values())
-    # The shim's own contract is untouched by the new keyword.
+    # ``Tickers``' own bool handling is untouched by the new keyword: on the collection -- not
+    # on ``Ticker``, whose second positional is ``session`` -- a bool is still multi_level_index.
     assert collection.multi_level_index is True
     assert Tickers(["NTPC"], False).multi_level_index is False
 
 
 def test_a_tickers_collection_with_the_flag_on_reaches_the_fallback(empty_ticker, monkeypatch):
-    """End to end through the shim, not just on the attribute."""
-    import bfinance.tickers  # noqa: F401  -- applies the shim
+    """End to end through the collection, not just on the attribute."""
     from bfinance.tickers import Tickers
 
     monkeypatch.setattr(
@@ -587,25 +584,26 @@ def test_a_tickers_collection_with_the_flag_on_reaches_the_fallback(empty_ticker
     frame = ticker.financials
     assert not frame.empty
     assert frame.attrs["bfinance_statements_provider"] == "trendlyne-json"
-    # The shim's own contract: a bare bool second positional is multi_level_index, not a TTL.
     assert ticker.multi_level_index is True
     assert ticker.data_warnings == ()
 
 
-def test_the_keyword_reaches_the_constructor_and_the_shim_still_works():
-    """``Ticker.__init__`` is wrapped by a yfinance-compat shim (``tickers.py``) whose signature
-    is ``(ticker, cache_ttl_hours=24.0, *args, **kwargs)``. The new keyword is appended and
-    keyword-reachable, so the shim and every existing call site are unaffected."""
-    import bfinance.tickers  # noqa: F401  -- applies the shim
+def test_the_keyword_reaches_the_constructor_and_a_bool_second_positional_is_refused():
+    """``Ticker.__init__`` is a real signature now: ``(ticker, session=None, *, ...)``.
 
+    The statement-fallback keyword is appended and keyword-reachable, so every existing call site
+    is unaffected. The old yfinance-compat shim in ``tickers.py`` that read a bool second
+    positional as ``multi_level_index`` is gone, so every non-``None`` second positional binds to
+    ``session`` and is refused with ``NotImplementedError`` -- yfinance 1.7.0 refuses the same
+    call. ``multi_level_index`` is therefore settable by keyword only, which is asserted here.
+    """
     ticker = Ticker("NTPC", statement_fallback=True)
     assert ticker.statement_fallback is True
     assert Ticker("NTPC").statement_fallback is False
-    # The shim's own contract still holds: a bare bool in the second position is
-    # multi_level_index, not a TTL.
-    shimmed = Ticker("NTPC", True)
-    assert shimmed.multi_level_index is True
-    assert shimmed.statement_fallback is False
+    for value in (True, False):
+        with pytest.raises(NotImplementedError):
+            Ticker("NTPC", value)
+    assert Ticker("NTPC", multi_level_index=True).multi_level_index is True
 
 
 # --------------------------------------------------------------------------- #

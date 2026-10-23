@@ -175,15 +175,21 @@ def test_tickers_history_parity():
 
 
 # ------------------------------------------------- Ticker positional compat
-def test_ticker_bool_second_positional_is_not_cache_ttl():
-    # yfinance 1.7.0: second positional is `session`; a bool raises
-    # YFDataException. bfinance must NOT silently bind it to cache_ttl_hours.
+def test_ticker_second_positional_is_a_refused_session():
+    """yfinance 1.7.0's second positional is ``session``; bfinance now mirrors it.
+
+    It used to be ``cache_ttl_hours``, with a bool shim in ``bfinance.tickers`` patching the
+    constructor so ``Ticker("X", True)`` stored ``multi_level_index`` instead. The shim is gone
+    with the real signature, so **every** non-``None`` second positional binds to ``session`` --
+    and no session can be honoured (the transport is httpx and owned by this package), so a bool
+    is refused with ``NotImplementedError`` rather than silently read as a TTL. The keyword still
+    works, and ``multi_level_index`` is keyword-addressable only.
+    """
     with pytest.raises(yfinance.exceptions.YFDataException):
         yfinance.Ticker("RELIANCE.NS", True)
-    for flag in (True, False):
-        t = bf.Ticker("RELIANCE.NS", flag)
-        assert getattr(t, "multi_level_index", None) is flag
-        assert t.cache is None or t.cache.default_ttl_hours == pytest.approx(24.0)
+    for value in (True, False):
+        with pytest.raises(NotImplementedError):
+            bf.Ticker("RELIANCE.NS", value)
     # keyword TTL still honored (both orders: positional ticker + keyword ttl,
     # and keyword multi_level_index)
     t = bf.Ticker("RELIANCE.NS", cache_ttl_hours=0)

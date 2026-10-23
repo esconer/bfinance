@@ -22,6 +22,7 @@ from bfinance.utils.symbols import format_yf_ticker
 #:   ``pct``      RAW percent, 20.0 == 20% ``ratio``  decimal fraction, 0.20 == 20%
 #:   ``multiple`` dimensionless multiple (P/E, P/B, PEG, D/E, beta)
 #:   ``count``    integer count             ``ms``      epoch milliseconds
+#:   ``epoch``    epoch seconds, UTC midnight (fiscal period ends)
 #:   ``text``     string                    ``bool``    boolean
 #:   ``text_list``list of strings           ``mapping`` nested dict
 #:   ``unknown``  always None -- no source in the file
@@ -66,6 +67,7 @@ INFO_VALUE_UNITS: Dict[str, str] = {
     "regularMarketOpen": "unknown", "regularMarketDayHigh": "unknown",
     "regularMarketDayLow": "unknown", "dayHigh": "unknown", "dayLow": "unknown",
     "regularMarketPreviousClose": "inr", "previousClose": "inr",
+    "regularMarketChange": "inr",
     "fiftyDayAverage": "inr", "twoHundredDayAverage": "inr",
     "fiftyTwoWeekHigh": "inr", "fiftyTwoWeekLow": "inr",
     "bookValue": "inr", "faceValue": "inr", "trailingEps": "inr", "forwardEps": "unknown",
@@ -84,6 +86,10 @@ INFO_VALUE_UNITS: Dict[str, str] = {
     # ownership
     "heldPercentInsiders": "ratio", "heldPercentInstitutions": "unknown",
     "promoterHolding": "pct", "promoterPledged": "pct",
+    # period bookkeeping -- UTC-midnight epoch seconds of a statement period end.
+    # Added only when the profile carries the header; see build_info_dict.
+    "lastFiscalYearEnd": "epoch", "nextFiscalYearEnd": "epoch",
+    "mostRecentQuarter": "epoch",
 }
 
 
@@ -170,6 +176,82 @@ def previous_close_from_history(closes: Any) -> Optional[float]:
     return None
 
 
+def fractional_change_from_history(history: Any) -> Optional[float]:
+    """Last close vs the **earliest close in the supplied frame**; None below 2 bars.
+
+    This is yfinance's ``fast_info.year_change`` basis, measured in yfinance 1.7.0
+    (``scrapers/quote.py:474-476``): ``(Close[-1] - Close[0]) / Close[0]`` over the frame it
+    fetched. It is therefore **not** a 52-week figure and must not be labelled one: the
+    window here is exactly the frame handed in, which ``Ticker`` sources as ``period="1y"``
+    (~247 daily bars), so a caller reading it can name the window they got. Both ends are
+    valid closes -- NaN/None rows are dropped, not guessed at. No extra network.
+    """
+    vals = _close_list(history)
+    if len(vals) < 2 or vals[0] == 0:
+        return None
+    return float((vals[-1] - vals[0]) / vals[0])
+
+
+def average_volume(history: Any, window: int) -> Optional[int]:
+    """Mean of the last `window` daily ``Volume`` bars, truncated to int; None if short.
+
+    Volume is read only from a DataFrame carrying a ``Volume`` column, exactly like
+    ``FastInfo.last_volume``: a bare close list/Series says nothing about volume and must not
+    be reinterpreted as one. The window is a **bar count**, not a calendar count -- ``3mo``
+    is the last 63 trading bars -- and it is not shortened on a short frame: an average over
+    5 bars published as ``three_month_average_volume`` would be a fabricated label. Hence
+    None, not a number, whenever fewer than `window` bars exist. No extra network.
+    """
+    if window <= 0 or not isinstance(history, pd.DataFrame) or "Volume" not in history.columns:
+        return None
+    vals: List[int] = []
+    try:
+        for v in history["Volume"].tolist():
+            if v is None:
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if pd.notna(f):
+                vals.append(int(f))
+    except Exception:
+        return None
+    if len(vals) < window:
+        return None
+    tail = vals[-window:]
+    return int(sum(tail) / len(tail))
+
+
+def _latest_period_end(headers: List[str]) -> Optional[pd.Timestamp]:
+    """Latest parseable month-end period in a statement's headers, or None.
+
+    Screener headers are printed like ``"Mar 2026"``. The annual P&L also carries ``"TTM"``,
+    which is not a period and is skipped rather than guessed at -- the same decision
+    ``FinancialStatement.to_yfinance`` records for ``NON_DATE_PERIOD_HEADERS``. Taking the
+    maximum rather than ``headers[-1]`` is what keeps a trailing ``TTM`` from moving the
+    fiscal-year-end anchor onto the wrong column.
+    """
+    dates: List[pd.Timestamp] = []
+    for header in headers or []:
+        try:
+            dates.append(pd.to_datetime(f"01 {header}", format="%d %b %Y") + pd.offsets.MonthEnd(1))
+        except (TypeError, ValueError):
+            continue
+    return max(dates) if dates else None
+
+
+def _period_epoch(period_end: pd.Timestamp) -> int:
+    """Period end -> epoch seconds at **UTC midnight**, matching yfinance's measured values.
+
+    Measured against yfinance 1.7.0 on RELIANCE.NS: ``"Mar 2026"`` -> ``1774915200`` and
+    ``"Jun 2026"`` -> ``1782777600``, both UTC midnight. A naive ``Timestamp.timestamp()``
+    would read the process's local timezone instead and shift the epoch by that offset, so
+    the zone is stated here rather than left to the machine.
+    """
+    return int(pd.Timestamp(period_end).tz_localize("UTC").timestamp())
+
+
 class QuoteEngine:
     """
     Builds comprehensive 180+ key .info dictionary identical to yfinance.Ticker.info.
@@ -185,6 +267,10 @@ class QuoteEngine:
         Units of the returned keys are declared in `INFO_VALUE_UNITS` -- read them there.
         They are NOT uniform: `returnOnEquity`/`returnOnAssets` are decimal fractions,
         `returnOnCapitalEmployed`/`dividendYield` are raw percents, deliberately.
+
+        Keys whose source is absent are **omitted**, not set to `None`: `key in info` is how
+        a caller tests availability, so `lastFiscalYearEnd` and friends only appear when the
+        profile really carries the header they are derived from.
         """
         r = profile.ratios
         symbol = profile.symbol
@@ -367,6 +453,27 @@ class QuoteEngine:
             "cons": profile.analysis.cons,
             "cagrs": profile.cagrs,
         }
+
+        # ------------------------------------------------- keys with a possibly-absent source
+        # Everything below is published ONLY when its source exists. `key in info` is how a
+        # caller tests availability, so an absent statement header or a 1-bar frame omits the
+        # key -- publishing None here would be a permanent stand-in that reads as "known to be
+        # unknowable" and can never be told apart from a real answer.
+        _fy_end = _latest_period_end(profile.profit_loss.headers)
+        if _fy_end is not None:
+            info["lastFiscalYearEnd"] = _period_epoch(_fy_end)
+            # screener's annual columns are fiscal-year ends and the Indian FY is a 12-month
+            # period, so the next one is this end + 1 year. Measured against yfinance 1.7.0:
+            # "Mar 2026" -> 2027-03-31 -> 1806451200, which is its published nextFiscalYearEnd.
+            info["nextFiscalYearEnd"] = _period_epoch(_fy_end + pd.DateOffset(years=1))
+        _mrq = _latest_period_end(profile.quarters.headers)
+        if _mrq is not None:
+            info["mostRecentQuarter"] = _period_epoch(_mrq)
+        if _prev_close is not None and cmp > 0:
+            # Same basis as yfinance: regularMarketPrice - regularMarketPreviousClose.
+            # `cmp > 0` guards the no-price profile, where cmp falls back to 0.0 and the
+            # difference would be -previous_close rather than a real session change.
+            info["regularMarketChange"] = cmp - _prev_close
 
         # Inject custom ratios
         for k, v in r.custom_ratios.items():

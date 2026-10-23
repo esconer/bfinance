@@ -79,8 +79,31 @@ is authoritative for the rest.
   `raise_errors=True` to see it.
 * **`threads`** (*bool*): ~~`Optional[int]`, default `None`.~~ **It is a `bool`, default `True`**,
   and it is read as a switch: `max_concurrency=10 if threads else 1`. It is **not** a thread count.
-* **`timeout`** (*int*): ~~`15`.~~ **`10`**, matching `Ticker.history`.
+* **`timeout`** (*int*): ~~`15`.~~ **`10`**, matching `Ticker.history`. **It reaches the
+  wire**: passed to the per-symbol `history_async(timeout=...)` call and to the one HTTP client the
+  batch builds. Previously accepted and dropped.
+* **`ignore_tz`** (*Optional[bool], default `None`*): `True` is honoured (the index is tz-naive).
+  **`False` raises `NotImplementedError`**: the timezone-preserving frame cannot be produced.
+  `None` is the default and the established tz-naive index.
+* **`progress`** (*bool, default `True`*): one `INFO` line per finished symbol on the
+  `bfinance.download` logger (`download: 2/5 TCS`); `False` emits none. Previously both were the
+  same call.
+* **`session`** (*object, optional*): a non-`None` value **raises `NotImplementedError` naming
+  `httpx`**, before any Ticker exists. The transport is httpx and every client owns its own.
 * **`proxy`** (*str, optional*): HTTP/HTTPS/SOCKS5 proxy URL.
+
+### `bfinance.Search(query, max_results=8, ...)`
+
+NSE MarketLens free-text search, yfinance-shaped. `bf.Search("tcs")` returns an object with
+`.quotes` (list of dicts) and `.all` (`{"quotes": [...]}`).
+
+* **Measured payload, 2026-10-23:** seven keys — `id`, `type`, `name`, `ticker`, `description`,
+  `matchScore`, `marketCap` — passed through verbatim; no `symbol` rename, no `.NS` suffix, no
+  invented `shortname`/`quoteType`/`exchange`.
+* `max_results` is applied client-side; the endpoint has no count parameter.
+* The index is **equities-only**: `Search("nifty")` and `Search("niftybees")` returned zero
+  quotes (measured 2026-10-22). MarketLens is NSE-only, so a BSE scrip cannot match either.
+* A failure raises; it is never converted into an empty list.
 
 ---
 
@@ -93,25 +116,32 @@ The primary unified facade representing an equity asset listed on the National S
 ```python
 bf.Ticker(
     ticker: str,
+    session: Optional[Any] = None,
+    *,
     cache_ttl_hours: float = 24.0,
     timeout: float = 15.0,
     proxy: Optional[str] = None,
-    session: Optional[Any] = None,
     raise_errors: bool = False,
     statement_fallback: bool = False,
     trendlyne_sections: bool = False,
+    multi_level_index: bool = True,
+    cache: Optional[SQLiteCache] = None,
+    screener_client: Optional[ScreenerClient] = None,
 )
 ```
 
 #### Arguments:
 * **`ticker`** (*str*): Ticker symbol with optional exchange suffix (e.g., `'RELIANCE'`, `'RELIANCE.NS'`, `'500325.BO'`).
-* **`cache_ttl_hours`** (*float*): Local SQLite cache time-to-live in hours. Set to `0.0` to force live network requests. Default is `24.0`.
-* **`timeout`** (*float*): Maximum network request timeout in seconds. Default is `15.0`.
-* **`proxy`** (*str, optional*): Proxy connection URL.
-* **`session`** (*Any, optional*): Caller-supplied HTTP session. It precedes `raise_errors` in the real signature; it is documented here rather than omitted because a positional call that assumes the old order passes the wrong object to the wrong parameter.
-* **`raise_errors`** (*bool*): If `False` (default), invalid tickers or missing data log warnings and return safe empty DataFrames/dictionaries. If `True`, raises `TickerNotFoundError` or `UpstreamServiceError`.
-* **`statement_fallback`** (*bool*): **Default `False`, and off by default on purpose.** Set `True` to let the statement accessors below fall back to a second vendor (today: trendlyne.com) when Screener.in carries **no statement at all**. `bf.Ticker("NTPC")` without it opens no second-vendor socket. Appended last so every existing call site and the yfinance-compat shim in `tickers.py` are unaffected. Named for what it does rather than for the vendor that happens to serve it: a third vendor would need no change here, where `trendlyne_fallback` would already be a lie. See section 2.3.1 for what the fallback frame does and does not promise.
-* **`trendlyne_sections`** (*bool*): **Default `False`, and off by default on purpose.** Set `True` to enable the seven `trendlyne_*` members and the derived `analyst_price_targets`. **Appended last**, after `statement_fallback`; neither flag is forwarded by the other and the statement fallback keeps its own. A default `Ticker(...)` makes **zero** second-vendor requests, and `bfinance.trendlyne` stays out of `sys.modules` after one. See section 2.3.2.
+* **`session`** (*Any, optional*): The **second positional**, matching yfinance's order. **A non-`None` value raises `NotImplementedError` naming `httpx` before any request**: the transport is `httpx`, so a `requests.Session` or `httpx.Client` cannot be honoured. Omit it.
+* **`cache_ttl_hours`** (*float, keyword-only*): Local SQLite cache time-to-live in hours. Set to `0.0` to force live network requests. Default is `24.0`.
+* **`timeout`** (*float, keyword-only*): Maximum network request timeout in seconds. Default is `15.0`.
+* **`proxy`** (*str, optional, keyword-only*): Proxy connection URL.
+* **`raise_errors`** (*bool, keyword-only*): If `False` (default), invalid tickers or missing data log warnings and return safe empty DataFrames/dictionaries. If `True`, raises `TickerNotFoundError` or `UpstreamServiceError`.
+* **`statement_fallback`** (*bool, keyword-only*): **Default `False`, and off by default on purpose.** Set `True` to let the statement accessors below fall back to a second vendor (today: trendlyne.com) when Screener.in carries **no statement at all**. `bf.Ticker("NTPC")` without it opens no second-vendor socket. Keyword-only, so it cannot shift the second positional. Named for what it does rather than for the vendor that happens to serve it: a third vendor would need no change here, where `trendlyne_fallback` would already be a lie. See section 2.3.1 for what the fallback frame does and does not promise.
+* **`trendlyne_sections`** (*bool, keyword-only*): **Default `False`, and off by default on purpose.** Set `True` to enable the seven `trendlyne_*` members, the derived `analyst_price_targets`, and the yfinance-named section members — `recommendations`, `recommendations_summary`, `earnings_estimate`, `revenue_estimate`, `earnings_history`, `growth_estimates`, `insider_transactions`. Neither flag is forwarded by the other and the statement fallback keeps its own. A default `Ticker(...)` makes **zero** second-vendor requests, and `bfinance.trendlyne` stays out of `sys.modules` after one. With the flag off, every section-gated member raises `NotImplementedError` naming the flag. See sections 2.3.2 and 2.3.3.
+* **`multi_level_index`** (*bool, keyword-only*): Default `True`, matching yfinance. Pass `multi_level_index=True` explicitly — the old bool shim that read a second positional `True` as this flag is deleted.
+* **`cache`** (*SQLiteCache, optional*): A caller-built cache to use instead of the one `Ticker` would construct. Used by `download()` to share one cache across a batch.
+* **`screener_client`** (*ScreenerClient, optional*): A caller-built screener client, shared the same way.
 
 ---
 
@@ -127,11 +157,21 @@ Container for quick scalar attributes matching `yfinance.Ticker.fast_info`:
 * `fast_info.timezone`: Always `'Asia/Kolkata'`.
 * `fast_info.exchange`: `'NSE'` or `'BSE'`.
 
+**It is also a mapping**, measured 2026-10-23: `keys()`, `items()`, `values()`, `get(key, default=None)`,
+`key in fast_info`, iteration and `len()` work over **21 keys**, so `dict(ticker.fast_info)` returns
+all 21. Four keys were added in this pass: `regular_market_previous_close`,
+`ten_day_average_volume`, `three_month_average_volume`, `year_change`. Attribute access is unchanged.
+
 #### `ticker.info` -> `Dict[str, Any]`
-~~Comprehensive 180+ key dictionary matching `yfinance.Ticker.info` schema.~~ **Corrected: it
-is a 76-key dictionary, not 180+.** That count is measured, not estimated: the returned dict has
-exactly the keys of `bfinance.market.quotes.INFO_VALUE_UNITS`, which is a 76-entry mapping and
-is the authoritative list -- read the key set there rather than trusting a summary.
+~~Comprehensive 180+ key dictionary matching `yfinance.Ticker.info` schema.~~ **Corrected: the
+returned dict carries 76 to 90 keys depending on the profile, not a fixed 76 and not 180+.**
+`bfinance.market.quotes.INFO_VALUE_UNITS` is the authoritative declared list: it holds **80**
+keys, and the returned dict also carries the **10** raw screener top-ratio labels (`Book Value`,
+`Current Price`, `Dividend Yield`, `Face Value`, `High`, `Low`, `Market Cap`, `ROCE`, `ROE`,
+`Stock P/E`) when the profile publishes them. Four declared keys are **conditional** —
+`regularMarketChange`, `lastFiscalYearEnd`, `nextFiscalYearEnd`, `mostRecentQuarter` — and are
+**omitted, never `None`**, when their source is absent. Measured across five profiles on
+2026-10-23: **76, 80, 89, 90, 90** keys. Test availability with `key in info`, not a length.
 
 * Key fields include: `shortName`, `symbol`, `currentPrice`, `marketCap`, `marketCapInCr`,
   `trailingPE`, `bookValue`, `dividendYield`, `returnOnCapitalEmployed`, `returnOnEquity`,
@@ -177,18 +217,43 @@ Metadata dictionary matching `yfinance 1.7.0+` including `timezone`, `currency`,
 Valuation summary table matching `yfinance 1.3.0+` with columns `['Metric', 'Value']`.
 
 #### `ticker.dividends` -> `pd.Series`
-Pandas Series of historical corporate dividend distributions indexed by Date.
+Pandas Series of historical corporate dividend distributions indexed by Date. The values are the
+Screener.in **fiscal-year-end** approximation, not yfinance's ex-dates; `ticker.actions["Dividends"]`
+is the ex-dated NSE series and is **not** this property.
 
 #### `ticker.splits` -> `pd.Series`
-**Empty for every symbol, by construction.** The property exists and is not broken;
-`CorporateActionsEngine.extract_splits` returns an empty Series because the equity-capital
-inference that used to populate it was deleted -- a 1:1 bonus, a rights issue, a QIP and an ESOP
-conversion are the same number in the same balance-sheet row, so a fabricated ratio could not be
-told from a real one. Measured: a capital raise produced `{2026-03-31: 5.26}` and rescaled every
-earlier bar by 1/5.26 while provenance flags claimed a complete adjustment. Splits that ARE declared
-come from the NSE filing via `bfinance.nse.corporate_actions.split_ratio`, which is what supplies
-the factor `history()` uses. Downstream an empty series reads as `0.0`, meaning "not known", not
-"none happened".
+**Real since 2026-10-23.** An ex-dated Series from NSE's corporate-actions filings, indexed by
+ex-date, tz-aware and named `Stock Splits`. The factor is the filing's own **`SplitRatio`**, read
+out of the published subject when the frame was parsed by
+`bfinance.nse.corporate_actions.parse_corporate_actions`; `splits_from_actions` selects on that
+ratio, **not** on the `Action` kind, so a composite subject filed as a dividend while declaring a
+real `2.0` factor is included. A plain dividend row declares no ratio and can never contribute one.
+
+**An empty series is not proof that no split happened.** It can also mean the feed could not be
+read. `attrs["bfinance_actions_source"]` distinguishes the two: `"nse_corporate_actions"` means the
+feed answered and published no split/bonus; `"none"` means the fetch failed, with the exception in
+`bfinance_actions_source_detail` and the reason named in `ticker.data_warnings`. Measured on the
+recorded payloads: RELIANCE `{2024-10-28: 2.0}`; ITC `{2010-08-03: 2.0, 2016-07-01: 1.5}`.
+
+#### `ticker.actions` -> `pd.DataFrame`
+Columns `Dividends` and `Stock Splits`, one row per declared ex-date. Both columns come from the
+**same** NSE corporate-actions feed, so the frame is internally consistent.
+`actions["Dividends"]` is **not** `ticker.dividends` (different source, different date basis). Zero
+rows means the feed published no action for the symbol — or that it could not be read, which leaves
+`bfinance_actions_source == "none"`. `bfinance_empty_feed` is never set by this property: `True`
+would assert NSE answered with nothing, which a failed request did not observe.
+
+#### `ticker.isin` -> `Optional[str]`
+The instrument's ISIN, or `None` — never `""` and never a guess. First source is the NSE
+corporate-actions payload: `isin_from_actions` returns the value only when the frame's non-blank
+ISINs agree, and refuses a frame whose rows disagree. When the feed has no row for the symbol, the
+fallback reads **archived index memberships** the universe archive has already written; that
+coverage is archived indices only. `None` therefore means "not found in what is on disk on this
+machine", **not** "no ISIN exists".
+
+**Cost.** The first of `splits`, `actions` and `isin` pays **one** corporate-actions request; the
+other two read the memoised events frame. This is not `dividends`' route, so a caller who has
+already read `dividends` still pays it.
 
 #### `ticker.options` -> `Tuple[str, ...]`
 ~~Tuple of available derivatives expiry dates (e.g. `('2026-09-24', '2026-10-29')`).~~
@@ -370,12 +435,17 @@ bf.Ticker("TCS", trendlyne_sections=True).trendlyne_reports()
 ⚠ **This is a separate package with its own rules, not a fifth fallback.** `bfinance.trendlyne` is
 a **third-party analytics site**, not an exchange source: nothing in `bfinance` imports it,
 `import bfinance` does not put it in `sys.modules`, and it is not in the price cascade. The flag
-makes seven new members reachable and changes one existing property — it does **not** alter any
-existing behaviour, and every failure on these members degrades to an honest empty shape with the
-reason on `ticker.data_warnings` rather than raising.
+makes seven `trendlyne_*` members reachable, upgrades one existing property (`analyst_price_targets`),
+and enables the seven yfinance-named section members documented in §2.3.3 — it does **not** alter
+any other existing behaviour, and a failure on the `trendlyne_*` members degrades to an honest empty
+shape with the reason on `ticker.data_warnings` rather than raising.
 
-Each member costs **exactly one request**: the symbol resolves through the cached sitemap index and
-the section route is fetched once, with no stock-page fetch and no per-symbol token.
+Each `trendlyne_*` member costs **exactly one request**: the symbol resolves through the cached
+sitemap index and the section route is fetched once, with no stock-page fetch and no per-symbol
+token. The yfinance-named members in §2.3.3 are different: they read the **stock page**, so after
+any trendlyne call on the Ticker their marginal cost is **zero** requests; on a cold client the
+first one pays that one page fetch. `insider_transactions` is the exception — a route of its own,
+one request on first access, then memoised (a failure is not memoised).
 
 | member | returns | route | one thing to know |
 |---|---|---|---|
@@ -386,6 +456,30 @@ the section route is fetched once, with no stock-page fetch and no per-symbol to
 | `trendlyne_buy_sell_zone()` | `Dict[str, pd.DataFrame]` → `{"standalone", "consolidated"}` | `/tools/buy-sell-zone/` | Keyed by the enclosing `div.tab-pane`, **not** by the headers: the two grids carry byte-identical header rows on the live page and their numbers differ, so a header-derived key would make a swap invisible. The page's summary stats ride on each frame's `attrs` |
 | `trendlyne_technicals()` | `pd.DataFrame` — `name, value, insight, color, parameter` | `/equity/api/stock/adv-technical-analysis/{id}/24/?format=json` | From the **robots-clean JSON sibling**, not the `/equity/technical-analysis-*` **page** — which `robots.txt` disallows and which stays unwired. The raw `parameters` mapping is on the client as `adv_technical_analysis` |
 | `trendlyne_swot()` | `Dict[str, pd.DataFrame]` — 5 tables | `/equity/swot-buy-or-sell/` | Five single-column frames whose header cell *is* the fact, each publishing it in `attrs["bfinance_trendlyne_swot_heading"]`. The fifth (`tag_others`) is the vendor's own extra tab, not a fourth quadrant |
+
+#### 2.3.3 yfinance-named section members (`trendlyne_sections=True`)
+
+These use yfinance's names and return shapes, but are filled from the trendlyne stock page. **Every
+one requires `trendlyne_sections=True`; with the flag off each raises `NotImplementedError` naming
+the flag, before a socket exists.** An empty frame would be indistinguishable from "the vendor
+published no rows", so refusal is a raise.
+
+| member | returns | measured shape (2026-10-23) | one thing to know |
+|---|---|---|---|
+| `recommendations` | `pd.DataFrame` | `(6, 6)` | `period` is the vendor's `asofdate` (`YYYY-MM-DD`) — six dated snapshots, not yfinance's four relative `0m`/`-1m`/`-2m`/`-3m` rows |
+| `recommendations_summary` | `pd.DataFrame` | `(4, 6)` | The last four rows of the **same** frame; no second fetch |
+| `earnings_estimate` | `pd.DataFrame` | `(4, 6)` | Index `0q`/`+1q`/`0y`/`+1y`, derived from `is_current`/`is_past` and `period_end`, not row order or the bare period string. `yearAgoEps` is the published prior-year `actual`; where that row is absent the cell is **`NaN`** and `attrs["bfinance_estimate_note"]` names the exact cells. Never solved from `growth_pct` |
+| `revenue_estimate` | `pd.DataFrame` | `(4, 6)` | Same index/shape from the vendor's `REVENUE` rows; `yearAgoRevenue` carries the same `NaN` + note contract |
+| `earnings_history` | `pd.DataFrame` | `(3, 4)` | Index is the **fiscal period end**, with `attrs["bfinance_date_basis"] = "fiscal_period_end"`; the vendor publishes no announcement date. `surprisePercent` is the vendor's own field, not re-derived |
+| `growth_estimates` | `pd.DataFrame` | `(9, 1)` | Column `stock` only; `industry`/`sector`/`index` are **absent, not zero** |
+| `insider_transactions` | `pd.DataFrame` | `(174, 13)` | Vendor columns verbatim. **500-row server cap**: a frame at 500 is truncated and says so (`attrs["bfinance_trendlyne_insider_rows_capped"]`), a frame below it is **not** called complete. `attrs["bfinance_trendlyne_insider_rows"]` is the row count to read |
+
+The shapes are from the recorded MOTHERSON symbol page (capture 2026-10-21, `retrieved_at`
+2026-10-22); a different symbol can have more or fewer rows, but the column sets, the
+`0q/+1q/0y/+1y` derivation and the `NaN`/`attrs` contract do not change.
+
+`isin`, and the now-real `splits`/`actions`, are **not** gated on this flag — they read the NSE
+corporate-actions feed, documented under §2.2.
 
 #### `ticker.analyst_price_targets` on this path
 
@@ -650,6 +744,14 @@ group = bf.Tickers(["RELIANCE", "TCS", "INFY"])
 ```
 * **`group.tickers`**: Dictionary of individual `Ticker` instances (`group['TCS']`).
 * **`group.history(period="1mo")`**: Fetches combined historical prices in a single call.
+* **`group.download(period="1mo")`**: yfinance 1.7.0's second spelling for the same batch
+  operation; forwards to `bfinance.download` with `actions=True` (yfinance's default here), the
+  one place it differs from the module-level `download`'s `actions=False`.
+* **`group.multi_level_index`**: stored and forwarded to `download()`; default `True`.
+* **Second positional**: `Tickers(["TCS"], True)` is still read by the old bool shim as
+  `multi_level_index=True` (and resets `cache_ttl_hours` to 24.0), unlike `Ticker`, where the
+  second positional is `session` and a bool raises. This is a known residual divergence
+  (`docs/YFINANCE_PARITY.md` §5.2); pass `multi_level_index=True` by keyword.
 * **`statement_fallback`** (*bool*): Forwarded to every `Ticker` the collection builds, with the
   same meaning as on `Ticker` (section 2.3.1). Default `False`, so a collection opens no
   second-vendor socket unless asked.

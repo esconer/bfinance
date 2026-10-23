@@ -46,19 +46,46 @@ hard-coded expected-unit dict in ``test_declared_units_match_the_hand_documented
 """
 import importlib
 
+import pandas as pd
 import pytest
 
 from bfinance.market.quotes import INFO_VALUE_UNITS, QuoteEngine
 from bfinance.models.company import CompanyProfile, FinancialStatement, TopRatios
 from bfinance.screens import screens
 
+#: Two daily bars: enough for ``regularMarketChange``, which needs a previous close.
+_TWO_BAR_HISTORY = pd.DataFrame(
+    {"Close": [100.0, 110.0], "Volume": [1_000, 2_000]},
+    index=pd.to_datetime(["2026-06-29", "2026-06-30"]),
+)
 
-def info_from(ratios, **profile_kwargs):
-    """Build the real info dict from a real TopRatios. No network, no fixtures written."""
+#: The already-fetched price a ``Ticker`` would hand in alongside that frame. Without it
+#: ``build_info_dict`` correctly omits ``regularMarketChange`` (a 0.0 price fallback is not a
+#: price), which the stale-key test would misread as a stale declaration.
+_LATEST_PRICE = 110.0
+
+
+def info_from(ratios, history=_TWO_BAR_HISTORY, **profile_kwargs):
+    """Build the real info dict from a real TopRatios. No network, no fixtures written.
+
+    The profile carries one annual P&L column and one quarter column, a current price, and
+    two daily bars, because ``build_info_dict`` publishes the fiscal-epoch keys and
+    ``regularMarketChange`` **only when their source exists** -- a key with no source is
+    omitted, not set to ``None``. Without those sources ``test_table_has_no_stale_keys``
+    would read a correct omission as a stale declaration. The headers are real period labels,
+    not placeholders, and the epoch values they produce are pinned in
+    ``test_info_exact_keys.py``.
+    """
+    profile_kwargs.setdefault(
+        "profit_loss", FinancialStatement(headers=["Mar 2026"], rows={})
+    )
+    profile_kwargs.setdefault(
+        "quarters", FinancialStatement(headers=["Jun 2026"], rows={})
+    )
     profile = CompanyProfile(
         symbol="TEST", company_id=0, name="Test Ltd", ratios=ratios, **profile_kwargs
     )
-    return QuoteEngine.build_info_dict(profile)
+    return QuoteEngine.build_info_dict(profile, latest_price=_LATEST_PRICE, history=history)
 
 
 # ======================================================= the decision: ROCE stays a percent
@@ -272,6 +299,10 @@ EXPECTED_UNITS = {
     "sharesOutstanding": "count",
     "volume": "count",
     "gmtOffSetMilliseconds": "ms",
+    "regularMarketChange": "inr",
+    "lastFiscalYearEnd": "epoch",
+    "nextFiscalYearEnd": "epoch",
+    "mostRecentQuarter": "epoch",
     "isConsolidated": "bool",
     "pros": "text_list",
     "cagrs": "mapping",
@@ -309,7 +340,7 @@ def test_table_has_no_stale_keys():
 def test_only_documented_unit_vocabulary_is_used():
     """Keeps the vocabulary closed, so `pct` can never drift to mean something else."""
     allowed = {
-        "inr", "inr_cr", "pct", "ratio", "multiple", "count", "ms",
+        "inr", "inr_cr", "pct", "ratio", "multiple", "count", "ms", "epoch",
         "text", "bool", "text_list", "mapping", "unknown",
     }
     bad = {k: v for k, v in INFO_VALUE_UNITS.items() if v not in allowed}
