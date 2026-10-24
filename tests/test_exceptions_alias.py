@@ -555,6 +555,9 @@ class TestTheDocumentedLimitIsTrue:
         Nothing here imports yfinance -- it is a dev-only dependency, and a test that needed it
         would fail in a runtime install. The class object is built in memory with the same name,
         which is all an ``except`` clause binds.
+
+        The second handler exists because the escape is the result: without it the raise leaves the
+        test as an error, so the passing state is unobservable and the test cannot pass at all.
         """
         yfinance_side = type("YFException", (Exception,), {"__module__": "yfinance.exceptions"})
 
@@ -563,6 +566,14 @@ class TestTheDocumentedLimitIsTrue:
             raise RateLimitExceededError("HTTP 429")
         except yfinance_side as error:  # type: ignore[misc]
             caught = error
+        except RateLimitExceededError:
+            # The documented limit: the yfinance-shaped clause above did not match, so the raise
+            # escaped it. Reaching here is the proof; `caught` stays None.
+            pass
+        else:  # pragma: no cover - only on a regression
+            raise AssertionError(
+                "the raise neither matched the yfinance-shaped clause nor escaped it"
+            )
 
         assert caught is None, (
             "a bfinance raise was caught by a yfinance-shaped class object, which would mean the "
