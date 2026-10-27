@@ -126,7 +126,9 @@ ALL_PAYLOAD_KWARGS = ("screener_html", "trendlyne_html", "trendlyne_json")
 
 
 def _read(path: pathlib.Path) -> str:
-    return path.read_text(encoding="utf-8", newline="")
+    # `read_text(newline=...)` is 3.13+; this suite runs on 3.10 through 3.13.
+    with path.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
 
 
 @pytest.fixture(scope="module")

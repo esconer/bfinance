@@ -393,7 +393,8 @@ class TestTheAbsentFieldIsCheckedAgainstTheBytes:
         edited = [source[0].replace("Div Yield", "Total Return Value\nDiv Yield")] + source[1:]
         tampered = original.with_name("__tri_control_tampered.csv")
         try:
-            tampered.write_text("".join(edited), encoding="utf-8", newline="")
+            with tampered.open("w", encoding="utf-8", newline="") as handle:
+                handle.write("".join(edited))
             with tampered.open(encoding="utf-8-sig", newline="") as handle:
                 tampered_labels = set(next(csv.reader(handle)))
             assert "Total Return Value" in tampered_labels, (

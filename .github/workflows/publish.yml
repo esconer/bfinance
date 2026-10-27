@@ -13,6 +13,8 @@ jobs:
   test:
     name: Run Test Suite
     runs-on: ubuntu-latest
+    # A hung vendor request must fail in minutes, not hold a release for GitHub's 6-hour limit.
+    timeout-minutes: 30
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -31,8 +33,12 @@ jobs:
       - name: Install Dependencies
         run: uv sync --extra dev
 
+      # The documented gate is the offline selection, the same one ci.yml requires. Running the
+      # bare suite here made publishing depend on Trendlyne, NSE and screener.in answering from a
+      # CI runner -- with their crawl delays -- inside the job that publishes if and only if it
+      # passes. Measured 2026-10-27: that job was still in `Run Pytest` after 55 minutes.
       - name: Run Pytest
-        run: uv run pytest
+        run: uv run pytest -m "not live"
 
   publish:
     name: Build & Publish to PyPI

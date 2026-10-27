@@ -792,7 +792,10 @@ class UniverseArchive:
 
     def _write_json(self, path: Path, payload: Any) -> None:
         text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        path.write_text(text, encoding="utf-8", newline="\n")
+        # Path.write_text gained `newline` in 3.13, and this package supports 3.10. Writing
+        # through the handle produces the same bytes without raising TypeError on the floor.
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
 
     def _index_path(self, index_key: str) -> Path:
         return self.indices_dir / f"{index_key}.json"

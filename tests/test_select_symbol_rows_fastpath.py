@@ -82,7 +82,10 @@ def _market_frame(symbols, *, symbol_column: str = "SYMBOL") -> pd.DataFrame:
     named ``DatetimeIndex`` because that is what the bhavcopy parser produces on the real path.
     """
     rows = len(symbols)
-    index = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=rows, freq="D"), name="Date")
+    # Seconds, not days: 250,000 days lands in the year 2708 and overflows pandas' nanosecond
+    # range on the older pandas that Python 3.10 resolves. Only the index's name, dtype and
+    # uniqueness are ever asserted here, never its dates.
+    index = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=rows, freq="s"), name="Date")
     frame = pd.DataFrame(
         {
             symbol_column: list(symbols),
