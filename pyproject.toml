@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bfinance"
 version = "0.2.0"
-description = "High-performance Python SDK for Indian equities (NSE & BSE) — a 1:1 drop-in replacement for yfinance supercharged with 10-year financials, concalls, and live market microstructure."
+description = "High-performance Python SDK for Indian equities (NSE & BSE) — a measured subset of yfinance's 1.7.0 Ticker API, supercharged with 10-year financials, concalls, and live market microstructure."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -14,7 +14,7 @@ authors = [
 requires-python = ">=3.10"
 keywords = [
     "finance", "stock-market", "nse", "bse", "indian-stocks", "screener",
-    "yfinance", "options", "derivatives", "quantitative-finance", "investing"
+    "yfinance", "quantitative-finance", "investing"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

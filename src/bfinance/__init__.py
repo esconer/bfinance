@@ -1,6 +1,8 @@
 """
 bfinance — High-performance Python SDK for Indian Equities (NSE & BSE).
-A 1:1 drop-in replacement for yfinance (1.7.0+ compatible) supercharged with 10-year financials, concalls, and live market microstructure.
+A measured subset of the yfinance 1.7.0 Ticker API (44 of its 98 members present, 14 present
+but empty, 40 refused by name) supercharged with 10-year financials, concalls, and live market
+microstructure.
 
 Removed in this working tree:
 

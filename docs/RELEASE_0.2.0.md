@@ -152,3 +152,15 @@ Two decisions inside the converter, both recorded rather than inferred:
 The remote has PyPI auto-build wired to commits. 28 commits are ahead of `origin/main` and
 **none has been pushed**. This document exists so the version number is chosen deliberately
 before that happens, not discovered afterwards.
+
+## Addendum, 2026-10-28: pushed
+
+`v0.2.0` was tagged and pushed. Two corrections to the section above, both found while doing it:
+
+- The auto-build is wired to **tags**, not commits. `publish.yml` triggers on `v*` only, so pushing
+  `main` publishes nothing; the PyPI upload and the GitHub Release both happen on the tag.
+- The backlog was 58 commits, not 28.
+
+The condition this document existed to enforce held: the version number was chosen, and the
+breaking changes were written down, before the push rather than after it.
+
