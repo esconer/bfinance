@@ -30,8 +30,8 @@ Two axes, and they are not interchangeable
 second-order version of the same mistake:
 
 * :attr:`BasisAxis.PRICE` — corporate-action adjustment. ``as_traded`` vs
-  ``as_traded_split_bonus_adjusted`` vs ``dividend_adjusted``. Getting this wrong fabricates a price
-  move.
+  ``as_traded_split_bonus_adjusted`` vs ``as_traded_share_count_adjusted`` vs
+  ``dividend_adjusted``. Getting this wrong fabricates a price move.
 * :attr:`BasisAxis.ACCOUNTING` — consolidated (group, with subsidiaries) vs standalone (the
   company alone). Getting this wrong does not move a price; it puts the wrong shareholders'
   funds in a balance sheet. The measured size of that error: MOTHERSON at Mar 2026, the same row
@@ -134,6 +134,11 @@ class Basis(str, Enum):
     #: against the earlier name. The value is identical, so :class:`~enum.Enum` folds the two into
     #: one member — this is not a second basis and nothing can declare it separately.
     SPLIT_ADJUSTED = "as_traded_split_bonus_adjusted"
+    #: Restated for a share-count change: bfinance applies a share-count factor over the whole
+    #: action history. Distinct from :attr:`SPLIT_BONUS_ADJUSTED` because the factor is computed
+    #: here rather than taken from the vendor's adjusted series, and distinct from
+    #: :attr:`AS_TRADED` because the prices are not what printed on the tape.
+    SHARE_COUNT_ADJUSTED = "as_traded_share_count_adjusted"
     #: Restated for dividends. Distinct from :attr:`SPLIT_BONUS_ADJUSTED`: a dividend adjustment
     #: moves every historical price and a split adjustment does not move the last one, so these
     #: are two different numbers and are not interchangeable.
@@ -209,6 +214,7 @@ class Basis(str, Enum):
 BASIS_AXIS: Dict[Basis, BasisAxis] = {
     Basis.AS_TRADED: BasisAxis.PRICE,
     Basis.SPLIT_BONUS_ADJUSTED: BasisAxis.PRICE,
+    Basis.SHARE_COUNT_ADJUSTED: BasisAxis.PRICE,
     Basis.DIVIDEND_ADJUSTED: BasisAxis.PRICE,
     Basis.CONSOLIDATED: BasisAxis.ACCOUNTING,
     Basis.STANDALONE: BasisAxis.ACCOUNTING,

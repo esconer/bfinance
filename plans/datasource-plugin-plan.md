@@ -1,6 +1,7 @@
 # Data-source policy plan: P0, P1, P2
 
-**Status: proposed, not started.** Written 2026-10-28 against `66ebb90`. This is the executable
+**Status: P0 shipped (`751e29c`); P1 and P2 not started.** Written 2026-10-28 against `66ebb90`.
+This is the executable
 plan for the work `docs/PLUGGABLE_DATASOURCES.md` argues for; that document is the *why*, this one
 is the *what*, in the order it must happen.
 
@@ -152,9 +153,48 @@ uv run pytest -q -m "not live"
 Expected: the first prints the same string twice; the suite is green with the same skip/xfail counts
 as at `66ebb90` and no new ones.
 
+### P0 as shipped
+
+P0 shipped in `751e29c`; the share-count registration described below is the commit that adds this
+section. Both are vocabulary only, every frame byte-identical. What differed from the task table
+above, and the gap the work found:
+
+- **P0.1–P0.3 and P0.5–P0.7 landed as written.**
+- **P0.4 did not import the enum into `market/ohlcv.py`.** Importing `bfinance.sources.model` there
+  pulls an opt-in package into the base import, so the constant stayed a literal and
+  `tests/test_basis_vocabulary.py` is now the link that pins it to the enum.
+  `price_provider.PRICE_BASIS` *is* derived (`Basis.SPLIT_BONUS_ADJUSTED.value`), because that module
+  already lives inside `bfinance.sources`.
+- **The teeth live in one new module**, `tests/test_basis_vocabulary.py`, rather than at the four
+  sites named above. Proven by stashing the four source files and running it against the pre-change
+  tree: 4 failed, and the defect printed as `enum value split_adjusted` vs
+  `provider stamps as_traded_split_bonus_adjusted` with `row serves provider: False`.
+
+**Gap found while verifying — a basis bfinance stamped but could not declare.**
+`market/ohlcv.py` writes `as_traded_share_count_adjusted` into `attrs["price_basis"]` whenever
+`_resolve_adjustment` applies a share-count factor, yet `basis_from()` on that exact string raised.
+That is P0's defect one step further out: bfinance refused its own frame's basis, so a source
+declaring it would have been unreachable for the same silent reason — skipped on basis, never called.
+Registered as `Basis.SHARE_COUNT_ADJUSTED` on the `PRICE` axis. Nothing declares it today, so no
+routing changed.
+
+**The synthetic screener value stays outside the vocabulary, deliberately.**
+`PRICE_BASIS_SYNTHETIC` (`screener_close_real_derived_ohlc_unadjusted`) records that Open, High and
+Low were *derived* from Close. That is a fabrication warning, not an adjustment state; registering it
+would let a source declare synthetic OHLC as a legitimate basis, which defeats what the name is for.
+It is named in `market/ohlcv.py:BASIS_VALUES_DELIBERATELY_OUTSIDE_THE_VOCABULARY`, and
+`tests/test_basis_vocabulary.py` asserts that tuple is exactly that one value — so the exception is a
+written decision and cannot become a dumping ground for the next inconvenient value.
+
+Vocabulary as it now stands: `as_traded`, `as_traded_split_bonus_adjusted`,
+`as_traded_share_count_adjusted`, `dividend_adjusted`, `consolidated`, `standalone`, `reported`,
+`statutory`.
+
 ### Rollback
-One commit, vocabulary only: `git revert` restores both spellings and every frame is byte-identical,
-because no frame value changed.
+Vocabulary only, two commits: `751e29c` and the share-count registration. Reverting both restores the
+pre-P0 vocabulary and every frame stays byte-identical, because no frame value changed — the frames
+already carried `as_traded_split_bonus_adjusted` and `as_traded_share_count_adjusted` before either
+commit.
 
 ---
 
