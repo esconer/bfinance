@@ -155,6 +155,10 @@ PRICE_BASIS_SHARE_COUNT_ADJUSTED = "as_traded_share_count_adjusted"
 #: member because it is a *different promise* from :data:`PRICE_BASIS_SHARE_COUNT_ADJUSTED`: the
 #: one says bfinance applied the share-count factor over the whole action history, the other says
 #: the source applied splits and bonuses but NOT demergers and bfinance applied nothing further.
+#: The value is :attr:`bfinance.sources.model.Basis.SPLIT_BONUS_ADJUSTED`'s, and it is a literal
+#: here rather than an import because ``bfinance.sources`` is an opt-in package that this module
+#: must not pull in at import time. ``tests/test_basis_vocabulary.py`` asserts the two agree, and
+#: ``tests/test_ohlcv_price_sources.py`` asserts this equals ``price_provider.PRICE_BASIS``.
 PRICE_BASIS_VENDOR_SPLIT_ADJUSTED = "as_traded_split_bonus_adjusted"
 #: The synthetic path is not a price basis at all: Close and Volume are real Screener.in values and
 #: Open/High/Low are *derived* from Close (previous close open, +/-0.2% envelope). It is named as
@@ -2588,8 +2592,9 @@ class OHLCVEngine:
     def _first_sentence(reason: Optional[str]) -> str:
         """The leading sentence of a skip reason, with the registry's note taken back off it.
 
-        A basis skip reads ``"publishes only the split_adjusted basis, and the as_traded basis was
-        requested. <the row's whole note>"``. The note is measured evidence and it is worth
+        A basis skip reads ``"publishes only the as_traded_split_bonus_adjusted basis, and the
+        as_traded basis was requested. <the row's whole note>"``. The note is measured evidence and
+        it is worth
         carrying -- in ``bfinance_price_source_attempts``, where a machine reads it. It is not
         worth carrying twice, in a key documented as a sentence.
         """

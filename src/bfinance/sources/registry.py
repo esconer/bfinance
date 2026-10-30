@@ -252,7 +252,8 @@ class SourceSpec:
 #: every other row in this table defers its import to call time. The two rules are both real and
 #: both are named below; only one of them binds.
 UNWIRED_NOTE = (
-    "This row reserves the split_adjusted basis without naming a module this layer can load, and "
+    "This row reserves the as_traded_split_bonus_adjusted basis without naming a module this layer "
+    "can load, and "
     "it is registered but not wired on purpose. The vendor's adjusted price history is reachable "
     "only through bfinance.trendlyne, which is a leaf package, and two separate rules keep it "
     "that way. The one that BINDS is tests/test_sources_cascade.py::TestRegistrationWithoutImport, "
@@ -265,9 +266,9 @@ UNWIRED_NOTE = (
     "A wired row now sits beside this one and is ordered ahead of it: "
     "bfinance.sources.price_provider reads the same three routes with its own parser rather than "
     "importing the leaf, which is why it can be wired where this row cannot. So this row is a "
-    "second entry on the same basis, not the only one, and a split_adjusted request is answered "
-    "by that row whenever it can be. This one is reached only when it cannot, and reaching it "
-    "raises SourceUnavailableError naming this note -- loudly, never a None that a caller could "
+    "second entry on the same basis, not the only one, and a split/bonus-adjusted request is "
+    "answered by that row whenever it can be. This one is reached only when it cannot, and reaching "
+    "it raises SourceUnavailableError naming this note -- loudly, never a None that a caller could "
     "not distinguish from 'the source has no data'. Nothing about the basis has changed: the "
     "series is as_traded_split_bonus_adjusted and DEMERGER_APPLIED is False, so it must not be "
     "spliced with as-traded bars across a split or bonus date, and it must not be spliced with a "
@@ -570,7 +571,7 @@ def build_default() -> Registry:
         SourceSpec(
             name=TRENDLYNE_OHLC_PROVIDER,
             capabilities=("price_history",),
-            bases=(Basis.SPLIT_ADJUSTED,),
+            bases=(Basis.SPLIT_BONUS_ADJUSTED,),
             note=(
                 "Per-symbol daily OHLCV over the second vendor's three robots-ALLOWED routes: the "
                 "equity sitemap, the symbol's own page for its per-symbol token, and the "
@@ -595,15 +596,17 @@ def build_default() -> Registry:
                 "it. The 11 that match have no event inside the span, so 'matches the bhavcopy' is "
                 "what as-traded looks like when no corporate action falls in the window -- a "
                 "per-symbol match is not evidence of a shared basis. CONSEQUENCE FOR THIS TABLE: "
-                "the row is registered split_adjusted, and BASIS -- not position -- is what routes "
+                "the row is registered on the as_traded_split_bonus_adjusted basis, and BASIS -- "
+                "not position -- is what routes "
                 "a call, so an as_traded request skips it on basis and spends no request on it. "
                 "It is nevertheless declared FIRST (operator decision, 2026-10-13): the default "
                 "vendor, with the two NSE as-traded rows as the cascade behind it. That ordering is "
                 "safe precisely because of the measurement above -- moving the row up cannot make "
                 "an as-traded call land on a split-adjusted series, because the basis column "
                 "refuses it before the request is built. It also buys the only wired source on the "
-                "split_adjusted basis, which was already first for every request it can serve. What "
-                "it does not buy is speed on the default path: DEFAULT_PRICE_BASIS is as_traded, "
+                "as_traded_split_bonus_adjusted basis, which was already first for every request it "
+                "can serve. What it does not buy is speed on the default path: DEFAULT_PRICE_BASIS "
+                "is as_traded, "
                 "so Ticker.info() still reaches the bhavcopy, which downloads one archive file per "
                 "trading day (measured 2026-10-13: 184s for info(), against 3.5s for this row's "
                 "single-request path) -- a cost of the as-traded basis, not of this ordering. "
@@ -721,7 +724,7 @@ def build_default() -> Registry:
         SourceSpec(
             name="vendor-b-adjustments",
             capabilities=("price_history",),
-            bases=(Basis.SPLIT_ADJUSTED,),
+            bases=(Basis.SPLIT_BONUS_ADJUSTED,),
             note=(
                 UNWIRED_NOTE
                 + "\n\nCOLUMNS: the OHLCV five, declared from the reader this row names -- "

@@ -29,8 +29,9 @@ Two axes, and they are not interchangeable
 :class:`BasisAxis` keeps the two independent meanings apart, because collapsing them is the
 second-order version of the same mistake:
 
-* :attr:`BasisAxis.PRICE` — corporate-action adjustment. ``as_traded`` vs ``split_adjusted`` vs
-  ``dividend_adjusted``. Getting this wrong fabricates a price move.
+* :attr:`BasisAxis.PRICE` — corporate-action adjustment. ``as_traded`` vs
+  ``as_traded_split_bonus_adjusted`` vs ``dividend_adjusted``. Getting this wrong fabricates a price
+  move.
 * :attr:`BasisAxis.ACCOUNTING` — consolidated (group, with subsidiaries) vs standalone (the
   company alone). Getting this wrong does not move a price; it puts the wrong shareholders'
   funds in a balance sheet. The measured size of that error: MOTHERSON at Mar 2026, the same row
@@ -106,23 +107,36 @@ class Basis(str, Enum):
 
     Deliberately an :class:`~enum.Enum` and not a ``str`` field. A basis is the one thing in this
     layer that must never be spelled two ways, because the entire safety argument is
-    :meth:`comparable` doing an equality test — and ``"split_adjusted"`` and
-    ``"split-adjusted"`` do not compare equal, so a typo here would be a silently disabled
-    mismatch check rather than a visible error. :class:`Basis` inherits ``str`` so the values
-    still travel into a frame's ``attrs`` and a CSV without conversion.
+    :meth:`comparable` doing an equality test — and ``"as_traded_split_bonus_adjusted"`` and
+    ``"as-traded-split-bonus-adjusted"`` do not compare equal, so a typo here would be a silently
+    disabled mismatch check rather than a visible error. :class:`Basis` inherits ``str`` so the
+    values still travel into a frame's ``attrs`` and a CSV without conversion.
 
     An unknown basis is refused by :func:`basis_from` rather than accepted as a string, so a
     caller who invents a basis gets told, at the call, that this layer will not compare against
     it.
+
+    :attr:`SPLIT_BONUS_ADJUSTED` is the canonical spelling, and it is the value the price frames
+    actually carry (``market/ohlcv.py:158``). :attr:`SPLIT_ADJUSTED` is an **alias** of it — the
+    same value, so :class:`~enum.Enum` folds the two into one member. The alias exists because
+    callers and registry rows were written against the earlier name; it is not a second basis, and
+    ``Basis.SPLIT_ADJUSTED is Basis.SPLIT_BONUS_ADJUSTED`` is asserted in
+    ``tests/test_basis_vocabulary.py``.
     """
 
     #: No corporate-action adjustment. What printed on the tape.
     AS_TRADED = "as_traded"
-    #: Restated for splits and bonus issues across the window.
-    SPLIT_ADJUSTED = "split_adjusted"
-    #: Restated for dividends. Distinct from :attr:`SPLIT_ADJUSTED`: a dividend adjustment moves
-    #: every historical price and a split adjustment does not move the last one, so these are two
-    #: different numbers and are not interchangeable.
+    #: Restated for splits and bonus issues across the window. This is the canonical spelling: it
+    #: is the value the price frames actually carry (``market/ohlcv.py:158``), so a source that
+    #: declares it is declaring the basis a real frame will match.
+    SPLIT_BONUS_ADJUSTED = "as_traded_split_bonus_adjusted"
+    #: Alias of :attr:`SPLIT_BONUS_ADJUSTED`, kept because callers and registry rows were written
+    #: against the earlier name. The value is identical, so :class:`~enum.Enum` folds the two into
+    #: one member — this is not a second basis and nothing can declare it separately.
+    SPLIT_ADJUSTED = "as_traded_split_bonus_adjusted"
+    #: Restated for dividends. Distinct from :attr:`SPLIT_BONUS_ADJUSTED`: a dividend adjustment
+    #: moves every historical price and a split adjustment does not move the last one, so these
+    #: are two different numbers and are not interchangeable.
     DIVIDEND_ADJUSTED = "dividend_adjusted"
     #: Group accounts, subsidiaries included.
     CONSOLIDATED = "consolidated"
@@ -194,7 +208,7 @@ class Basis(str, Enum):
 #: instead of an obvious mistake.
 BASIS_AXIS: Dict[Basis, BasisAxis] = {
     Basis.AS_TRADED: BasisAxis.PRICE,
-    Basis.SPLIT_ADJUSTED: BasisAxis.PRICE,
+    Basis.SPLIT_BONUS_ADJUSTED: BasisAxis.PRICE,
     Basis.DIVIDEND_ADJUSTED: BasisAxis.PRICE,
     Basis.CONSOLIDATED: BasisAxis.ACCOUNTING,
     Basis.STANDALONE: BasisAxis.ACCOUNTING,

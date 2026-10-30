@@ -540,7 +540,7 @@ async def test_an_as_traded_request_never_calls_the_split_adjusted_source():
         "'never called' and 'called and rejected' are different diagnoses, and only the first one "
         "means the vendor did not pay for a request"
     )
-    assert "split_adjusted" in skip["reason"] and "as_traded" in skip["reason"], (
+    assert "as_traded_split_bonus_adjusted" in skip["reason"] and "as_traded" in skip["reason"], (
         f"the skip must name both bases so 'why is my data not from that vendor' is answerable "
         f"without reading the registry; got: {skip['reason']!r}"
     )
@@ -575,7 +575,7 @@ async def test_naming_two_sources_on_different_bases_is_refused_not_silently_ord
 
     message = str(exc.value)
     assert "do not overlap" in message
-    assert "as_traded" in message and "split_adjusted" in message
+    assert "as_traded" in message and "as_traded_split_bonus_adjusted" in message
     assert fetch.calls == [], "a refused request must cost no requests"
 
 
@@ -888,7 +888,7 @@ async def test_the_detail_sentence_names_what_failed_and_why():
     assert "nseindia.com refused the connection" in detail
     assert "DEGRADED" in detail
     assert TRENDLYNE in detail, "and a source that was passed over must be named as passed over"
-    assert "publishes only the split_adjusted basis" in detail
+    assert "publishes only the as_traded_split_bonus_adjusted basis" in detail
     assert "MEASURED BEFORE RANKED" not in detail, (
         "the registry note must stay in bfinance_price_source_attempts and not be pasted into a "
         "key documented as a sentence"
