@@ -2666,7 +2666,7 @@ class Ticker:
         """
         from bfinance.utils.downloader import DocumentDownloader
         concalls = self.concalls
-        if not concalls or index >= len(concalls):
+        if not concalls or index < 0 or index >= len(concalls):
             raise ValueError(f"No concall found at index {index} (total {len(concalls)} available).")
         call = concalls[index]
         if not call.audio_url:
@@ -2679,7 +2679,7 @@ class Ticker:
         """
         from bfinance.utils.downloader import DocumentDownloader
         concalls = self.concalls
-        if not concalls or index >= len(concalls):
+        if not concalls or index < 0 or index >= len(concalls):
             raise ValueError(f"No concall found at index {index} (total {len(concalls)} available).")
         call = concalls[index]
         if not call.transcript_url:
@@ -2692,7 +2692,7 @@ class Ticker:
         """
         from bfinance.utils.downloader import DocumentDownloader
         reports = self.annual_reports
-        if not reports or index >= len(reports):
+        if not reports or index < 0 or index >= len(reports):
             raise ValueError(f"No annual report found at index {index} (total {len(reports)} available).")
         rep = reports[index]
         url = rep.get("url")

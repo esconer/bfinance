@@ -145,17 +145,17 @@ class AIContextBuilder:
         # 2. Key Valuation & Financial Ratios
         if "valuation" in active:
             lines.append("\n## Current Valuation & Quality Metrics")
-            lines.append(f"- **Current Market Price (CMP)**: ₹{r.current_price:,.2f}" if r.current_price else "- **CMP**: N/A")
-            lines.append(f"- **Market Capitalization**: ₹{r.market_cap:,.2f} Cr" if r.market_cap else "- **Market Cap**: N/A")
+            lines.append(f"- **Current Market Price (CMP)**: ₹{r.current_price:,.2f}" if r.current_price is not None else "- **CMP**: N/A")
+            lines.append(f"- **Market Capitalization**: ₹{r.market_cap:,.2f} Cr" if r.market_cap is not None else "- **Market Cap**: N/A")
             # A metric the screener did not return is *absent*, not a blank line. These
             # four used to append "" as their else-branch and relied on a blanket
             # blank-stripping filter downstream to erase the hole; the filter is gone
             # (it also erased the blank line every table needs), so they are now guards.
-            if r.low_52w and r.high_52w:
+            if r.low_52w is not None and r.high_52w is not None:
                 lines.append(f"- **52-Week Range**: ₹{r.low_52w:,.2f} - ₹{r.high_52w:,.2f}")
-            if r.stock_pe and r.book_value:
+            if r.stock_pe is not None and r.book_value is not None:
                 lines.append(f"- **Stock P/E**: {r.stock_pe:.2f}x | **Book Value**: ₹{r.book_value:,.2f}")
-            if r.roce and r.roe:
+            if r.roce is not None and r.roe is not None:
                 lines.append(f"- **ROCE**: {r.roce:.2f}% | **ROE**: {r.roe:.2f}%")
             face_str = f"₹{r.face_value}" if r.face_value is not None else "N/A"
             if r.dividend_yield is not None:

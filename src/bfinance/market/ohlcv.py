@@ -254,7 +254,10 @@ def _select_symbol_rows(market: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return market.loc[column.astype(str).str.strip().str.upper().eq(symbol)]
 
 
-def _dividend_adjustment_factor(df: pd.DataFrame) -> pd.Series:
+def _dividend_adjustment_factor(
+    df: pd.DataFrame,
+    split_factor: Optional[pd.Series] = None,
+) -> pd.Series:
     """Cumulative DIVIDEND factor per bar, from the actions already merged into ``df``.
 
     factor(t) = product over dividends dated *after* t of (1 - D / prev_close).
@@ -267,20 +270,24 @@ def _dividend_adjustment_factor(df: pd.DataFrame) -> pd.Series:
       substituting a stale close from the end of the window would fabricate a factor -- so those
       dividends are left out and the omission is documented in the docstring of
       :meth:`OHLCVEngine.fetch_history` rather than papered over.
-    * **It is read from the AS-TRADED ``Close``.** The step is a ratio of two rupee amounts in the
-      same basis, (prev_close - D) / prev_close, so it is scale-invariant: NSE's unadjusted rupee
-      dividend against an as-traded prev_close gives the same number as yfinance's adjusted
-      dividend against its split-adjusted prev_close. Feeding an already-adjusted close back in
-      would double-count instead.
+    * **It is read from the AS-TRADED ``Close``** (or, when ``Close`` is already vendor
+      split-adjusted and ``split_factor`` is supplied, with ``D`` scaled into that same
+      split-adjusted basis). The step is a ratio of two rupee amounts in the same basis,
+      (prev_close - D) / prev_close, so it is scale-invariant: NSE's unadjusted rupee
+      dividend against an as-traded prev_close gives the same number as a split-adjusted
+      dividend against a split-adjusted prev_close.
     """
     factor = pd.Series(1.0, index=df.index)
     dividends = df.get("Dividends")
     if dividends is None or float(dividends.abs().sum()) == 0:
         return factor
+    div_series = dividends.astype(float)
+    if split_factor is not None:
+        div_series = div_series * split_factor.reindex(df.index).fillna(1.0).astype(float)
     close = df["Close"].astype(float)
     prev_close = close.shift(1)
     prev_close = prev_close.where(prev_close > 0, close)
-    step = 1.0 - dividends.astype(float) / prev_close
+    step = 1.0 - div_series / prev_close
     return (factor * step.where(step > 0, 1.0))[::-1].cumprod()[::-1].shift(-1).fillna(1.0)
 
 
@@ -1743,6 +1750,8 @@ class OHLCVEngine:
         # If start date provided, calculate days from today
         if start:
             start_dt = pd.to_datetime(start)
+            if getattr(start_dt, "tzinfo", None) is not None:
+                start_dt = start_dt.tz_convert(IST).tz_localize(None)
             now_dt = pd.to_datetime(datetime.now())
             delta_days = (now_dt - start_dt).days + 10
             days = max(days, delta_days)
@@ -1985,9 +1994,15 @@ class OHLCVEngine:
         split_source = df.get("Stock Splits") if synthetic else splits_history
         if vendor_adjusted:
             split_factor = pd.Series(1.0, index=df.index)
+            dividend_split_factor = (
+                _split_adjustment_factor(df.index, split_source)
+                if actions_source == ACTIONS_SOURCE_NSE
+                else None
+            )
         else:
             split_factor = _split_adjustment_factor(df.index, split_source)
-        dividend_factor = _dividend_adjustment_factor(df)
+            dividend_split_factor = None
+        dividend_factor = _dividend_adjustment_factor(df, split_factor=dividend_split_factor)
         # Still built on the approximation's dividend factor, and deliberately: 'Adj Close' is
         # dropped from the column set on this path (auto_adjust=True), so this value is never
         # returned, and building it honestly is what keeps the guard on the ratio below the ONLY

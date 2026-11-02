@@ -351,7 +351,7 @@ class QuoteEngine:
             except Exception:
                 pass
         _float = int(shares_out * (1 - _prom / 100)) if (shares_out and _prom is not None) else None
-        _held_ins = (_prom / 100.0) if _prom else None
+        _held_ins = (_prom / 100.0) if _prom is not None else None
 
         # Last volume from already-fetched history (no extra fan-out).
         _last_vol: Optional[int] = None

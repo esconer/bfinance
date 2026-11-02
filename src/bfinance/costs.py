@@ -1710,17 +1710,14 @@ def bundled_schedule(*, refresh: bool = False,
     how the negative controls mutate a transcribed rate and watch the bps move.
     """
     global _BUNDLED
-    if stt_text is not None or exchange_text is not None or refresh:
+    if stt_text is not None or exchange_text is not None:
         if not stt_text or not exchange_text:
             raise ValueError(
                 "bundled_schedule(stt_text=..., exchange_text=...) needs BOTH texts; a partial "
                 "override would silently reuse the other circular from the fixture."
             )
-        schedule = schedule_from_circulars(stt_text, exchange_text)
-        if stt_text is None and exchange_text is None:
-            _BUNDLED = schedule
-        return schedule
-    if _BUNDLED is None:
+        return schedule_from_circulars(stt_text, exchange_text)
+    if _BUNDLED is None or refresh:
         stt_text = os.environ.get("BFINANCE_COSTS_STT_TEXT") or _fixture_text(_DEFAULT_STT_PATH)
         exchange_text = (
             os.environ.get("BFINANCE_COSTS_EXCHANGE_TEXT")

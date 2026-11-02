@@ -81,7 +81,7 @@ class BFinanceAITools:
         ]
 
     @classmethod
-    def execute_tool(cls, name: str, arguments: Dict[str, Any]) -> Any:
+    def execute_tool(cls, name: str, arguments: Dict[str, Any]) -> str:
         """
         Execute an AI tool call and return serialized string output.
         """
@@ -102,7 +102,7 @@ class BFinanceAITools:
                 except ValueError:
                     raise
                 except Exception as exc:
-                    return {"error": str(exc)}
+                    return json.dumps({"error": str(exc)})
 
             elif name == "run_institutional_screen":
                 screen_name = arguments.get("screen_name", "coffee_can")
@@ -113,20 +113,20 @@ class BFinanceAITools:
                     raise ValueError("max_stocks must be between 1 and 500")
                 screen_obj = getattr(screens, screen_name, None)
                 if not screen_obj:
-                    return {"error": f"Screen '{screen_name}' not found."}
+                    return json.dumps({"error": f"Screen '{screen_name}' not found."})
                 try:
                     df = screen_obj.run(max_stocks=max_stocks)
                 except Exception as exc:
-                    return {"error": str(exc)}
+                    return json.dumps({"error": str(exc)})
                 try:
                     return df.to_markdown(index=False)
                 except ImportError:
                     return f"```\n{df.to_string(index=False)}\n```"
                 except Exception as exc:
-                    return {"error": str(exc)}
+                    return json.dumps({"error": str(exc)})
 
-            return {"error": f"Unknown tool function '{name}'."}
+            return json.dumps({"error": f"Unknown tool function '{name}'."})
         except ValueError:
             raise
         except Exception as exc:
-            return {"error": str(exc)}
+            return json.dumps({"error": str(exc)})

@@ -257,7 +257,7 @@ class FinancialStatement(BaseModel):
         df = df.rename(index=INDIAN_TO_YFINANCE_LABELS)
         dates, keep, dropped = [], [], []
         for col in df.columns:
-            if col in NON_DATE_PERIOD_HEADERS:
+            if str(col).strip().upper() in {h.upper() for h in NON_DATE_PERIOD_HEADERS}:
                 # Named, so the drop is a decision this function makes on purpose. Any other
                 # unparseable header is still skipped, but only the recognised non-periods
                 # are reported -- see the attrs block below.

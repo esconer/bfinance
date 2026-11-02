@@ -100,8 +100,6 @@ class Screen:
         authoritative per-key unit table -- this is a summary, not the contract.
         """
         symbols = universe or DEFAULT_UNIVERSE
-        if max_stocks:
-            symbols = symbols[:max_stocks]
 
         matches = []
         for sym in symbols:
@@ -128,6 +126,8 @@ class Screen:
                         "DivYield_%": r.get("dividendYield"),
                         "BookValue": r.get("bookValue"),
                     })
+                    if max_stocks is not None and len(matches) >= max_stocks:
+                        break
             except Exception as e:
                 logger.warning("Screen %s: skipping %s (%s)", self.name, sym, e)
                 continue

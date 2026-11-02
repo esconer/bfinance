@@ -294,7 +294,10 @@ def nse_bhavcopy_range(entry: Any, request: Mapping[str, Any]) -> Any:
     note too, because a row that implied per-symbol granularity would send a caller looking for a
     filter this layer does not have.
     """
-    given = _require(request, "start", "end")
+    given = dict(_require(request, "start", "end"))
+    for optional in ("series", "exchange", "on_missing", "progress"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
     return _resolved(entry(**given))
 
 
@@ -306,7 +309,9 @@ def marketlens_history(entry: Any, request: Mapping[str, Any]) -> Any:
     defaults on the vendor side, and forwarding ``None`` for it would not be the same request as
     omitting it.
     """
-    given = _require(request, "symbol")
+    given = dict(_require(request, "symbol"))
+    if request.get("period") is not None:
+        given["period"] = request["period"]
     return _resolved(entry(**given))
 
 
@@ -355,7 +360,10 @@ def screener_chart_history(entry: Any, request: Mapping[str, Any]) -> Any:
             f"reader, so this layer cannot read a series from it. Point the registry entry at the "
             f"method that does exist rather than guessing at one."
         )
-    given = _require(request, "ticker")
+    given = dict(_require(request, "ticker"))
+    for optional in ("metric", "days", "force_refresh"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
     return _resolved(reader(**given))
 
 
@@ -389,7 +397,11 @@ def participant_flows(entry: Any, request: Mapping[str, Any]) -> Any:
     Both dates are required: a range with an open end is a different question, and defaulting one
     would silently change which days are covered.
     """
-    return _resolved(entry(**_require(request, "start", "end")))
+    given = dict(_require(request, "start", "end"))
+    for optional in ("measure", "on_missing"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.amfi_aum")
@@ -401,7 +413,10 @@ def amfi_aum(entry: Any, request: Mapping[str, Any]) -> Any:
     :func:`bfinance.flows.amfi_workbook_coverage`, which is a separate call and not something this
     adapter guesses at.
     """
-    return _resolved(entry(**_require(request, "workbook_url")))
+    given = dict(_require(request, "workbook_url"))
+    if request.get("month") is not None:
+        given["month"] = request["month"]
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.universe_constituents")
@@ -443,9 +458,11 @@ def costs_quote(entry: Any, request: Mapping[str, Any]) -> Any:
     defaulted: a date-keyed schedule asked for a rate with no date would return today's regime,
     which is a wrong number wearing a correct-looking unit — a 2019 trade charged at 2026 rates.
     """
-    return _resolved(
-        entry(**_require(request, "buy_shape", "sell_shape", "trade_date", "buy_amount"))
-    )
+    given = dict(_require(request, "buy_shape", "sell_shape", "trade_date", "buy_amount"))
+    for optional in ("sell_amount", "premium", "buy_premium", "sell_premium", "brokerage_pct", "schedule"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.ownership_read")

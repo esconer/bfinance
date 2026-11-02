@@ -482,7 +482,8 @@ def corporate_actions_url(
 def _to_float(text: Optional[str]) -> Optional[float]:
     if text is None:
         return None
-    cleaned = str(text).replace(",", "").replace("/-", "").replace("-", "", 0).strip()
+    cleaned = re.sub(r"^(?:rs|re|inr|₹)\.?\s*", "", str(text).strip(), flags=re.IGNORECASE)
+    cleaned = cleaned.replace(",", "").replace("/-", "").strip()
     if not cleaned or cleaned == ABSENT:
         return None
     try:
@@ -527,6 +528,9 @@ def dividend_amounts(subject: str) -> List[str]:
     for match in _DIVIDEND_AMOUNT_RE.finditer(subject):
         prefix = subject[: match.start()]
         if _RESTRUCTURING_LEADIN_RE.search(prefix) or _NON_DIVIDEND_LEADIN_RE.search(prefix):
+            continue
+        clause_breaks = list(_DIVIDEND_CLAUSE_BREAK_RE.finditer(prefix))
+        if clause_breaks and not _DIVIDEND_NOUN_RE.search(prefix[clause_breaks[-1].end():]):
             continue
         if _AMBIGUOUS_AMOUNT_TAIL_RE.match(subject, match.end()):
             continue
@@ -1177,6 +1181,7 @@ class CorporateActionsClient:
         self.prime_cookie_on_block = prime_cookie_on_block
         self._last_request_time = 0.0
         self._cookie_primed = False
+        self._cookies = httpx.Cookies()
         #: Set when a blocked response forced a landing-page prime, so a caller can see the retry
         #: path actually ran rather than assuming it was needed.
         self.primed_cookie = False
@@ -1229,7 +1234,11 @@ class CorporateActionsClient:
         if not self.prime_cookie_on_block or self._cookie_primed:
             return
         try:
-            await client.get(LANDING_URL, headers=self._headers(ajax=False))
+            resp = await client.get(LANDING_URL, headers=self._headers(ajax=False))
+            if hasattr(resp, "cookies") and resp.cookies:
+                self._cookies.update(resp.cookies)
+            if hasattr(client, "cookies") and client.cookies:
+                self._cookies.update(client.cookies)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             logger.debug("corporate actions: cookie priming failed (%s); continuing.", exc)
         self._cookie_primed = True
@@ -1318,6 +1327,8 @@ class CorporateActionsClient:
         async with httpx.AsyncClient(
             timeout=self.timeout, proxy=self.proxy, follow_redirects=True
         ) as client:
+            if self._cookies and hasattr(client, "cookies"):
+                client.cookies.update(self._cookies)
             payload = await self._get_json(client, url)
         return parse_corporate_actions(payload, symbol=clean_symbol, url=url), url
 

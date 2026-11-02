@@ -271,7 +271,7 @@ def _headers() -> Dict[str, str]:
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
     }
 
 
@@ -660,10 +660,17 @@ async def fetch_fundamentals_json(
 
 
 def fetch_fundamentals_json_sync(symbol: str, **kwargs: Any) -> Any:
-    """Blocking wrapper over :func:`fetch_fundamentals_json`.
+    """Blocking wrapper over :func:`fetch_fundamentals_json`, safe inside running event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
 
-    One ``asyncio.run`` per call, matching the sync/async split the rest of this package uses.
-    Never call this from inside a running loop -- that is what ``asyncio.run`` raises for, and a
-    nested loop would be a caller bug, not a fallback to swallow.
-    """
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(
+                lambda: asyncio.run(fetch_fundamentals_json(symbol, **kwargs))
+            ).result()
     return asyncio.run(fetch_fundamentals_json(symbol, **kwargs))

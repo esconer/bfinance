@@ -26,31 +26,31 @@ def parse_indian_number(text: Optional[Union[str, int, float]]) -> Optional[floa
     if not cleaned or cleaned in ("-", "--", "None", "null", "N/A", "NA", ""):
         return None
 
-    # Handle parenthesized negative numbers e.g. (1,234) -> -1234
     is_negative = False
-    if cleaned.startswith("(") and cleaned.endswith(")"):
-        is_negative = True
-        cleaned = cleaned[1:-1].strip()
-    elif cleaned.startswith("-"):
-        is_negative = True
-        cleaned = cleaned[1:].strip()
+    changed = True
+    while changed and cleaned:
+        changed = False
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            is_negative = True
+            cleaned = cleaned[1:-1].strip()
+            changed = True
+        elif cleaned.startswith("-"):
+            is_negative = True
+            cleaned = cleaned[1:].strip()
+            changed = True
+        elif cleaned.startswith("+"):
+            cleaned = cleaned[1:].strip()
+            changed = True
+        for token in ("₹", "Rs.", "Rs", "INR", "Cr.", "Cr", "Lakh", "L", "%", ","):
+            if token in cleaned:
+                cleaned = cleaned.replace(token, "").strip()
+                changed = True
 
-    # Remove currency, units, commas, %
-    cleaned = (
-        cleaned.replace("₹", "")
-        .replace("Rs.", "")
-        .replace("Rs", "")
-        .replace("Cr.", "")
-        .replace("Cr", "")
-        .replace("Lakh", "")
-        .replace("L", "")
-        .replace("%", "")
-        .replace(",", "")
-        .strip()
-    )
+    if not cleaned:
+        return None
 
     try:
-        val = float(cleaned)
+        val = abs(float(cleaned))
         return -val if is_negative else val
     except ValueError:
         return None

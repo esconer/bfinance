@@ -1863,7 +1863,8 @@ class MutualFundClient:
     construction default, so no payload's age is an accident of how the cache was constructed.
 
     Freshness is published rather than inferred — ``attrs["bfinance_cache"]`` is ``"hit"`` or
-    ``"miss"``, with ``bfinance_fetched_utc`` and ``bfinance_age_seconds`` beside it.
+    ``"miss"``, with ``bfinance_fetched_utc``, ``bfinance_cache_key`` and
+    ``bfinance_cache_ttl_hours`` beside it.
 
     Args:
         transport: A :data:`Transport`; defaults to a real ``httpx`` GET.

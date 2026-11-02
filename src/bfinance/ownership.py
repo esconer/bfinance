@@ -756,11 +756,11 @@ def parse_shareholding(
             undated.append(str(as_of_raw))
         for key in ("submissionDate", "revisedDate", "revisionDate"):
             raw = row.get(key)
-            if raw is not None and normalise_upstream_date(raw) is None:
+            if _clean_text(raw) is not None and normalise_upstream_date(raw) is None:
                 unparsed.append(f"{key}={raw!r}")
         for key in ("broadcastDate", "systemDate"):
             raw = row.get(key)
-            if raw is not None and normalise_upstream_date(raw, with_clock=True) is None:
+            if _clean_text(raw) is not None and normalise_upstream_date(raw, with_clock=True) is None:
                 unparsed.append(f"{key}={raw!r}")
 
         lag_raw = row.get("timeDifference")
@@ -1557,6 +1557,7 @@ class OwnershipClient:
         self.prime_cookie_on_block = prime_cookie_on_block
         self._last_request_time = 0.0
         self._cookie_primed = False
+        self._cookies = httpx.Cookies()
         #: True when a blocked response forced a landing-page prime, so a caller can see the
         #: retry path ran rather than assuming it was needed.
         self.primed_cookie = False
@@ -1615,7 +1616,11 @@ class OwnershipClient:
         if not self.prime_cookie_on_block or self._cookie_primed:
             return
         try:
-            await client.get(LANDING_URL, headers=self._headers(ajax=False))
+            resp = await client.get(LANDING_URL, headers=self._headers(ajax=False))
+            if hasattr(resp, "cookies") and resp.cookies:
+                self._cookies.update(resp.cookies)
+            if hasattr(client, "cookies") and client.cookies:
+                self._cookies.update(client.cookies)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             logger.debug("ownership: cookie priming failed (%s); continuing.", exc)
         self._cookie_primed = True
@@ -1742,6 +1747,8 @@ class OwnershipClient:
         async with httpx.AsyncClient(
             timeout=self.timeout, proxy=self.proxy, follow_redirects=True
         ) as client:
+            if self._cookies and hasattr(client, "cookies"):
+                client.cookies.update(self._cookies)
             payload = await self._get_json(client, url)
         self._cache_write(key, "shareholding", payload)
         frame = parse_shareholding(payload, symbol=symbol, url=url)
@@ -1794,6 +1801,8 @@ class OwnershipClient:
         async with httpx.AsyncClient(
             timeout=self.timeout, proxy=self.proxy, follow_redirects=True
         ) as client:
+            if self._cookies and hasattr(client, "cookies"):
+                client.cookies.update(self._cookies)
             payload = await self._get_json(client, url)
         self._cache_write(key, "deals", payload)
         frame = parse_deals(payload, url=url, kinds=kinds, expected_date=expected_date)
@@ -1839,6 +1848,8 @@ class OwnershipClient:
         async with httpx.AsyncClient(
             timeout=self.timeout, proxy=self.proxy, follow_redirects=True
         ) as client:
+            if self._cookies and hasattr(client, "cookies"):
+                client.cookies.update(self._cookies)
             payload = await self._get_json(client, url)
         self._cache_write(key, "pledge", payload)
         return probe_pledge_payload(payload, url=url, http_status=200, cache_status="miss")

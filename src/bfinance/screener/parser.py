@@ -289,9 +289,11 @@ class ScreenerHTMLParser:
                 elif "BSE" in text and re.search(r"\d{6}", text):
                     bse_code = re.search(r"\d{6}", text).group(0)
             elif "nseindia.com" in href:
-                match = re.search(r"symbol=([A-Z0-9\-]+)", href)
+                from urllib.parse import unquote
+
+                match = re.search(r"symbol=([A-Z0-9\-&%]+)", unquote(href), re.IGNORECASE)
                 if match:
-                    nse_symbol = match.group(1)
+                    nse_symbol = match.group(1).upper()
             elif (
                 href.startswith("http")
                 and "screener.in" not in href
@@ -497,9 +499,17 @@ class ScreenerHTMLParser:
             "li",
             [ul for block in doc_sec.find_all(id="concalls") for ul in block.find_all("ul")],
         )
+        _MONTH_RE = (
+            r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+            r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        )
         for li in concall_items:
             title_text = li.get_text(" ", strip=True)
-            date_match = re.search(r"(\w+\s+\d{4}|\d{1,2}\s+\w+\s+\d{4})", title_text)
+            date_match = re.search(
+                rf"(\d{{1,2}}\s+{_MONTH_RE}\s+\d{{4}}|{_MONTH_RE}\s+\d{{4}})",
+                title_text,
+                re.IGNORECASE,
+            )
             date_str = date_match.group(1) if date_match else ""
 
             transcript_url = None
@@ -650,7 +660,9 @@ class ScreenerHTMLParser:
             symbol = None
             link = tr.find("a")
             if link and link.get("href"):
-                href_match = re.search(r"/company/([A-Z0-9\-]+)/", link.get("href"))
+                from urllib.parse import unquote
+
+                href_match = re.search(r"/company/([A-Z0-9\-&]+)/", unquote(link.get("href")))
                 if href_match:
                     symbol = href_match.group(1)
 

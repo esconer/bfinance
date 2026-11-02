@@ -821,7 +821,13 @@ class PriceProvider:
                 f"returns a series or raises; it does not quietly return nothing."
             )
         index = await self.symbol_index_async()
-        record = index.get(symbol)
+        clean_symbol = str(symbol or "").strip().upper()
+        for suffix in (".NS", ".NSE", ".BO", ".BSE"):
+            if clean_symbol.endswith(suffix):
+                clean_symbol = clean_symbol[: -len(suffix)].strip()
+                break
+        lookup_symbol = clean_symbol if clean_symbol in index else symbol
+        record = index.get(lookup_symbol)
         if record is None:
             raise TickerNotFoundError(
                 f"{symbol!r} is not in the equity sitemap, which holds {len(index)} entries. ETFs "
@@ -830,7 +836,7 @@ class PriceProvider:
                 f"ordinary equity is one of the two."
             )
         stock_id, slug = record
-        page_path = build_stock_page_path(stock_id, symbol, slug)
+        page_path = build_stock_page_path(stock_id, lookup_symbol, slug)
         page_url = self._absolute(page_path)
         retrieved_at = datetime.now(timezone.utc)
         token = await self._token_async(stock_id, page_path, force_refresh=False)

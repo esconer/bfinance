@@ -307,9 +307,10 @@ class MarketLensClient:
 
         raw_dates = frame["date"].astype(str)
         if period == INTRADAY_PERIOD:
-            index = pd.to_datetime(raw_dates.astype("int64"), unit="ms", utc=True).dt.tz_convert(IST)
+            numeric_ts = pd.to_numeric(raw_dates, errors="coerce")
+            index = pd.to_datetime(numeric_ts, unit="ms", utc=True, errors="coerce").dt.tz_convert(IST)
         else:
-            index = pd.to_datetime(raw_dates, format="%Y-%m-%d")
+            index = pd.to_datetime(raw_dates, format="%Y-%m-%d", errors="coerce")
 
         if index.isna().any():
             raise UpstreamServiceError(
@@ -433,11 +434,13 @@ class MarketLensClient:
         Note: an equities-only index appears to back this endpoint — ``q=nifty`` returned zero
         results on 2026-09-26 despite NIFTYBEES existing.
         """
+        from urllib.parse import quote
+
         clean = (query or "").strip()
         if not clean:
             raise ValueError("query must be a non-empty string")
         url = f"{self.BASE_URL}/api/search"
-        payload = await self._get_json(f"{url}?q={clean}")
+        payload = await self._get_json(f"{url}?q={quote(clean, safe='')}")
         rows = payload.get("data") or []
         if not rows:
             return pd.DataFrame(columns=["ticker", "name", "description", "matchScore", "marketCap"])

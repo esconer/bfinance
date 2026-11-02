@@ -373,13 +373,39 @@ class CorporateActionsEngine:
             return keys
 
         df_keys = _date_keys(df.index)
+        unique_keys = df_keys.unique().sort_values()
+        key_set = set(unique_keys)
+        first_key = unique_keys[0]
+        last_key = unique_keys[-1]
+
+        def _resolve_bar_key(k: pd.Timestamp) -> Optional[pd.Timestamp]:
+            if k in key_set:
+                return k
+            if first_key <= k <= last_key:
+                pos = int(unique_keys.searchsorted(k, side="right")) - 1
+                if pos >= 0:
+                    return unique_keys[pos]
+            return None
+
         for col, series in (("Dividends", dividends), ("Stock Splits", splits)):
             if series is None or series.empty:
                 continue
             s = series.dropna()
             if s.empty:
                 continue
-            action_map = dict(zip(_date_keys(s.index), s.values))
+            action_map: Dict[pd.Timestamp, float] = {}
+            for k, raw_val in zip(_date_keys(s.index), s.values):
+                val = float(raw_val)
+                if val == 0.0 or pd.isna(val):
+                    continue
+                target = _resolve_bar_key(k)
+                if target is None:
+                    continue
+                if col == "Stock Splits":
+                    prev = action_map.get(target, 0.0)
+                    action_map[target] = val if prev == 0.0 else prev * val
+                else:
+                    action_map[target] = action_map.get(target, 0.0) + val
             df[col] = [float(action_map.get(k, 0.0)) for k in df_keys]
         return df
 

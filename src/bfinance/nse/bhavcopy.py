@@ -1477,6 +1477,7 @@ class BhavcopyClient:
         combined = combined[list(COLUMNS)]
         combined.attrs.update(merged_attrs)
         combined.attrs[SYNTHETIC_OHLC_ATTR] = False
+        combined.attrs[TURNOVER_UNIT_ATTR] = measure_turnover_unit(combined)
         combined.attrs["bfinance_symbol_count"] = int(
             combined.index.get_level_values("Symbol").nunique()
         )
