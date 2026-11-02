@@ -382,8 +382,8 @@ class CorporateActionsEngine:
             if k in key_set:
                 return k
             if first_key <= k <= last_key:
-                pos = int(unique_keys.searchsorted(k, side="right")) - 1
-                if pos >= 0:
+                pos = int(unique_keys.searchsorted(k, side="left"))
+                if pos < len(unique_keys):
                     return unique_keys[pos]
             return None
 

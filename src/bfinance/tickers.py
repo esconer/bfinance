@@ -55,6 +55,33 @@ class Tickers:
         else:
             self.symbols = [str(t).strip() for t in tickers if str(t).strip()]
 
+        import inspect
+        from bfinance.cache.sqlite_cache import SQLiteCache
+        from bfinance.screener.client import ScreenerClient
+
+        accepts_seam = False
+        try:
+            inspect.signature(Ticker).bind("", cache=None, screener_client=None)
+            accepts_seam = True
+        except (TypeError, ValueError):
+            accepts_seam = False
+
+        shared_cache = (
+            SQLiteCache(default_ttl_hours=cache_ttl_hours)
+            if (accepts_seam and session is None and cache_ttl_hours > 0)
+            else None
+        )
+        shared_screener = (
+            ScreenerClient(
+                timeout=timeout,
+                cache_ttl_hours=cache_ttl_hours,
+                proxy=proxy,
+                cache=shared_cache,
+            )
+            if (accepts_seam and session is None)
+            else None
+        )
+
         # Keyword-passed because only ``ticker`` is positional on
         # :class:`~bfinance.ticker.Ticker`: ``session`` is the second positional and every
         # parameter after it is keyword-only.
@@ -67,6 +94,11 @@ class Tickers:
                 session=session,
                 statement_fallback=statement_fallback,
                 trendlyne_sections=trendlyne_sections,
+                **(
+                    {"cache": shared_cache, "screener_client": shared_screener}
+                    if accepts_seam and session is None
+                    else {}
+                ),
             )
             for sym in self.symbols
         }

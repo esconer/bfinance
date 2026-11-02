@@ -101,10 +101,35 @@ class Screen:
         """
         symbols = universe or DEFAULT_UNIVERSE
 
+        import inspect
+        from bfinance.cache.sqlite_cache import SQLiteCache
+        from bfinance.market.quotes import QuoteEngine
+        from bfinance.screener.client import ScreenerClient
+
+        accepts_seam = False
+        try:
+            inspect.signature(Ticker).bind("", cache=None, screener_client=None)
+            accepts_seam = True
+        except (TypeError, ValueError):
+            accepts_seam = False
+
+        shared_cache = SQLiteCache() if accepts_seam else None
+        shared_screener = ScreenerClient(cache=shared_cache) if accepts_seam else None
+
         matches = []
         for sym in symbols:
             try:
-                ticker = Ticker(sym)
+                if accepts_seam:
+                    ticker = Ticker(sym, cache=shared_cache, screener_client=shared_screener)
+                else:
+                    ticker = Ticker(sym)
+                if hasattr(ticker, "_ensure_profile") and getattr(ticker, "_info", None) is None:
+                    profile = ticker._ensure_profile()
+                    ticker._info = QuoteEngine.build_info_dict(
+                        profile,
+                        latest_price=profile.ratios.current_price,
+                        history=None,
+                    )
                 if self.filter_fn(ticker):
                     r = ticker.info
                     matches.append({
@@ -137,6 +162,8 @@ class Screen:
 
         df = pd.DataFrame(matches)
         df.sort_values(by="MarketCap_Cr", ascending=False, inplace=True)
+        if max_stocks is not None:
+            df = df.head(max_stocks)
         df.reset_index(drop=True, inplace=True)
         return df
 

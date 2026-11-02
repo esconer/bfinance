@@ -153,10 +153,20 @@ class AIContextBuilder:
             # (it also erased the blank line every table needs), so they are now guards.
             if r.low_52w is not None and r.high_52w is not None:
                 lines.append(f"- **52-Week Range**: ₹{r.low_52w:,.2f} - ₹{r.high_52w:,.2f}")
-            if r.stock_pe is not None and r.book_value is not None:
-                lines.append(f"- **Stock P/E**: {r.stock_pe:.2f}x | **Book Value**: ₹{r.book_value:,.2f}")
-            if r.roce is not None and r.roe is not None:
-                lines.append(f"- **ROCE**: {r.roce:.2f}% | **ROE**: {r.roe:.2f}%")
+            pe_bv_parts = []
+            if r.stock_pe is not None:
+                pe_bv_parts.append(f"**Stock P/E**: {r.stock_pe:.2f}x")
+            if r.book_value is not None:
+                pe_bv_parts.append(f"**Book Value**: ₹{r.book_value:,.2f}")
+            if pe_bv_parts:
+                lines.append("- " + " | ".join(pe_bv_parts))
+            roce_roe_parts = []
+            if r.roce is not None:
+                roce_roe_parts.append(f"**ROCE**: {r.roce:.2f}%")
+            if r.roe is not None:
+                roce_roe_parts.append(f"**ROE**: {r.roe:.2f}%")
+            if roce_roe_parts:
+                lines.append("- " + " | ".join(roce_roe_parts))
             face_str = f"₹{r.face_value}" if r.face_value is not None else "N/A"
             if r.dividend_yield is not None:
                 lines.append(f"- **Dividend Yield**: {r.dividend_yield:.2f}% | **Face Value**: {face_str}")
