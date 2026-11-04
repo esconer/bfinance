@@ -291,7 +291,7 @@ class ScreenerHTMLParser:
             elif "nseindia.com" in href:
                 from urllib.parse import unquote
 
-                match = re.search(r"symbol=([A-Z0-9\-&%]+)", unquote(href), re.IGNORECASE)
+                match = re.search(r"symbol=([A-Z0-9\-&%.]+)", unquote(href), re.IGNORECASE)
                 if match:
                     nse_symbol = match.group(1).upper()
             elif (
@@ -637,7 +637,11 @@ class ScreenerHTMLParser:
         if not peers_html:
             return peers
 
-        soup = BeautifulSoup(peers_html, "html.parser")
+        soup = (
+            peers_html
+            if isinstance(peers_html, BeautifulSoup)
+            else BeautifulSoup(peers_html, "lxml")
+        )
         table = soup.find("table", class_="data-table")
         if not table:
             return peers
@@ -662,9 +666,9 @@ class ScreenerHTMLParser:
             if link and link.get("href"):
                 from urllib.parse import unquote
 
-                href_match = re.search(r"/company/([A-Z0-9\-&]+)/", unquote(link.get("href")))
+                href_match = re.search(r"/company/([A-Z0-9\-&.]+)/", unquote(link.get("href")), re.IGNORECASE)
                 if href_match:
-                    symbol = href_match.group(1)
+                    symbol = href_match.group(1).upper()
 
             peers.append(
                 PeerStock(
@@ -855,7 +859,8 @@ class ScreenerHTMLParser:
         if not html:
             return [], page_info
 
-        node = BeautifulSoup(html, "lxml").find(attrs={"data-page-info": True})
+        soup = BeautifulSoup(html, "lxml")
+        node = soup.find(attrs={"data-page-info": True})
         if node is not None:
             match = _PAGE_INFO_RE.search(node.get_text(" ", strip=True))
             if match:
@@ -863,4 +868,4 @@ class ScreenerHTMLParser:
                 if match.group("pages"):
                     page_info["page"] = int(match.group("page"))
                     page_info["pages"] = int(match.group("pages"))
-        return self._parse_peers(html), page_info
+        return self._parse_peers(soup), page_info

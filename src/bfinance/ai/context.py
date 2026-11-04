@@ -9,6 +9,7 @@ token-optimized, highly structured Markdown, JSON, and text representations for 
 # ``ruff check --select E9,F`` before this change.
 from typing import Any, Dict, List, Optional, Set
 import math
+import numbers
 import pandas as pd
 
 from bfinance.models.company import CompanyProfile
@@ -70,15 +71,14 @@ def _column_floatfmts(df: pd.DataFrame, show_index: bool) -> list[str]:
     fmts = [""] if show_index else []
     for pos in range(df.shape[1]):
         values = [
-            v
+            float(v)
             for v in df.iloc[:, pos]
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            if isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(float(v))
         ]
         if not any(abs(v) >= LARGE_VALUE_FLOOR for v in values):
             fmts.append("g")
             continue
-        small = [v for v in values if abs(v) < LARGE_VALUE_FLOOR]
-        decimals = 0 if all(float(v).is_integer() for v in small) else _MAX_SHARED_DECIMALS
+        decimals = 0 if all(float(v).is_integer() for v in values) else _MAX_SHARED_DECIMALS
         fmts.append(f",.{decimals}f")
     return fmts
 
@@ -207,16 +207,16 @@ class AIContextBuilder:
 
         # 7. Shareholding Pattern Trends
         if "shareholding" in active:
-            lines.append("\n## Institutional Shareholding Distribution (%)")
             df_sh = profile.shareholding.to_dataframe(orient="columns")
-            if not df_sh.empty:
-                lines.append("### Quarterly Trend (Recent Quarters)")
-                _add_table(lines, _safe_markdown(df_sh.iloc[:, -6:]))
-
             df_shy = profile.shareholding_yearly.to_dataframe(orient="columns")
-            if not df_shy.empty:
-                lines.append("\n### 10-Year Annual Trend")
-                _add_table(lines, _safe_markdown(df_shy.iloc[:, -6:]))
+            if not df_sh.empty or not df_shy.empty:
+                lines.append("\n## Institutional Shareholding Distribution (%)")
+                if not df_sh.empty:
+                    lines.append("### Quarterly Trend (Recent Quarters)")
+                    _add_table(lines, _safe_markdown(df_sh.iloc[:, -6:]))
+                if not df_shy.empty:
+                    lines.append("\n### 10-Year Annual Trend")
+                    _add_table(lines, _safe_markdown(df_shy.iloc[:, -max_years:]))
 
         # 8. Operating Ratios History
         if "ratios" in active and not profile.ratios_history.empty:
@@ -264,6 +264,27 @@ class AIContextBuilder:
             if not df_peers.empty:
                 peer_cols = [c for c in ["rank", "name", "cmp", "pe", "market_cap_cr", "roce", "dividend_yield"] if c in df_peers.columns]
                 _add_table(lines, _safe_markdown(df_peers[peer_cols].head(8), index=False))
+
+        # 13. Corporate Documents & Filings
+        if "documents" in active and (
+            profile.annual_reports or profile.credit_ratings or profile.announcements
+        ):
+            lines.append("\n## Corporate Filings & Documents")
+            if profile.annual_reports:
+                lines.append("### Annual Reports")
+                for doc in profile.annual_reports[:max_years]:
+                    yr = f" ({doc.year})" if getattr(doc, "year", None) else ""
+                    lines.append(f"- **{doc.title}**{yr}: {doc.url}")
+            if profile.credit_ratings:
+                lines.append("### Credit Ratings")
+                for doc in profile.credit_ratings[:5]:
+                    dt = f" ({doc.date})" if getattr(doc, "date", None) else ""
+                    lines.append(f"- **{doc.title}**{dt}: {doc.url}")
+            if profile.announcements:
+                lines.append("### Recent Corporate Announcements")
+                for doc in profile.announcements[:5]:
+                    dt = f" ({doc.date})" if getattr(doc, "date", None) else ""
+                    lines.append(f"- **{doc.title}**{dt}: {doc.url}")
 
         # Deliberately NOT filtered. The old line was
         #     "\n".join([line for line in lines if line.strip() != ""])
@@ -325,6 +346,7 @@ class AIContextBuilder:
             ("quarterly_pnl", profile.quarters),
             ("balance_sheet", profile.balance_sheet),
             ("cash_flow", profile.cash_flow),
+            ("ratios_history", profile.ratios_history),
             ("shareholding_quarterly", profile.shareholding),
             ("shareholding_yearly", profile.shareholding_yearly),
         ):

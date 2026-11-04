@@ -63,6 +63,7 @@ class DocumentDownloader:
         if proxy:
             client_kwargs["proxy"] = proxy
 
+        tmp_target = target.with_name(f".{target.name}.part")
         with httpx.Client(**client_kwargs) as client:
             opened_for_write = False
             try:
@@ -78,27 +79,29 @@ class DocumentDownloader:
                             raise ValueError("Download exceeds 200MB size limit.")
                     downloaded = 0
                     opened_for_write = True
-                    with open(target, "wb") as f:
+                    with open(tmp_target, "wb") as f:
                         for chunk in response.iter_bytes(chunk_size=65536):
                             downloaded += len(chunk)
                             if downloaded > cls.MAX_DOWNLOAD_BYTES:
                                 raise ValueError("Download exceeds 200MB size limit.")
                             f.write(chunk)
+                tmp_target.replace(target)
             except httpx.HTTPError as e:
                 if opened_for_write:
                     try:
-                        if target.is_file():
-                            target.unlink()
+                        if tmp_target.is_file():
+                            tmp_target.unlink()
                     except OSError:
                         pass
                 raise UpstreamServiceError(f"Download failed for '{url}': {e}") from e
             except ValueError:
                 if opened_for_write:
                     try:
-                        if target.is_file():
-                            target.unlink()
+                        if tmp_target.is_file():
+                            tmp_target.unlink()
                     except OSError:
                         pass
                 raise
 
         return str(target.resolve())
+

@@ -428,7 +428,11 @@ def universe_constituents(entry: Any, request: Mapping[str, Any]) -> Any:
     "here is a page, read it", and the fetching is the caller's. The registry note says so; a row
     that implied this source fetches would send someone looking for a client it does not have.
     """
-    return _resolved(entry(**_require(request, "text")))
+    given = dict(_require(request, "text"))
+    for optional in ("index", "url", "retrieved_utc"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
+    return _resolved(entry(**given))
 
 
 @_register("bfinance.sources.bindings.universe_archive")
@@ -486,7 +490,9 @@ def ownership_read(entry: Any, request: Mapping[str, Any]) -> Any:
                 f"an ownership client built from {type(client).__name__} has no deals reader; "
                 f"point the registry entry at the method that exists rather than guessing"
             )
-        given = _require(request, "expected_date")
+        given = dict(_require(request, "expected_date"))
+        if request.get("force_refresh") is not None:
+            given["force_refresh"] = request["force_refresh"]
         return _resolved(reader(kinds=[capability.removesuffix("_deals")], **given))
     reader = getattr(client, "shareholding_patterns", None)
     if reader is None:
@@ -494,4 +500,8 @@ def ownership_read(entry: Any, request: Mapping[str, Any]) -> Any:
             f"an ownership client built from {type(client).__name__} has no shareholding_patterns "
             f"reader; point the registry entry at the method that exists rather than guessing"
         )
-    return _resolved(reader(**_require(request, "symbol")))
+    given = dict(_require(request, "symbol"))
+    for optional in ("index", "force_refresh"):
+        if request.get(optional) is not None:
+            given[optional] = request[optional]
+    return _resolved(reader(**given))

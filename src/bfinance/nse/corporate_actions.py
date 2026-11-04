@@ -332,7 +332,7 @@ _NON_DIVIDEND_LEADIN_RE = re.compile(
 #: dividend, so the search for a per-share phrase stops at the first restructuring keyword.
 _DIVIDEND_CLAUSE_BREAK_RE = re.compile(
     r"(?:face\s*val|fv\s*s?plt|fv\s*split|stock\s*split|split|sub-?division|bonus|rights?|rht"
-    r"|buy\s*-?\s*back|warrant|debenture|ncrps|scheme|demerger|amalgam|premium)",
+    r"|buy\s*-?\s*back|warrant|debenture|ncrps|scheme|demerger|amalgam|premium|issue\s+price|at\s+par)",
     re.IGNORECASE,
 )
 #: Amounts that cannot be read cleanly, so no number is taken from them. Each is a real upstream

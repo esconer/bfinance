@@ -405,6 +405,7 @@ def _incomplete_adjustment(symbol: str, extra: Optional[dict]) -> Optional[dict]
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Resample daily bars to weekly (Monday-labeled) or monthly bars."""
+    saved_attrs = dict(df.attrs)
     if rule == "weekly":
         keys = df.index.normalize() - pd.to_timedelta(df.index.weekday, unit="D")
     else:
@@ -425,6 +426,8 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
             agg[col] = "sum"
         elif col == "Dividends":
             agg[col] = "sum"
+        elif col == "Stock Splits":
+            agg[col] = lambda s: float(s[s > 0].prod()) if (s > 0).any() else 0.0
         else:
             agg[col] = "max"
     out = df.groupby(keys).agg(agg)
@@ -432,6 +435,7 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     out.sort_index(inplace=True)
     if "Volume" in out.columns:
         out["Volume"] = out["Volume"].fillna(0).astype(np.int64)
+    out.attrs = saved_attrs
     return out
 
 
@@ -2172,13 +2176,25 @@ class OHLCVEngine:
         # Filter by start (inclusive) / end (exclusive) matching yfinance
         if start:
             start_ts = pd.to_datetime(start)
-            if df.index.tz is not None and start_ts.tzinfo is None:
-                start_ts = start_ts.tz_localize("Asia/Kolkata")
+            if df.index.tz is not None:
+                start_ts = (
+                    start_ts.tz_localize("Asia/Kolkata")
+                    if start_ts.tzinfo is None
+                    else start_ts.tz_convert(df.index.tz)
+                )
+            elif start_ts.tzinfo is not None:
+                start_ts = start_ts.tz_convert("Asia/Kolkata").tz_localize(None)
             df = df[df.index >= start_ts]
         if end:
             end_ts = pd.to_datetime(end)
-            if df.index.tz is not None and end_ts.tzinfo is None:
-                end_ts = end_ts.tz_localize("Asia/Kolkata")
+            if df.index.tz is not None:
+                end_ts = (
+                    end_ts.tz_localize("Asia/Kolkata")
+                    if end_ts.tzinfo is None
+                    else end_ts.tz_convert(df.index.tz)
+                )
+            elif end_ts.tzinfo is not None:
+                end_ts = end_ts.tz_convert("Asia/Kolkata").tz_localize(None)
             df = df[df.index < end_ts]
 
         if not keepna:
@@ -2331,7 +2347,11 @@ class OHLCVEngine:
         fetch = getattr(router, "fetch", None) if router is not None else None
 
         start_ts = self._window_start(start, days)
-        end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
+        if end is not None:
+            end_ts = pd.Timestamp(end)
+            end_ts = end_ts.tz_localize(IST) if end_ts.tzinfo is None else end_ts.tz_convert(IST)
+        else:
+            end_ts = pd.Timestamp.now(tz=IST)
         floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
         window_record = _window_truncation_record(start_ts, floor)
         if window_record["truncated"]:
@@ -2956,7 +2976,11 @@ class OHLCVEngine:
             )
 
         start_ts = self._window_start(start, days)
-        end_ts = pd.to_datetime(end) if end is not None else pd.Timestamp.now(tz=IST)
+        if end is not None:
+            end_ts = pd.Timestamp(end)
+            end_ts = end_ts.tz_localize(IST) if end_ts.tzinfo is None else end_ts.tz_convert(IST)
+        else:
+            end_ts = pd.Timestamp.now(tz=IST)
         floor = pd.Timestamp(BHAVCOPY_FIRST_DATE, tz=IST)
         window_record = _window_truncation_record(start_ts, floor)
         if window_record["truncated"]:

@@ -426,7 +426,9 @@ def _outermost_tables(soup: BeautifulSoup) -> List[Any]:
     return [t for t in soup.find_all("table") if t.find_parent("table") is None]
 
 
-def classify_html_tables(html: str) -> List[Optional[str]]:
+def classify_html_tables(
+    html: str, *, _tags: Optional[Sequence[Any]] = None
+) -> List[Optional[str]]:
     """Classify every outermost table on a trendlyne financials page, in document order.
 
     Header identification first, row id second, and the order is the whole point: the two P&L
@@ -438,8 +440,11 @@ def classify_html_tables(html: str) -> List[Optional[str]]:
     is then handed to :func:`_read_frame` for the values, because ``read_html`` keeps a cell's
     text and throws away its attributes — and the machine id is an attribute.
     """
-    soup = BeautifulSoup(html or "", "lxml")
-    tags = _outermost_tables(soup)
+    if _tags is not None:
+        tags = list(_tags)
+    else:
+        soup = BeautifulSoup(html or "", "lxml")
+        tags = _outermost_tables(soup)
     if not tags:
         return []
 
@@ -530,7 +535,7 @@ def parse_financials_html(
             f"/fundamentals/get-fundamental_results-v2/{{id}}/{{token}}/."
         )
 
-    classified = classify_html_tables(html)
+    classified = classify_html_tables(html, _tags=tags)
     matching = [index for index, name in enumerate(classified) if name == spec_name]
     if not matching:
         raise StatementTableError(

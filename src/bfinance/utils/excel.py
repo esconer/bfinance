@@ -25,8 +25,9 @@ class FinancialModelExcelExporter:
             raise ValueError("Excel export path must end with .xlsx.")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
+        tmp_path = target_path.with_name(f".{target_path.name}.part.xlsx")
         try:
-            with pd.ExcelWriter(str(target_path), engine="openpyxl") as writer:
+            with pd.ExcelWriter(str(tmp_path), engine="openpyxl") as writer:
                 # 1. Overview & Key Ratios
                 r = profile.ratios
                 overview_data = [
@@ -82,12 +83,14 @@ class FinancialModelExcelExporter:
                 peers_df = profile.peers_dataframe()
                 if not peers_df.empty:
                     peers_df.to_excel(writer, sheet_name="Peers", index=False)
+            tmp_path.replace(target_path)
         except Exception:
             try:
-                if target_path.is_file():
-                    target_path.unlink()
+                if tmp_path.is_file():
+                    tmp_path.unlink()
             except OSError:
                 pass
             raise
 
         return str(target_path.resolve())
+
