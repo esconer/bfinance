@@ -89,8 +89,9 @@ corrected rather than softened. Both facts ride on every frame, because a split/
 series is **not** interchangeable with the as-traded bhavcopy: a caller who splices the two across
 a split date gets a corporate-action-sized step that never happened, and a caller who splices them
 across a demerger date gets the opposite error, because there it is the *exchange* print that
-survives. The registry row's basis is :attr:`~bfinance.sources.model.Basis.SPLIT_ADJUSTED` for
-this reason and no other.
+survives. The registry row's basis is
+:attr:`~bfinance.sources.model.Basis.SPLIT_BONUS_ADJUSTED` for this reason and no other, and
+:data:`PRICE_BASIS` below is derived from that member rather than restating its string.
 
 A reader, not a client
 ----------------------
@@ -123,6 +124,8 @@ from bfinance.utils.exceptions import (
     TickerNotFoundError,
     UpstreamServiceError,
 )
+
+from .model import Basis
 
 __all__ = [
     "BASE_URL",
@@ -180,8 +183,9 @@ COLUMNS: Tuple[str, ...] = ("Open", "High", "Low", "Close", "Volume")
 
 #: As-traded, back-adjusted for splits and bonuses only, demergers NOT applied. It is a constant
 #: rather than a per-symbol derivation because one rule held on every symbol measured, and it is
-#: **not** ``yfinance_back_adjusted``.
-PRICE_BASIS = "as_traded_split_bonus_adjusted"
+#: **not** ``yfinance_back_adjusted``. Derived from the enum so this file cannot disagree with the
+#: registry about what the basis is called.
+PRICE_BASIS = Basis.SPLIT_BONUS_ADJUSTED.value
 
 #: Whether demerger adjustment is applied. ``False``, stated separately because it is the half of
 #: the basis a consumer is most likely to get backwards: on the demerger names it is the *exchange*

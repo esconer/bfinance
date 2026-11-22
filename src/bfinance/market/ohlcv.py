@@ -155,11 +155,23 @@ PRICE_BASIS_SHARE_COUNT_ADJUSTED = "as_traded_share_count_adjusted"
 #: member because it is a *different promise* from :data:`PRICE_BASIS_SHARE_COUNT_ADJUSTED`: the
 #: one says bfinance applied the share-count factor over the whole action history, the other says
 #: the source applied splits and bonuses but NOT demergers and bfinance applied nothing further.
+#: The value is :attr:`bfinance.sources.model.Basis.SPLIT_BONUS_ADJUSTED`'s, and it is a literal
+#: here rather than an import because ``bfinance.sources`` is an opt-in package that this module
+#: must not pull in at import time. ``tests/test_basis_vocabulary.py`` asserts the two agree, and
+#: ``tests/test_ohlcv_price_sources.py`` asserts this equals ``price_provider.PRICE_BASIS``.
 PRICE_BASIS_VENDOR_SPLIT_ADJUSTED = "as_traded_split_bonus_adjusted"
 #: The synthetic path is not a price basis at all: Close and Volume are real Screener.in values and
 #: Open/High/Low are *derived* from Close (previous close open, +/-0.2% envelope). It is named as
 #: what it is rather than dressed up as an as-traded series.
 PRICE_BASIS_SYNTHETIC = "screener_close_real_derived_ohlc_unadjusted"
+
+#: Basis values this module can stamp that are deliberately **not** in
+#: :class:`bfinance.sources.model.Basis`. ``PRICE_BASIS_SYNTHETIC`` is not an adjustment state --
+#: it records that Open, High and Low were *derived* from Close -- so registering it as a basis
+#: would let a source declare synthetic OHLC as a legitimate basis and defeat the purpose of
+#: naming it. Every other basis a frame can carry is a registered basis, and
+#: ``tests/test_basis_vocabulary.py`` enforces exactly that split.
+BASIS_VALUES_DELIBERATELY_OUTSIDE_THE_VOCABULARY = (PRICE_BASIS_SYNTHETIC,)
 
 # Key names a whole-market bhavcopy frame may carry the scrip identity under. The daily
 # file lists every NSE symbol, so a range fetch is sliced down to one symbol by these.
@@ -2623,8 +2635,9 @@ class OHLCVEngine:
     def _first_sentence(reason: Optional[str]) -> str:
         """The leading sentence of a skip reason, with the registry's note taken back off it.
 
-        A basis skip reads ``"publishes only the split_adjusted basis, and the as_traded basis was
-        requested. <the row's whole note>"``. The note is measured evidence and it is worth
+        A basis skip reads ``"publishes only the as_traded_split_bonus_adjusted basis, and the
+        as_traded basis was requested. <the row's whole note>"``. The note is measured evidence and
+        it is worth
         carrying -- in ``bfinance_price_source_attempts``, where a machine reads it. It is not
         worth carrying twice, in a key documented as a sentence.
         """

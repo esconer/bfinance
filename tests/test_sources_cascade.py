@@ -425,7 +425,7 @@ class TestBasisSeam:
         message = str(excinfo.value)
         assert "-50.00%" in message
         assert "as_traded" in message
-        assert "split_adjusted" in message
+        assert "as_traded_split_bonus_adjusted" in message
 
     def test_the_price_basis_column_is_what_routes_an_as_traded_request(self):
         """A basis-ineligible source is **never called**. Not called, then rejected — never called.
@@ -465,7 +465,7 @@ class TestBasisSeam:
         assert len(skipped) == 1
         assert skipped[0].outcome == SKIPPED_BASIS
         assert skipped[0].called is False
-        assert "split_adjusted" in skipped[0].reason
+        assert "as_traded_split_bonus_adjusted" in skipped[0].reason
         assert "as_traded" in skipped[0].reason
         assert "split-adjusted" not in result.render_attrs()["bfinance_statements_providers_tried"]
         assert "split-adjusted" in result.render_attrs()["bfinance_statements_skip_reasons"]
@@ -488,7 +488,7 @@ class TestBasisSeam:
             )
         assert calls == [], "a source that cannot serve the basis must not be called even once"
         message = str(excinfo.value)
-        assert "split_adjusted" in message
+        assert "as_traded_split_bonus_adjusted" in message
         assert "relax the request, not to retry" in message, (
             "the two refusals must differ in what they tell a caller to do next, or the "
             "distinction is decoration"
@@ -1260,7 +1260,7 @@ class TestRegistrationWithoutImport:
             load_provider(DEFAULT.source("vendor-b-adjustments"))
         message = str(excinfo.value)
         assert "not wired" in message
-        assert "split_adjusted" in message
+        assert "as_traded_split_bonus_adjusted" in message
         assert "is a leaf package" in message
         assert UNWIRED_NOTE.split(".")[0] in message
 
